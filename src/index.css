@@ -1,0 +1,139 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    /* Brand Trio: Orange, Light Green, Black */
+    --color-orange: #FF6B00;
+    --color-orange-hover: #E55E00;
+    --color-orange-light: #FFF4EC;
+    --color-orange-border: #FFD2B2;
+
+    --color-light-green: #9FE870;
+    --color-light-green-subtle: #F0FDF4;
+    --color-light-green-border: #C8F3A8;
+    --color-light-green-text: #14532D;
+
+    --color-black: #111111;
+    --color-black-soft: #18181B;
+    --color-muted: #71717A;
+    --color-border: #E4E4E7;
+    --color-bg: #FBFBFC;
+    --color-card: #FFFFFF;
+  }
+
+  *, *::before, *::after {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif !important;
+  }
+
+  html, body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif !important;
+    color: #111111;
+    background-color: #FBFBFC;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif !important;
+    font-weight: 700;
+  }
+
+  button, input, optgroup, select, textarea {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif !important;
+  }
+}
+
+/* Mixed Brand Buttons: Orange, Green & Black */
+
+/* 1. Primary Trio Button: Orange body + Black border + Green highlight */
+.btn-brand-primary {
+  background-color: #FF6B00;
+  color: #111111;
+  font-weight: 800;
+  border: 2px solid #111111;
+  border-radius: 0.75rem;
+  box-shadow: 0 3px 0 #111111;
+  transition: all 0.15s ease;
+}
+.btn-brand-primary:hover {
+  background-color: #FF7A1A;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 0 #111111;
+}
+.btn-brand-primary:active {
+  transform: translateY(2px);
+  box-shadow: 0 1px 0 #111111;
+}
+
+/* 2. Dark Trio Button: Black body + Green text/border + Orange badge */
+.btn-brand-dark {
+  background-color: #111111;
+  color: #FFFFFF;
+  border: 1.5px solid #27272A;
+  font-weight: 700;
+  border-radius: 0.75rem;
+  transition: all 0.15s ease;
+}
+.btn-brand-dark:hover {
+  border-color: #9FE870;
+  color: #9FE870;
+  background-color: #18181B;
+}
+.btn-brand-dark:active {
+  transform: scale(0.98);
+}
+
+/* 3. Lime Green Trio Button: Lime Green body + Black text/border + Orange icon */
+.btn-brand-lime {
+  background-color: #9FE870;
+  color: #111111;
+  border: 2px solid #111111;
+  font-weight: 800;
+  border-radius: 0.75rem;
+  box-shadow: 0 3px 0 #111111;
+  transition: all 0.15s ease;
+}
+.btn-brand-lime:hover {
+  background-color: #AEF083;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 0 #111111;
+}
+.btn-brand-lime:active {
+  transform: translateY(2px);
+  box-shadow: 0 1px 0 #111111;
+}
+
+/* Chips & Badges */
+.badge-brand-mix {
+  background-color: #111111;
+  color: #9FE870;
+  border: 1px solid #FF6B00;
+  font-weight: 700;
+}
+
+.badge-lime-mix {
+  background-color: #9FE870;
+  color: #111111;
+  border: 1px solid #111111;
+  font-weight: 700;
+}
+
+.badge-orange-mix {
+  background-color: #FFF4EC;
+  color: #C2410C;
+  border: 1px solid #FED7AA;
+  font-weight: 700;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: #F4F4F5;
+}
+::-webkit-scrollbar-thumb {
+  background: #D4D4D8;
+  border-radius: 3px;
+}

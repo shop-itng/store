@@ -1,0 +1,6 @@
+{
+  "name": "Shop It",
+  "description": "Handmade marketplace for Nigerian teens and youth to buy and sell crafts, beads, scents, crochet, and fashion with escrow protection. Made by TEEDS.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
