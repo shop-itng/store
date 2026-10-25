@@ -1,6 +1,6 @@
 import React from 'react';
 import { useApp } from '../context/AppContext';
-import { ShieldCheck, MapPin, Zap, Lock, LogOut } from 'lucide-react';
+import { ShieldCheck, MapPin, Zap, Lock, LogOut, User } from 'lucide-react';
 
 export const RoleSwitcherBar: React.FC = () => {
   const {
@@ -77,10 +77,10 @@ export const RoleSwitcherBar: React.FC = () => {
           ) : (
             <button
               onClick={() => openAuthModal('login')}
-              className="text-[#A1A1AA] hover:text-white font-semibold text-[11px] flex items-center gap-1"
+              className="text-[#A1A1AA] hover:text-white font-semibold text-[11px] flex items-center gap-1.5"
             >
-              <Lock className="w-3 h-3 text-[#71717A]" />
-              <span>Sign In / Moderator</span>
+              <User className="w-3 h-3 text-[#71717A]" />
+              <span>Sign In</span>
             </button>
           )}
 

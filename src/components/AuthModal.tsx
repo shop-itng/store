@@ -11,8 +11,11 @@ import {
   Lock,
   Sparkles,
   ArrowRight,
+  ArrowLeft,
   MapPin,
   KeyRound,
+  Mail,
+  CheckCircle2,
 } from 'lucide-react';
 
 export const AuthModal: React.FC = () => {
@@ -43,6 +46,15 @@ export const AuthModal: React.FC = () => {
   // OTP state
   const [otpCode, setOtpCode] = useState('1234');
 
+  // Forgot Password state
+  const [forgotEmail, setForgotEmail] = useState('');
+  const [forgotStep, setForgotStep] = useState<'email' | 'otp_and_reset'>('email');
+  const [forgotOtpSent, setForgotOtpSent] = useState('');
+  const [forgotOtpInput, setForgotOtpInput] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [isSendingResetEmail, setIsSendingResetEmail] = useState(false);
+
   // Seller registration specifics
   const [shopName, setShopName] = useState('');
   const [stateName, setStateName] = useState('Lagos');
@@ -54,6 +66,78 @@ export const AuthModal: React.FC = () => {
   const [guardianPhone, setGuardianPhone] = useState('');
 
   if (!isAuthModalOpen) return null;
+
+  const handleSendResetOtp = (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanEmail = forgotEmail.trim().toLowerCase();
+    if (!cleanEmail) {
+      notify('Please enter your email address.', 'error');
+      return;
+    }
+
+    setIsSendingResetEmail(true);
+
+    setTimeout(() => {
+      setIsSendingResetEmail(false);
+      // Generate real 4-digit numeric OTP
+      const code = Math.floor(1000 + Math.random() * 9000).toString();
+      setForgotOtpSent(code);
+      setForgotStep('otp_and_reset');
+      notify(`Verification code sent to ${cleanEmail}! (Your reset OTP: ${code})`, 'success');
+    }, 400);
+  };
+
+  const handleResendResetOtp = () => {
+    const code = Math.floor(1000 + Math.random() * 9000).toString();
+    setForgotOtpSent(code);
+    notify(`New reset code sent to ${forgotEmail}! (Your OTP: ${code})`, 'info');
+  };
+
+  const handleResetPasswordSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanEmail = forgotEmail.trim().toLowerCase();
+
+    if (forgotOtpInput.trim() !== forgotOtpSent) {
+      notify('Invalid 4-digit reset code. Please check your email or request a new code.', 'error');
+      return;
+    }
+
+    if (newPassword.length < 6) {
+      notify('Password must be at least 6 characters long.', 'error');
+      return;
+    }
+
+    if (newPassword !== confirmPassword) {
+      notify('Passwords do not match. Please re-enter carefully.', 'error');
+      return;
+    }
+
+    // Update password in localStorage registered users
+    const registeredUsersStr = localStorage.getItem('shopit_registered_users');
+    let registeredUsers: any[] = registeredUsersStr ? JSON.parse(registeredUsersStr) : [];
+    const existingIndex = registeredUsers.findIndex(u => u.email?.toLowerCase() === cleanEmail);
+
+    if (existingIndex >= 0) {
+      registeredUsers[existingIndex].password = newPassword;
+    } else {
+      registeredUsers.push({
+        id: `user_${Date.now()}`,
+        name: cleanEmail.split('@')[0],
+        email: cleanEmail,
+        phone: '+2348000000000',
+        password: newPassword,
+        role: 'buyer',
+      });
+    }
+
+    localStorage.setItem('shopit_registered_users', JSON.stringify(registeredUsers));
+
+    notify('Password reset successfully! You can now sign in with your new password.', 'success');
+    setLoginEmail(cleanEmail);
+    setLoginPassword('');
+    setForgotStep('email');
+    setAuthTab('login');
+  };
 
   const handleLoginFormSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -76,7 +160,7 @@ export const AuthModal: React.FC = () => {
         isVerifiedPhone: true,
       });
       closeAuthModal();
-      notify(`Welcome Admin Moderator, ${ADMIN_CREDENTIALS.name}! Access granted.`, 'success');
+      notify(`Welcome back, ${ADMIN_CREDENTIALS.name}!`, 'success');
       return;
     }
 
@@ -180,7 +264,7 @@ export const AuthModal: React.FC = () => {
         </button>
 
         {/* Header Tabs */}
-        {authTab !== 'otp' && authTab !== 'seller_register' && (
+        {authTab !== 'otp' && authTab !== 'seller_register' && authTab !== 'forgot_password' && (
           <div className="flex border-b border-[#E4E4E7] pb-2">
             <button
               onClick={() => setAuthTab('login')}
@@ -211,7 +295,7 @@ export const AuthModal: React.FC = () => {
             <div>
               <h2 className="text-xl font-black text-[#111111]">Sign In to Shop It</h2>
               <p className="text-xs text-[#71717A] mt-1">
-                Enter your registered details or moderator credentials.
+                Enter your email and password to access your account.
               </p>
             </div>
 
@@ -231,9 +315,22 @@ export const AuthModal: React.FC = () => {
               </div>
 
               <div>
-                <label className="text-xs font-semibold text-slate-700 block mb-1">
-                  Password
-                </label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-xs font-semibold text-slate-700">
+                    Password
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setForgotEmail(loginEmail);
+                      setForgotStep('email');
+                      setAuthTab('forgot_password');
+                    }}
+                    className="text-xs font-bold text-[#FF6B00] hover:underline"
+                  >
+                    Forgot Password?
+                  </button>
+                </div>
                 <input
                   type="password"
                   required
@@ -265,6 +362,141 @@ export const AuthModal: React.FC = () => {
                 </button>
               </p>
             </div>
+          </div>
+        )}
+
+        {/* Tab 1.5: FORGOT PASSWORD & OTP RESET */}
+        {authTab === 'forgot_password' && (
+          <div className="space-y-4">
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setForgotStep('email');
+                  setAuthTab('login');
+                }}
+                className="p-1.5 text-slate-500 hover:text-slate-900 rounded-lg hover:bg-slate-100 transition-colors"
+                title="Back to Sign In"
+              >
+                <ArrowLeft className="w-5 h-5" />
+              </button>
+              <div>
+                <h2 className="text-xl font-black text-[#111111]">
+                  {forgotStep === 'email' ? 'Forgot Password' : 'Reset Your Password'}
+                </h2>
+                <p className="text-xs text-[#71717A] mt-0.5">
+                  {forgotStep === 'email'
+                    ? 'Enter your registered email to receive a 4-digit verification code.'
+                    : `Verification code dispatched to ${forgotEmail}. Enter it below.`}
+                </p>
+              </div>
+            </div>
+
+            {forgotStep === 'email' ? (
+              <form onSubmit={handleSendResetOtp} className="space-y-4">
+                <div>
+                  <label className="text-xs font-semibold text-slate-700 block mb-1">
+                    Your Registered Email
+                  </label>
+                  <div className="relative">
+                    <Mail className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="email"
+                      required
+                      placeholder="e.g. yourname@gmail.com"
+                      value={forgotEmail}
+                      onChange={e => setForgotEmail(e.target.value)}
+                      className="w-full h-11 pl-10 pr-3.5 rounded-xl border border-slate-200 text-xs sm:text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#FF6B00]"
+                    />
+                  </div>
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={isSendingResetEmail}
+                  className="w-full h-12 bg-[#FF6B00] hover:bg-[#FF7A1A] text-[#111111] border-2 border-[#111111] font-black rounded-xl text-xs sm:text-sm transition-all shadow-[0_3px_0_#111111] flex items-center justify-center gap-2 active:translate-y-0.5 disabled:opacity-50"
+                >
+                  <Mail className="w-4 h-4 text-[#111111]" />
+                  <span>{isSendingResetEmail ? 'Sending Reset Code...' : 'Send Reset Code'}</span>
+                </button>
+
+                <div className="text-center pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setAuthTab('login')}
+                    className="text-xs font-bold text-slate-600 hover:text-slate-900"
+                  >
+                    Remember your password? Sign In
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <form onSubmit={handleResetPasswordSubmit} className="space-y-3.5">
+                {/* OTP Input */}
+                <div>
+                  <label className="text-xs font-semibold text-slate-700 block mb-1">
+                    4-Digit Verification Code (OTP) *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    maxLength={4}
+                    value={forgotOtpInput}
+                    onChange={e => setForgotOtpInput(e.target.value.replace(/\D/g, ''))}
+                    placeholder="e.g. 4921"
+                    className="w-full h-12 text-center text-xl font-bold tracking-widest rounded-xl border-2 border-[#111111] text-slate-900 font-mono focus:outline-none focus:ring-2 focus:ring-[#FF6B00]"
+                  />
+                  <div className="flex items-center justify-between mt-1 text-[11px] text-slate-500">
+                    <span>Check your email inbox/notifications</span>
+                    <button
+                      type="button"
+                      onClick={handleResendResetOtp}
+                      className="text-[#FF6B00] font-bold hover:underline"
+                    >
+                      Resend Code
+                    </button>
+                  </div>
+                </div>
+
+                {/* New Password */}
+                <div>
+                  <label className="text-xs font-semibold text-slate-700 block mb-1">
+                    New Password (at least 6 characters) *
+                  </label>
+                  <input
+                    type="password"
+                    required
+                    value={newPassword}
+                    onChange={e => setNewPassword(e.target.value)}
+                    placeholder="••••••••"
+                    className="w-full h-11 px-3.5 rounded-xl border border-slate-200 text-xs sm:text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#FF6B00]"
+                  />
+                </div>
+
+                {/* Confirm New Password */}
+                <div>
+                  <label className="text-xs font-semibold text-slate-700 block mb-1">
+                    Confirm New Password *
+                  </label>
+                  <input
+                    type="password"
+                    required
+                    value={confirmPassword}
+                    onChange={e => setConfirmPassword(e.target.value)}
+                    placeholder="••••••••"
+                    className="w-full h-11 px-3.5 rounded-xl border border-slate-200 text-xs sm:text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#FF6B00]"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  className="w-full h-12 bg-[#9FE870] hover:bg-[#AEF083] text-[#111111] border-2 border-[#111111] font-black rounded-xl text-xs sm:text-sm transition-all shadow-[0_3px_0_#111111] flex items-center justify-center gap-2 active:translate-y-0.5"
+                >
+                  <CheckCircle2 className="w-4 h-4 text-[#111111]" />
+                  <span>Update Password & Sign In</span>
+                </button>
+              </form>
+            )}
           </div>
         )}
 

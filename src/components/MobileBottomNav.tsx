@@ -32,17 +32,29 @@ export const MobileBottomNav: React.FC = () => {
           <span className="text-[10px] mt-0.5">Market</span>
         </button>
 
-        {/* Tab 3: + Sell Quick */}
-        <button
-          onClick={openQuickListModal}
-          className="flex flex-col items-center justify-center min-h-[44px] group"
-        >
-          <div className="w-9 h-9 rounded-full bg-[#FF6B00] border-2 border-[#111111] text-[#111111] flex items-center justify-center shadow-[0_2px_0_#111111] active:translate-y-0.5 transition-transform relative">
-            <PlusCircle className="w-5 h-5 text-[#111111]" />
-            <span className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-[#9FE870] border border-[#111111]" />
-          </div>
-          <span className="text-[10px] mt-0.5 font-black text-[#111111]">Sell</span>
-        </button>
+        {/* Tab 3: Sell Quick (for Sellers) or Buy Items (for Shoppers) */}
+        {currentUser?.role === 'seller' ? (
+          <button
+            onClick={openQuickListModal}
+            className="flex flex-col items-center justify-center min-h-[44px] group"
+          >
+            <div className="w-9 h-9 rounded-full bg-[#FF6B00] border-2 border-[#111111] text-[#111111] flex items-center justify-center shadow-[0_2px_0_#111111] active:translate-y-0.5 transition-transform relative">
+              <PlusCircle className="w-5 h-5 text-[#111111]" />
+              <span className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-[#9FE870] border border-[#111111]" />
+            </div>
+            <span className="text-[10px] mt-0.5 font-black text-[#111111]">Sell</span>
+          </button>
+        ) : (
+          <button
+            onClick={() => setActiveView('catalog')}
+            className="flex flex-col items-center justify-center min-h-[44px] group"
+          >
+            <div className="w-9 h-9 rounded-full bg-[#9FE870] border-2 border-[#111111] text-[#111111] flex items-center justify-center shadow-[0_2px_0_#111111] active:translate-y-0.5 transition-transform relative">
+              <ShoppingBag className="w-4 h-4 text-[#111111]" />
+            </div>
+            <span className="text-[10px] mt-0.5 font-black text-[#111111]">Buy</span>
+          </button>
+        )}
 
         {/* Tab 4: Chat */}
         <button

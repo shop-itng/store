@@ -145,17 +145,31 @@ export const Header: React.FC = () => {
 
         {/* Zone 3: Actions (Sell, Wishlist, Cart, Profile) */}
         <div className="flex items-center gap-2 sm:gap-3 shrink-0">
-          {/* Quick List Button - Trio mix of Orange, Black, Green */}
-          <button
-            onClick={openQuickListModal}
-            className="flex items-center gap-1.5 px-3.5 py-2 bg-[#FF6B00] hover:bg-[#FF7A1A] text-[#111111] border-2 border-[#111111] text-xs sm:text-sm font-black rounded-xl shadow-[0_2.5px_0_#111111] transition-all active:translate-y-0.5"
-            title="List an item in 60 seconds"
-          >
-            <span className="w-4 h-4 rounded-full bg-[#9FE870] text-[#111111] flex items-center justify-center text-xs font-black">
-              +
-            </span>
-            <span>Sell Product</span>
-          </button>
+          {/* Quick List Button (Only for registered sellers) or Buy Items Button for Shoppers */}
+          {currentUser?.role === 'seller' ? (
+            <button
+              onClick={openQuickListModal}
+              className="flex items-center gap-1.5 px-3.5 py-2 bg-[#FF6B00] hover:bg-[#FF7A1A] text-[#111111] border-2 border-[#111111] text-xs sm:text-sm font-black rounded-xl shadow-[0_2.5px_0_#111111] transition-all active:translate-y-0.5"
+              title="List an item in 60 seconds"
+            >
+              <span className="w-4 h-4 rounded-full bg-[#9FE870] text-[#111111] flex items-center justify-center text-xs font-black">
+                +
+              </span>
+              <span>Sell Product</span>
+            </button>
+          ) : (
+            <button
+              onClick={() => {
+                setActiveView('catalog');
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+              }}
+              className="flex items-center gap-1.5 px-3.5 py-2 bg-[#9FE870] hover:bg-[#AEF083] text-[#111111] border-2 border-[#111111] text-xs sm:text-sm font-black rounded-xl shadow-[0_2.5px_0_#111111] transition-all active:translate-y-0.5"
+              title="Browse and buy crafts"
+            >
+              <ShoppingBag className="w-4 h-4 text-[#111111]" />
+              <span>Buy Items</span>
+            </button>
+          )}
 
           {/* Wishlist */}
           <button

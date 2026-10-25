@@ -1,8 +1,8 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
 import { NIGERIAN_STATES } from '../data/nigerianLocations';
 import { ProductCategory } from '../types';
-import { Search, MapPin, SlidersHorizontal, X } from 'lucide-react';
+import { Search, MapPin, SlidersHorizontal, X, Clock } from 'lucide-react';
 
 const CATEGORIES: { id: ProductCategory; label: string }[] = [
   { id: 'all', label: 'All Items' },
@@ -32,7 +32,61 @@ export const TypoSearchBar: React.FC = () => {
     resetFilters,
   } = useApp();
 
-  const [showFilters, setShowFilters] = React.useState(false);
+  const [showFilters, setShowFilters] = useState(false);
+  const [isSearchFocused, setIsSearchFocused] = useState(false);
+
+  // Recent Searches state: Stores the last 5 searches in localStorage
+  const [recentSearches, setRecentSearches] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem('shopit_recent_searches');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  const addRecentSearch = (term: string) => {
+    const clean = term.trim();
+    if (!clean || clean.length < 2) return;
+
+    setRecentSearches(prev => {
+      const filtered = prev.filter(t => t.toLowerCase() !== clean.toLowerCase());
+      const updated = [clean, ...filtered].slice(0, 5);
+      try {
+        localStorage.setItem('shopit_recent_searches', JSON.stringify(updated));
+      } catch (err) {
+        console.error('Failed to save recent search', err);
+      }
+      return updated;
+    });
+  };
+
+  const removeRecentSearch = (termToRemove: string) => {
+    setRecentSearches(prev => {
+      const updated = prev.filter(t => t.toLowerCase() !== termToRemove.toLowerCase());
+      try {
+        localStorage.setItem('shopit_recent_searches', JSON.stringify(updated));
+      } catch (err) {
+        console.error('Failed to update recent searches', err);
+      }
+      return updated;
+    });
+  };
+
+  const clearAllRecentSearches = () => {
+    setRecentSearches([]);
+    try {
+      localStorage.removeItem('shopit_recent_searches');
+    } catch (err) {
+      console.error('Failed to clear recent searches', err);
+    }
+  };
+
+  const handleSelectRecent = (term: string) => {
+    setSearchQuery(term);
+    addRecentSearch(term);
+    setIsSearchFocused(false);
+  };
 
   // Cascading dropdown options
   const activeStateObj = NIGERIAN_STATES.find(s => s.state === selectedState);
@@ -64,12 +118,29 @@ export const TypoSearchBar: React.FC = () => {
     <div className="space-y-3.5">
       {/* Search Input & Location Filter Row */}
       <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-3">
-        {/* Search input */}
+        {/* Search input with Recent Searches Dropdown */}
         <div className="relative sm:col-span-7">
           <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-[#A1A1AA] pointer-events-none" />
           <input
             type="text"
             value={searchQuery}
+            onFocus={() => setIsSearchFocused(true)}
+            onBlur={() => {
+              // Delay blur slightly so clicks on recent search items register
+              setTimeout(() => setIsSearchFocused(false), 200);
+              if (searchQuery.trim().length >= 2) {
+                addRecentSearch(searchQuery);
+              }
+            }}
+            onKeyDown={e => {
+              if (e.key === 'Enter') {
+                if (searchQuery.trim().length >= 2) {
+                  addRecentSearch(searchQuery);
+                }
+                setIsSearchFocused(false);
+                (e.target as HTMLElement).blur();
+              }
+            }}
             onChange={e => setSearchQuery(e.target.value)}
             placeholder="Search waist beads, perfume oils, crochet tote bags, fashion in your area..."
             className="w-full h-11 pl-10 pr-9 rounded-xl bg-white border border-[#E4E4E7] text-xs sm:text-sm text-[#111111] placeholder:text-[#A1A1AA] focus:outline-none focus:border-[#FF6B00] focus:ring-1 focus:ring-[#FF6B00] transition-all font-medium"
@@ -81,6 +152,56 @@ export const TypoSearchBar: React.FC = () => {
             >
               <X className="w-4 h-4" />
             </button>
+          )}
+
+          {/* Recent Searches Floating Dropdown (Last 5 searches) */}
+          {isSearchFocused && recentSearches.length > 0 && (
+            <div className="absolute top-full left-0 right-0 mt-1.5 z-40 bg-white border-2 border-[#111111] rounded-2xl shadow-xl p-3 space-y-2.5">
+              <div className="flex items-center justify-between text-xs pb-1.5 border-b border-[#E4E4E7]">
+                <div className="flex items-center gap-1.5 font-black text-[#111111]">
+                  <Clock className="w-3.5 h-3.5 text-[#FF6B00]" />
+                  <span>Recent Searches</span>
+                </div>
+                <button
+                  type="button"
+                  onMouseDown={e => {
+                    e.preventDefault();
+                    clearAllRecentSearches();
+                  }}
+                  className="text-[11px] font-bold text-[#71717A] hover:text-[#FF6B00] transition-colors"
+                >
+                  Clear all
+                </button>
+              </div>
+
+              <div className="flex flex-wrap gap-1.5">
+                {recentSearches.map(term => (
+                  <div
+                    key={term}
+                    onMouseDown={e => {
+                      e.preventDefault();
+                      handleSelectRecent(term);
+                    }}
+                    className="group inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#F4F4F5] hover:bg-[#111111] hover:text-[#9FE870] rounded-xl text-xs font-bold text-[#111111] transition-all cursor-pointer border border-[#E4E4E7] hover:border-[#111111]"
+                  >
+                    <Clock className="w-3 h-3 text-[#71717A] group-hover:text-[#9FE870]" />
+                    <span>{term}</span>
+                    <button
+                      type="button"
+                      onMouseDown={e => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        removeRecentSearch(term);
+                      }}
+                      className="text-[#A1A1AA] hover:text-red-500 ml-1 p-0.5 rounded-full hover:bg-black/10 group-hover:hover:bg-white/20"
+                      title="Remove"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
           )}
         </div>
 
@@ -202,6 +323,42 @@ export const TypoSearchBar: React.FC = () => {
               </select>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Quick Recent Searches Chips Row (Last 5 searches in localStorage) */}
+      {recentSearches.length > 0 && (
+        <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5 scrollbar-none text-xs">
+          <span className="text-[11px] font-bold text-[#71717A] flex items-center gap-1 shrink-0 mr-1">
+            <Clock className="w-3 h-3 text-[#FF6B00]" />
+            <span>Recent:</span>
+          </span>
+          {recentSearches.map(term => (
+            <div
+              key={term}
+              onClick={() => handleSelectRecent(term)}
+              className="inline-flex items-center gap-1 px-2.5 py-1 bg-white hover:bg-[#111111] hover:text-[#9FE870] border border-[#E4E4E7] hover:border-[#111111] rounded-lg text-[11px] font-bold text-[#3F3F46] transition-all cursor-pointer shrink-0 shadow-2xs group"
+            >
+              <span>{term}</span>
+              <button
+                type="button"
+                onClick={e => {
+                  e.stopPropagation();
+                  removeRecentSearch(term);
+                }}
+                className="text-[#A1A1AA] hover:text-red-500 p-0.5 rounded-full"
+                title="Remove"
+              >
+                <X className="w-2.5 h-2.5" />
+              </button>
+            </div>
+          ))}
+          <button
+            onClick={clearAllRecentSearches}
+            className="text-[10px] text-[#A1A1AA] hover:text-[#FF6B00] font-bold shrink-0 ml-1 underline cursor-pointer"
+          >
+            Clear
+          </button>
         </div>
       )}
 

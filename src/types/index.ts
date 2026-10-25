@@ -1,5 +1,5 @@
 export type UserRole = 'buyer' | 'seller' | 'admin';
-export type AdminSubRole = 'moderator' | 'finance' | 'support';
+export type AdminSubRole = 'moderator' | 'accounts' | 'finance' | 'support';
 
 export type Campus =
   | 'UNILAG (Akoka)'
@@ -22,6 +22,7 @@ export interface NigerianLocation {
 export interface SellerProfile {
   id: string;
   shopName: string;
+  ownerName?: string;
   bio: string;
   campus?: Campus;
   location?: NigerianLocation;
@@ -54,15 +55,18 @@ export interface User {
   email: string;
   phone: string;
   name: string;
+  password?: string;
   role: UserRole;
   adminSubRole?: AdminSubRole;
   isVerifiedEmail: boolean;
   isVerifiedPhone: boolean;
+  isBanned?: boolean;
   avatarUrl?: string;
   sellerProfile?: SellerProfile;
   savedDeliveryArea?: string;
   location?: NigerianLocation;
   locationArea?: string;
+  createdAt?: string;
 }
 
 export type ProductCategory =

@@ -83,10 +83,10 @@ interface AppContextType {
   login: (userData: Partial<User>) => void;
   logout: () => void;
   isAuthModalOpen: boolean;
-  openAuthModal: (tab?: 'login' | 'signup' | 'seller_register') => void;
+  openAuthModal: (tab?: 'login' | 'signup' | 'seller_register' | 'forgot_password') => void;
   closeAuthModal: () => void;
-  authTab: 'login' | 'signup' | 'otp' | 'seller_register';
-  setAuthTab: (tab: 'login' | 'signup' | 'otp' | 'seller_register') => void;
+  authTab: 'login' | 'signup' | 'otp' | 'seller_register' | 'forgot_password';
+  setAuthTab: (tab: 'login' | 'signup' | 'otp' | 'seller_register' | 'forgot_password') => void;
   pendingAuthData: any;
   setPendingAuthData: (data: any) => void;
   verifyOtp: (code: string) => boolean;
@@ -258,12 +258,23 @@ interface AppContextType {
   setAdminSubRole: (subRole: AdminSubRole) => void;
   verificationRequests: SellerVerificationRequest[];
   updateVerificationRequest: (id: string, status: 'approved' | 'rejected', notes?: string) => void;
+  submitVerificationRequest: (req: Omit<SellerVerificationRequest, 'id' | 'submittedAt' | 'status'>) => void;
   disputes: DisputeTicket[];
   resolveDispute: (disputeId: string, resolution: 'refund_full' | 'release_seller' | 'partial', amount?: number, notes?: string) => void;
   antiBypassFlags: AntiBypassFlag[];
   updateFlagStatus: (flagId: string, action: 'warn' | 'lock_chat' | 'freeze_account' | 'dismiss') => void;
   feeSettings: FeeSettings;
   updateFeeSettings: (settings: Partial<FeeSettings>) => void;
+
+  // Moderator Super-Powers & Account Governance
+  registeredUsers: User[];
+  deleteUserAccount: (userId: string) => boolean;
+  banUserAccount: (userId: string, isBanned: boolean, reason?: string) => void;
+  adminResetUserPassword: (userId: string, newPass: string) => boolean;
+  adminToggleSellerVerification: (sellerId: string, isVerified: boolean) => void;
+  adminForceDeleteProduct: (productId: string) => void;
+  adminForceReleaseEscrow: (orderId: string) => void;
+  adminForceRefundOrder: (orderId: string, notes?: string) => void;
 
   // Phase 3: Report Problem Modal
   isReportProblemModalOpen: boolean;
@@ -524,13 +535,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return saved ? JSON.parse(saved) : DEFAULT_FEE_SETTINGS;
   });
 
+  // Moderator Account Governance
+  const [registeredUsers, setRegisteredUsers] = useState<User[]>(() => {
+    try {
+      const saved = localStorage.getItem('shopit_registered_users');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
   // Phase 3: Report Problem Modal State
   const [isReportProblemModalOpen, setIsReportProblemModalOpen] = useState(false);
   const [activeReportOrderId, setActiveReportOrderId] = useState<string | null>(null);
 
   // Auth modal states
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
-  const [authTab, setAuthTab] = useState<'login' | 'signup' | 'otp' | 'seller_register'>('login');
+  const [authTab, setAuthTab] = useState<'login' | 'signup' | 'otp' | 'seller_register' | 'forgot_password'>('login');
   const [pendingAuthData, setPendingAuthData] = useState<any>(null);
 
   // Notifications
@@ -722,6 +743,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         if (!regList.some(u => u.email.toLowerCase() === newUser.email.toLowerCase())) {
           regList.push({ ...newUser, password: (userData as any).password });
           localStorage.setItem('shopit_registered_users', JSON.stringify(regList));
+          setRegisteredUsers(regList);
         }
       } catch (err) {
         // ignore
@@ -738,7 +760,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     notify('Logged out successfully', 'info');
   };
 
-  const openAuthModal = (tab: 'login' | 'signup' | 'seller_register' = 'login') => {
+  const openAuthModal = (tab: 'login' | 'signup' | 'seller_register' | 'forgot_password' = 'login') => {
     setAuthTab(tab);
     setIsAuthModalOpen(true);
   };
@@ -836,6 +858,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       location: sellerData.location,
       locationArea: resolvedArea,
     };
+
+    const userWithPass: User = {
+      ...sellerUser,
+      password: pendingAuthData?.password || 'ShopItArtisan2026!',
+      createdAt: new Date().toLocaleDateString('en-GB'),
+    };
+
+    setRegisteredUsers(prev => {
+      const updated = [userWithPass, ...prev.filter(u => u.id !== sellerUser.id && u.email.toLowerCase() !== sellerUser.email.toLowerCase())];
+      localStorage.setItem('shopit_registered_users', JSON.stringify(updated));
+      return updated;
+    });
 
     setCurrentUser(sellerUser);
     closeAuthModal();
@@ -1745,6 +1779,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  const submitVerificationRequest = (data: Omit<SellerVerificationRequest, 'id' | 'submittedAt' | 'status'>) => {
+    const id = `VERIF-${Math.floor(10000 + Math.random() * 90000)}`;
+    const newReq: SellerVerificationRequest = {
+      ...data,
+      id,
+      submittedAt: new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }),
+      status: 'pending',
+    };
+
+    setVerificationRequests(prev => [newReq, ...prev]);
+
+    setSellers(prev =>
+      prev.map(s => {
+        if (s.id === data.sellerId) {
+          return {
+            ...s,
+            verificationStatus: 'pending_approval',
+          };
+        }
+        return s;
+      })
+    );
+
+    notify('ID submitted for review! Our moderator will review it within 24 hours.', 'success');
+  };
+
   const resolveDispute = (
     disputeId: string,
     resolution: 'refund_full' | 'release_seller' | 'partial',
@@ -1897,6 +1957,153 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       notify('Platform fee settings updated successfully!', 'success');
       return updated;
     });
+  };
+
+  // ==========================================
+  // MODERATOR SUPER-POWERS & ACCOUNT GOVERNANCE
+  // ==========================================
+
+  const deleteUserAccount = (userId: string): boolean => {
+    if (userId === 'admin_adeyinka_joseph') {
+      notify('Master Admin account cannot be deleted.', 'error');
+      return false;
+    }
+
+    const targetUser = registeredUsers.find(u => u.id === userId);
+    const targetEmail = targetUser?.email;
+
+    setRegisteredUsers(prev => {
+      const updated = prev.filter(u => u.id !== userId);
+      localStorage.setItem('shopit_registered_users', JSON.stringify(updated));
+      return updated;
+    });
+
+    // Cleanup seller profile, listings, and wallet if seller
+    setSellers(prev => prev.filter(s => s.id !== userId));
+    setProducts(prev => prev.filter(p => p.sellerId !== userId));
+    setVerificationRequests(prev => prev.filter(v => v.sellerId !== userId));
+    setWallets(prev => {
+      const next = { ...prev };
+      delete next[userId];
+      localStorage.setItem('shopit_wallets', JSON.stringify(next));
+      return next;
+    });
+
+    if (currentUser?.id === userId) {
+      setCurrentUser(null);
+      localStorage.removeItem('shopit_current_user');
+      setActiveView('catalog');
+    }
+
+    notify(`Account "${targetUser?.name || 'User'}" (${targetEmail || userId}) permanently deleted by Moderator.`, 'success');
+    return true;
+  };
+
+  const banUserAccount = (userId: string, isBanned: boolean, reason?: string) => {
+    if (userId === 'admin_adeyinka_joseph') {
+      notify('Master Admin account cannot be suspended.', 'error');
+      return;
+    }
+
+    setRegisteredUsers(prev => {
+      const updated = prev.map(u => u.id === userId ? { ...u, isBanned } : u);
+      localStorage.setItem('shopit_registered_users', JSON.stringify(updated));
+      return updated;
+    });
+
+    if (isBanned) {
+      toggleWalletFreeze(userId, true, reason || 'Account suspended by moderator');
+      setSellers(prev => prev.map(s => s.id === userId ? { ...s, vacationMode: true } : s));
+      notify(`Account suspended and store hidden from marketplace.`, 'info');
+    } else {
+      toggleWalletFreeze(userId, false);
+      setSellers(prev => prev.map(s => s.id === userId ? { ...s, vacationMode: false } : s));
+      notify(`Account suspension lifted by moderator.`, 'success');
+    }
+  };
+
+  const adminResetUserPassword = (userId: string, newPass: string): boolean => {
+    if (!newPass || newPass.trim().length < 6) {
+      notify('Password must be at least 6 characters.', 'error');
+      return false;
+    }
+    setRegisteredUsers(prev => {
+      const updated = prev.map(u => u.id === userId ? { ...u, password: newPass.trim() } : u);
+      localStorage.setItem('shopit_registered_users', JSON.stringify(updated));
+      return updated;
+    });
+    notify('Password reset successfully for account.', 'success');
+    return true;
+  };
+
+  const adminToggleSellerVerification = (sellerId: string, isVerified: boolean) => {
+    setSellers(prev =>
+      prev.map(s => {
+        if (s.id === sellerId) {
+          const newBadges = isVerified
+            ? Array.from(new Set([...s.badges, 'verified']))
+            : s.badges.filter(b => b !== 'verified');
+          return {
+            ...s,
+            isVerifiedSeller: isVerified,
+            verificationStatus: isVerified ? 'approved' : 'pending_approval',
+            badges: newBadges as any,
+          };
+        }
+        return s;
+      })
+    );
+    notify(
+      isVerified
+        ? `Seller verified with NIN Slip! Verified maker badge activated.`
+        : `Seller verification status revoked.`,
+      'info'
+    );
+  };
+
+  const adminForceDeleteProduct = (productId: string) => {
+    deleteProduct(productId);
+    notify(`Listing #${productId} deleted permanently by moderator.`, 'info');
+  };
+
+  const adminForceReleaseEscrow = (orderId: string) => {
+    confirmItemReceived(orderId);
+    notify(`[Moderator Override] Escrow released for Order #${orderId} to seller available balance.`, 'success');
+  };
+
+  const adminForceRefundOrder = (orderId: string, notes?: string) => {
+    const ord = orders.find(o => o.id === orderId);
+    if (!ord) return;
+    updateOrderStatus(orderId, 'cancelled', { disputeReason: notes || 'Moderator forced refund to buyer' });
+    ord.items.forEach(item => {
+      setWallets(prev => {
+        const w = prev[item.sellerId];
+        if (!w) return prev;
+        const refundAmt = item.sellerPrice * item.quantity;
+        return {
+          ...prev,
+          [item.sellerId]: {
+            ...w,
+            pendingBalance: Math.max(0, w.pendingBalance - refundAmt),
+            transactions: [
+              {
+                id: `TXN-${Math.floor(10000 + Math.random() * 90000)}`,
+                type: 'refund',
+                amount: refundAmt,
+                fee: 0,
+                balanceAfter: w.availableBalance,
+                status: 'completed',
+                description: `Moderator Forced Refund for Order #${orderId}`,
+                reference: orderId,
+                createdAt: 'Just now',
+              },
+              ...w.transactions,
+            ],
+          },
+        };
+      });
+    });
+    notify(`[Moderator Override] Order #${orderId} cancelled & 100% refunded to buyer.`, 'success');
   };
 
   const openCheckoutModal = () => setIsCheckoutModalOpen(true);
@@ -2347,12 +2554,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setAdminSubRole,
         verificationRequests,
         updateVerificationRequest,
+        submitVerificationRequest,
         disputes,
         resolveDispute,
         antiBypassFlags,
         updateFlagStatus,
         feeSettings,
         updateFeeSettings,
+        // Moderator Super-Powers & Account Governance
+        registeredUsers,
+        deleteUserAccount,
+        banUserAccount,
+        adminResetUserPassword,
+        adminToggleSellerVerification,
+        adminForceDeleteProduct,
+        adminForceReleaseEscrow,
+        adminForceRefundOrder,
         // Phase 4: Campus Safe Logistics & Handshake OTP
         safePickupSpots,
         campusRunners,

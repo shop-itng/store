@@ -20,7 +20,7 @@ import { CheckoutModal } from './components/CheckoutModal';
 import { AuthModal } from './components/AuthModal';
 import { ToastContainer } from './components/ToastContainer';
 import { Footer } from './components/Footer';
-import { Store, ShieldCheck, MapPin, Star, ArrowRight, PackageOpen, PlusCircle } from 'lucide-react';
+import { Store, ShieldCheck, MapPin, Star, ArrowRight, PackageOpen, PlusCircle, ShoppingBag } from 'lucide-react';
 
 const MarketplaceContent: React.FC = () => {
   const {
@@ -104,22 +104,44 @@ const MarketplaceContent: React.FC = () => {
                   </div>
 
                   <div className="pt-2 flex flex-wrap items-center justify-center gap-3">
-                    <button
-                      onClick={openQuickListModal}
-                      className="px-5 py-3 bg-[#FF6B00] hover:bg-[#FF7A1A] text-[#111111] border-2 border-[#111111] text-xs sm:text-sm font-black rounded-xl transition-all flex items-center gap-2 shadow-[0_3px_0_#111111] active:translate-y-0.5"
-                    >
-                      <span className="w-5 h-5 rounded-full bg-[#9FE870] text-[#111111] flex items-center justify-center text-xs font-black">
-                        +
-                      </span>
-                      <span>Sell Your Product</span>
-                    </button>
-
-                    <button
-                      onClick={() => openAuthModal('seller_register')}
-                      className="px-5 py-3 bg-[#9FE870] hover:bg-[#AEF083] text-[#111111] border-2 border-[#111111] text-xs sm:text-sm font-black rounded-xl transition-all shadow-[0_3px_0_#111111] active:translate-y-0.5"
-                    >
-                      Open Your Shop
-                    </button>
+                    {currentUser?.role === 'seller' ? (
+                      <>
+                        <button
+                          onClick={openQuickListModal}
+                          className="px-5 py-3 bg-[#FF6B00] hover:bg-[#FF7A1A] text-[#111111] border-2 border-[#111111] text-xs sm:text-sm font-black rounded-xl transition-all flex items-center gap-2 shadow-[0_3px_0_#111111] active:translate-y-0.5"
+                        >
+                          <span className="w-5 h-5 rounded-full bg-[#9FE870] text-[#111111] flex items-center justify-center text-xs font-black">
+                            +
+                          </span>
+                          <span>Sell Your Product</span>
+                        </button>
+                        <button
+                          onClick={() => setActiveView('seller_dashboard')}
+                          className="px-5 py-3 bg-[#9FE870] hover:bg-[#AEF083] text-[#111111] border-2 border-[#111111] text-xs sm:text-sm font-black rounded-xl transition-all shadow-[0_3px_0_#111111] active:translate-y-0.5"
+                        >
+                          Go to My Shop
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button
+                          onClick={() => {
+                            setActiveView('catalog');
+                            window.scrollTo({ top: 0, behavior: 'smooth' });
+                          }}
+                          className="px-5 py-3 bg-[#9FE870] hover:bg-[#AEF083] text-[#111111] border-2 border-[#111111] text-xs sm:text-sm font-black rounded-xl transition-all flex items-center gap-2 shadow-[0_3px_0_#111111] active:translate-y-0.5"
+                        >
+                          <ShoppingBag className="w-4 h-4 text-[#111111]" />
+                          <span>Buy Items Now</span>
+                        </button>
+                        <button
+                          onClick={() => openAuthModal('seller_register')}
+                          className="px-5 py-3 bg-[#FF6B00] hover:bg-[#FF7A1A] text-[#111111] border-2 border-[#111111] text-xs sm:text-sm font-black rounded-xl transition-all shadow-[0_3px_0_#111111] active:translate-y-0.5"
+                        >
+                          Sign Up as a Seller
+                        </button>
+                      </>
+                    )}
                   </div>
 
                   <div className="pt-4 border-t border-[#E4E4E7] flex flex-col sm:flex-row items-center justify-center gap-3 text-xs text-[#71717A]">
@@ -258,15 +280,15 @@ const MarketplaceContent: React.FC = () => {
               <div className="w-12 h-12 rounded-2xl bg-[#FFF4EC] text-[#FF6B00] border border-[#FED7AA] flex items-center justify-center mx-auto">
                 <ShieldCheck className="w-6 h-6" />
               </div>
-              <h2 className="text-xl font-black text-[#111111]">Moderator Access Restricted</h2>
+              <h2 className="text-xl font-black text-[#111111]">Access Restricted</h2>
               <p className="text-xs text-[#71717A] leading-relaxed">
-                This panel is reserved exclusively for the administrator (Adeyinka Joseph). Please sign in with your moderator credentials.
+                Please sign in with your account credentials to view this section.
               </p>
               <button
                 onClick={() => openAuthModal('login')}
                 className="px-5 py-2.5 bg-[#111111] hover:bg-[#27272A] text-white text-xs font-bold rounded-xl transition-all"
               >
-                Sign In as Moderator
+                Sign In
               </button>
             </div>
           )

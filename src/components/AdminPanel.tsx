@@ -25,8 +25,14 @@ import {
   Hash,
   Activity,
   ArrowUpRight,
-  ArrowDownRight,
-  CheckCircle,
+  Users,
+  Trash2,
+  Key,
+  Ban,
+  UserX,
+  Store,
+  Package,
+  X,
 } from 'lucide-react';
 import { formatNaira, calculateServiceFee, getPricingBreakdown } from '../utils/pricing';
 import { AdminSubRole, LedgerEntryType } from '../types';
@@ -50,8 +56,20 @@ export const AdminPanel: React.FC = () => {
     paystackWebhooks,
     toggleWalletFreeze,
     sellers,
+    products,
+    deleteProduct,
+    toggleProductStock,
     openChat,
     notify,
+    // Moderator Super-Powers & Account Governance
+    registeredUsers,
+    deleteUserAccount,
+    banUserAccount,
+    adminResetUserPassword,
+    adminToggleSellerVerification,
+    adminForceDeleteProduct,
+    adminForceReleaseEscrow,
+    adminForceRefundOrder,
   } = useApp();
 
   const [activeTab, setActiveTab] = useState<AdminSubRole>(adminSubRole || 'moderator');
@@ -79,6 +97,35 @@ export const AdminPanel: React.FC = () => {
     isCurrentlyFrozen: false,
     reason: '',
   });
+
+  // Moderator Account Governance & Override states
+  const [searchUserQuery, setSearchUserQuery] = useState('');
+  const [filterUserRole, setFilterUserRole] = useState<'all' | 'seller' | 'buyer' | 'admin'>('all');
+  const [deleteConfirmModal, setDeleteConfirmModal] = useState<{
+    isOpen: boolean;
+    userId: string;
+    userName: string;
+    userEmail: string;
+    role: string;
+  }>({
+    isOpen: false,
+    userId: '',
+    userName: '',
+    userEmail: '',
+    role: '',
+  });
+  const [resetPasswordModal, setResetPasswordModal] = useState<{
+    isOpen: boolean;
+    userId: string;
+    userName: string;
+    newPassword: string;
+  }>({
+    isOpen: false,
+    userId: '',
+    userName: '',
+    newPassword: '',
+  });
+  const [searchProductQuery, setSearchProductQuery] = useState('');
 
   // Calculate live financial figures
   const pendingOrders = orders.filter(o => o.status === 'paid' || o.status === 'packed' || o.status === 'shipped' || o.status === 'delivered');
@@ -113,9 +160,10 @@ export const AdminPanel: React.FC = () => {
         </div>
 
         {/* Sub-role selector tabs */}
-        <div className="flex items-center bg-stone-900 p-1.5 rounded-xl border border-stone-800 shrink-0">
+        <div className="flex items-center bg-stone-900 p-1.5 rounded-xl border border-stone-800 shrink-0 overflow-x-auto gap-1">
           {[
-            { id: 'moderator', label: 'Moderator', icon: ShieldCheck, badge: verificationRequests.filter(r => r.status === 'pending').length },
+            { id: 'moderator', label: 'NIN & Safety', icon: ShieldCheck, badge: verificationRequests.filter(r => r.status === 'pending').length },
+            { id: 'accounts', label: 'All Accounts & Powers', icon: Users, badge: registeredUsers.length },
             { id: 'finance', label: 'Finance & Escrow', icon: DollarSign, badge: undefined },
             { id: 'support', label: 'Support & Disputes', icon: Headphones, badge: disputes.filter(d => d.status === 'open').length },
           ].map(tab => {
@@ -192,10 +240,10 @@ export const AdminPanel: React.FC = () => {
             <div className="p-4 sm:p-5 border-b border-stone-200 bg-stone-50/60 flex items-center justify-between">
               <div>
                 <h3 className="text-base font-bold font-heading text-stone-900">
-                  Seller Identity & Guardian Consent Queue
+                  Seller NIMC NIN Slip Verification Queue
                 </h3>
                 <p className="text-xs text-stone-500 mt-0.5">
-                  Verify Nigerian student IDs, NIN slips, and parental consent before shops can list handmade crafts.
+                  Verify Nigerian NIMC 11-digit NIN slips and legal identity before shops can list handmade crafts.
                 </p>
               </div>
               <span className="px-2.5 py-1 rounded-md bg-[#fff2ea] text-[#f95700] border border-[#fed7aa] text-xs font-semibold">
@@ -225,12 +273,12 @@ export const AdminPanel: React.FC = () => {
                       <span className={`px-2 py-0.5 rounded-md text-[11px] font-bold ${
                         req.status === 'approved' ? 'bg-emerald-100 text-emerald-800' : (req.status === 'rejected' ? 'bg-red-100 text-red-800' : 'bg-yellow-100 text-yellow-800')
                       }`}>
-                        {req.status.toUpperCase()}
+                        {req.status === 'approved' ? 'NIN APPROVED' : req.status.toUpperCase()}
                       </span>
                     </div>
 
                     <p className="text-xs text-stone-600">
-                      <strong>ID Type:</strong> {req.idType.toUpperCase()} ({req.idNumber}) · Submitted: {req.submittedAt}
+                      <strong>Document:</strong> National ID (NIN Slip) · <strong>11-Digit NIN:</strong> <span className="font-mono font-bold text-stone-900 bg-stone-100 px-1.5 py-0.5 rounded tracking-wider">{req.idNumber}</span> · Submitted: {req.submittedAt}
                     </p>
 
                     {req.under18 && (
@@ -252,7 +300,7 @@ export const AdminPanel: React.FC = () => {
                       className="px-3 py-2 rounded-xl border border-stone-300 hover:bg-stone-100 text-xs font-semibold text-stone-800 flex items-center gap-1.5 transition-colors"
                     >
                       <Eye className="w-3.5 h-3.5 text-stone-600" />
-                      <span>View ID Slip</span>
+                      <span>View NIN Slip</span>
                     </button>
 
                     {req.under18 && req.guardianConsentLetterUrl && (
