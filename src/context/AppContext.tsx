@@ -33,6 +33,9 @@ import {
   CampusAmbassador,
   HallLeaderboardEntry,
   ReferralReward,
+  BroadcastAnnouncement,
+  EmergencyControls,
+  AdminAuditLog,
 } from '../types';
 import {
   INITIAL_PRODUCTS,
@@ -57,6 +60,8 @@ import {
   INITIAL_AMBASSADORS,
   INITIAL_HALL_LEADERBOARD,
   INITIAL_REFERRAL_REWARDS,
+  ADMIN_CREDENTIALS,
+  ROOT_MODERATOR_USER,
 } from '../data/mockData';
 import { getPricingBreakdown, DEFAULT_FEE_SETTINGS } from '../utils/pricing';
 import { filterAntiBypass, checkNumbersInText } from '../utils/antiBypass';
@@ -275,6 +280,13 @@ interface AppContextType {
   adminForceDeleteProduct: (productId: string) => void;
   adminForceReleaseEscrow: (orderId: string) => void;
   adminForceRefundOrder: (orderId: string, notes?: string) => void;
+  broadcastAnnouncement: BroadcastAnnouncement;
+  updateBroadcastAnnouncement: (data: Partial<BroadcastAnnouncement>) => void;
+  emergencyControls: EmergencyControls;
+  updateEmergencyControls: (controls: Partial<EmergencyControls>) => void;
+  adminAuditLogs: AdminAuditLog[];
+  addAdminAuditLog: (action: string, details: string, targetId?: string) => void;
+  clearMarketplaceDatabase: () => void;
 
   // Phase 3: Report Problem Modal
   isReportProblemModalOpen: boolean;
@@ -315,11 +327,13 @@ interface AppContextType {
   applyCoupon: (code: string, currentTotal: number) => boolean;
   removeCoupon: () => void;
 
-  // Low-Data Mode & Language
+  // Low-Data Mode, Language & Theme
   lowDataMode: boolean;
   toggleLowDataMode: () => void;
   language: 'en' | 'pidgin';
   toggleLanguage: () => void;
+  theme: 'light' | 'dark';
+  toggleTheme: () => void;
 
   // Toast Notifications
   notifications: NotificationItem[];
@@ -330,58 +344,97 @@ interface AppContextType {
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  // Purge any old demo or mock data from previous sessions so marketplace starts 100% clean with ₦0 balances
-  if (typeof window !== 'undefined' && !localStorage.getItem('shopit_v5_clean_zero_balances')) {
-    localStorage.removeItem('shopit_current_user');
-    localStorage.removeItem('shopit_sellers');
-    localStorage.removeItem('shopit_products_ready_made');
+  // Automatic Database Purge Migration:
+  // Completely wipes all sellers, products, businesses, orders, chats, and accounts, retaining ONLY moderator Adeyinka Joseph.
+  if (typeof window !== 'undefined' && !localStorage.getItem('shopit_db_purged_moderator_only_v4')) {
+    localStorage.setItem('shopit_sellers', '[]');
+    localStorage.setItem('shopit_products_ready_made', '[]');
     localStorage.removeItem('shopit_products');
-    localStorage.removeItem('shopit_orders');
-    localStorage.removeItem('shopit_conversations');
-    localStorage.removeItem('shopit_messages');
-    localStorage.removeItem('shopit_wallets');
-    localStorage.removeItem('shopit_ledger_entries_v5');
-    localStorage.removeItem('shopit_paystack_webhooks_v5');
-    localStorage.removeItem('shopit_disputes');
-    localStorage.removeItem('shopit_verification_requests');
-    localStorage.removeItem('shopit_anti_bypass_flags');
-    localStorage.setItem('shopit_v5_clean_zero_balances', 'true');
+    localStorage.setItem('shopit_orders', '[]');
+    localStorage.setItem('shopit_conversations', '[]');
+    localStorage.setItem('shopit_messages', '{}');
+    localStorage.setItem('shopit_wallets', '{}');
+    localStorage.setItem('shopit_cart', '[]');
+    localStorage.setItem('shopit_wishlist', '[]');
+    localStorage.setItem('shopit_ledger_entries_v5', '[]');
+    localStorage.setItem('shopit_paystack_webhooks_v5', '[]');
+    localStorage.setItem('shopit_disputes', '[]');
+    localStorage.setItem('shopit_verification_requests', '[]');
+    localStorage.setItem('shopit_anti_bypass_flags', '[]');
+    localStorage.setItem('shopit_commissions', '[]');
+    localStorage.setItem('shopit_campus_drops', '[]');
+    localStorage.setItem('shopit_style_posts', '[]');
+    localStorage.setItem('shopit_registered_users', JSON.stringify([ROOT_MODERATOR_USER]));
+    localStorage.setItem('shopit_current_user', JSON.stringify(ROOT_MODERATOR_USER));
+    localStorage.setItem('shopit_db_purged_moderator_only_v4', 'true');
   }
 
   // Persistence helpers
   const [currentUser, setCurrentUser] = useState<User | null>(() => {
-    const saved = localStorage.getItem('shopit_current_user');
-    return saved ? JSON.parse(saved) : null;
+    try {
+      const saved = localStorage.getItem('shopit_current_user');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed.email?.toLowerCase() === ADMIN_CREDENTIALS.email.toLowerCase() || parsed.role === 'admin') {
+          return parsed;
+        }
+      }
+    } catch {}
+    return ROOT_MODERATOR_USER;
   });
 
   const [products, setProducts] = useState<Product[]>(() => {
-    const saved = localStorage.getItem('shopit_products_ready_made');
-    return saved ? JSON.parse(saved) : [];
+    try {
+      const saved = localStorage.getItem('shopit_products_ready_made');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
   });
 
   const [sellers, setSellers] = useState<SellerProfile[]>(() => {
-    const saved = localStorage.getItem('shopit_sellers');
-    return saved ? JSON.parse(saved) : INITIAL_SELLERS;
+    try {
+      const saved = localStorage.getItem('shopit_sellers');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
   });
 
   const [wishlist, setWishlist] = useState<string[]>(() => {
-    const saved = localStorage.getItem('shopit_wishlist');
-    return saved ? JSON.parse(saved) : [];
+    try {
+      const saved = localStorage.getItem('shopit_wishlist');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
   });
 
   const [cart, setCart] = useState<CartItem[]>(() => {
-    const saved = localStorage.getItem('shopit_cart');
-    return saved ? JSON.parse(saved) : [];
+    try {
+      const saved = localStorage.getItem('shopit_cart');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
   });
 
   const [orders, setOrders] = useState<Order[]>(() => {
-    const saved = localStorage.getItem('shopit_orders');
-    return saved ? JSON.parse(saved) : INITIAL_ORDERS;
+    try {
+      const saved = localStorage.getItem('shopit_orders');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
   });
 
   const [wallets, setWallets] = useState<Record<string, SellerWallet>>(() => {
-    const saved = localStorage.getItem('shopit_wallets');
-    return saved ? JSON.parse(saved) : INITIAL_WALLETS;
+    try {
+      const saved = localStorage.getItem('shopit_wallets');
+      return saved ? JSON.parse(saved) : {};
+    } catch {
+      return {};
+    }
   });
 
   // Rule 5: All balances come from an append-only ledger (sale, fee, withdrawal, refund)
@@ -414,6 +467,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   });
 
   const [language, setLanguage] = useState<'en' | 'pidgin'>('en');
+
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
+    try {
+      const saved = localStorage.getItem('shopit_theme');
+      if (saved === 'dark' || saved === 'light') return saved;
+      if (typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+        return 'dark';
+      }
+    } catch {}
+    return 'light';
+  });
+
+  useEffect(() => {
+    const root = document.documentElement;
+    if (theme === 'dark') {
+      root.classList.add('dark');
+    } else {
+      root.classList.remove('dark');
+    }
+    localStorage.setItem('shopit_theme', theme);
+  }, [theme]);
 
   // Checkout & Coupon states
   const [isCheckoutModalOpen, setIsCheckoutModalOpen] = useState(false);
@@ -535,11 +609,83 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return saved ? JSON.parse(saved) : DEFAULT_FEE_SETTINGS;
   });
 
-  // Moderator Account Governance
+  // Moderator Account Governance - Only root moderator Adeyinka Joseph retained by default
   const [registeredUsers, setRegisteredUsers] = useState<User[]>(() => {
     try {
       const saved = localStorage.getItem('shopit_registered_users');
-      return saved ? JSON.parse(saved) : [];
+      if (saved) {
+        const parsed: User[] = JSON.parse(saved);
+        // Only keep admin moderator account
+        const filtered = parsed.filter(
+          u => u.email?.toLowerCase() === ADMIN_CREDENTIALS.email.toLowerCase() || u.id === 'admin_adeyinka_joseph' || u.role === 'admin'
+        );
+        if (filtered.length > 0) return filtered;
+      }
+    } catch {}
+    return [ROOT_MODERATOR_USER];
+  });
+
+  // Moderator Emergency Broadcast, Platform Killswitches & Audit Trail
+  const [broadcastAnnouncement, setBroadcastAnnouncement] = useState<BroadcastAnnouncement>(() => {
+    try {
+      const saved = localStorage.getItem('shopit_broadcast_announcement');
+      return saved
+        ? JSON.parse(saved)
+        : {
+            id: 'broad_default',
+            isActive: false,
+            title: 'Campus Safety & Verified Handshake Advisory',
+            message: 'All campus craft handoffs must be verified using the 4-digit Handshake OTP in daylight safe spots.',
+            tone: 'info',
+            createdAt: new Date().toISOString(),
+            author: 'Adeyinka Joseph (Moderator)',
+          };
+    } catch {
+      return {
+        id: 'broad_default',
+        isActive: false,
+        title: 'Campus Safety & Verified Handshake Advisory',
+        message: 'All campus craft handoffs must be verified using the 4-digit Handshake OTP in daylight safe spots.',
+        tone: 'info',
+        createdAt: new Date().toISOString(),
+        author: 'Adeyinka Joseph (Moderator)',
+      };
+    }
+  });
+
+  const [emergencyControls, setEmergencyControls] = useState<EmergencyControls>(() => {
+    try {
+      const saved = localStorage.getItem('shopit_emergency_controls');
+      return saved
+        ? JSON.parse(saved)
+        : {
+            maintenanceMode: false,
+            pauseNewOrders: false,
+            pauseSellerSignups: false,
+          };
+    } catch {
+      return {
+        maintenanceMode: false,
+        pauseNewOrders: false,
+        pauseSellerSignups: false,
+      };
+    }
+  });
+
+  const [adminAuditLogs, setAdminAuditLogs] = useState<AdminAuditLog[]>(() => {
+    try {
+      const saved = localStorage.getItem('shopit_admin_audit_logs');
+      return saved
+        ? JSON.parse(saved)
+        : [
+            {
+              id: 'audit_root_init',
+              action: 'SUPER_ADMIN_INITIALIZED',
+              details: 'Adeyinka Joseph moderator root security authority active across Shop It marketplace.',
+              timestamp: new Date().toISOString(),
+              moderatorName: 'Adeyinka Joseph',
+            },
+          ];
     } catch {
       return [];
     }
@@ -628,6 +774,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   useEffect(() => {
     localStorage.setItem('shopit_fee_settings', JSON.stringify(feeSettings));
   }, [feeSettings]);
+
+  useEffect(() => {
+    localStorage.setItem('shopit_broadcast_announcement', JSON.stringify(broadcastAnnouncement));
+  }, [broadcastAnnouncement]);
+
+  useEffect(() => {
+    localStorage.setItem('shopit_emergency_controls', JSON.stringify(emergencyControls));
+  }, [emergencyControls]);
+
+  useEffect(() => {
+    localStorage.setItem('shopit_admin_audit_logs', JSON.stringify(adminAuditLogs));
+  }, [adminAuditLogs]);
+
+  useEffect(() => {
+    localStorage.setItem('shopit_registered_users', JSON.stringify(registeredUsers));
+  }, [registeredUsers]);
 
   // Phase 4: Logistics persistence
   useEffect(() => {
@@ -1996,6 +2158,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     notify(`Account "${targetUser?.name || 'User'}" (${targetEmail || userId}) permanently deleted by Moderator.`, 'success');
+    addAdminAuditLog('ACCOUNT_DELETED', `Permanently deleted account ${targetUser?.name || 'User'} (${targetEmail || userId})`, userId);
     return true;
   };
 
@@ -2015,10 +2178,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       toggleWalletFreeze(userId, true, reason || 'Account suspended by moderator');
       setSellers(prev => prev.map(s => s.id === userId ? { ...s, vacationMode: true } : s));
       notify(`Account suspended and store hidden from marketplace.`, 'info');
+      addAdminAuditLog('ACCOUNT_SUSPENDED', `Suspended account ${userId}. Reason: ${reason || 'Safety violation'}`, userId);
     } else {
       toggleWalletFreeze(userId, false);
       setSellers(prev => prev.map(s => s.id === userId ? { ...s, vacationMode: false } : s));
       notify(`Account suspension lifted by moderator.`, 'success');
+      addAdminAuditLog('ACCOUNT_UNSUSPENDED', `Lifted suspension for account ${userId}`, userId);
     }
   };
 
@@ -2033,6 +2198,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return updated;
     });
     notify('Password reset successfully for account.', 'success');
+    addAdminAuditLog('PASSWORD_RESET', `Direct password reset executed for account ${userId}`, userId);
     return true;
   };
 
@@ -2059,16 +2225,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         : `Seller verification status revoked.`,
       'info'
     );
+    addAdminAuditLog(
+      isVerified ? 'NIN_BADGE_GRANTED' : 'NIN_BADGE_REVOKED',
+      `Seller NIN verification status set to ${isVerified ? 'VERIFIED' : 'UNVERIFIED'}`,
+      sellerId
+    );
   };
 
   const adminForceDeleteProduct = (productId: string) => {
     deleteProduct(productId);
     notify(`Listing #${productId} deleted permanently by moderator.`, 'info');
+    addAdminAuditLog('PRODUCT_FORCE_DELETED', `Deleted product listing #${productId} from marketplace`, productId);
   };
 
   const adminForceReleaseEscrow = (orderId: string) => {
     confirmItemReceived(orderId);
     notify(`[Moderator Override] Escrow released for Order #${orderId} to seller available balance.`, 'success');
+    addAdminAuditLog('ESCROW_FORCE_RELEASED', `Escrow funds force-released directly to seller for order #${orderId}`, orderId);
   };
 
   const adminForceRefundOrder = (orderId: string, notes?: string) => {
@@ -2104,6 +2277,45 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
     });
     notify(`[Moderator Override] Order #${orderId} cancelled & 100% refunded to buyer.`, 'success');
+    addAdminAuditLog('ORDER_FORCE_REFUNDED', `Order #${orderId} cancelled and funds returned to buyer. Notes: ${notes || 'Direct intervention'}`, orderId);
+  };
+
+  const addAdminAuditLog = (action: string, details: string, targetId?: string) => {
+    const newEntry: AdminAuditLog = {
+      id: `audit_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      action,
+      targetId,
+      details,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + ' · ' + new Date().toLocaleDateString(),
+      moderatorName: currentUser?.name || 'Adeyinka Joseph (Moderator)',
+    };
+    setAdminAuditLogs(prev => [newEntry, ...prev.slice(0, 49)]);
+  };
+
+  const updateBroadcastAnnouncement = (data: Partial<BroadcastAnnouncement>) => {
+    setBroadcastAnnouncement(prev => {
+      const updated = { ...prev, ...data };
+      localStorage.setItem('shopit_broadcast_announcement', JSON.stringify(updated));
+      return updated;
+    });
+    addAdminAuditLog(
+      data.isActive !== undefined ? (data.isActive ? 'BROADCAST_ACTIVATED' : 'BROADCAST_DEACTIVATED') : 'BROADCAST_UPDATED',
+      `Live site broadcast announcement updated: "${data.title || broadcastAnnouncement.title}"`
+    );
+    notify(data.isActive ? 'Site-wide broadcast is now live!' : 'Broadcast settings updated.', 'info');
+  };
+
+  const updateEmergencyControls = (controls: Partial<EmergencyControls>) => {
+    setEmergencyControls(prev => {
+      const updated = { ...prev, ...controls };
+      localStorage.setItem('shopit_emergency_controls', JSON.stringify(updated));
+      return updated;
+    });
+    const changed = Object.entries(controls)
+      .map(([k, v]) => `${k}=${v}`)
+      .join(', ');
+    addAdminAuditLog('KILLSWITCH_TOGGLED', `Emergency platform killswitches updated: ${changed}`);
+    notify('Emergency platform control updated.', 'info');
   };
 
   const openCheckoutModal = () => setIsCheckoutModalOpen(true);
@@ -2121,6 +2333,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setLanguage(prev => {
       const next = prev === 'en' ? 'pidgin' : 'en';
       notify(next === 'pidgin' ? 'Language set to Naija Pidgin' : 'Language set to English', 'info');
+      return next;
+    });
+  };
+
+  const toggleTheme = () => {
+    setTheme(prev => {
+      const next = prev === 'light' ? 'dark' : 'light';
+      notify(next === 'dark' ? 'Night Mode activated · High-contrast dark theme' : 'Day Mode activated', 'info');
       return next;
     });
   };
@@ -2475,6 +2695,69 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     notify('All products removed. Ready for new student artisans to put products!', 'info');
   };
 
+  const clearMarketplaceDatabase = () => {
+    // 1. Wipe all products and listings
+    setProducts([]);
+    // 2. Wipe all sellers and shops
+    setSellers([]);
+    // 3. Wipe all orders
+    setOrders([]);
+    // 4. Wipe all wallets
+    setWallets({});
+    // 5. Wipe shopping cart and wishlist
+    setCart([]);
+    setWishlist([]);
+    // 6. Wipe all conversations and messages
+    setConversations([]);
+    setMessages({});
+    // 7. Wipe verification requests, disputes, anti-bypass flags
+    setVerificationRequests([]);
+    setDisputes([]);
+    setAntiBypassFlags([]);
+    // 8. Wipe ledgers and webhooks
+    setLedgerEntries([]);
+    setPaystackWebhooks([]);
+    // 9. Wipe commissions, drops, style posts
+    setCommissions([]);
+    setCampusDrops([]);
+    setStylePosts([]);
+    // 10. Wipe all user accounts except root moderator
+    setRegisteredUsers([ROOT_MODERATOR_USER]);
+    // 11. Ensure currentUser is root moderator
+    setCurrentUser(ROOT_MODERATOR_USER);
+
+    // 12. Immediately persist everything to localStorage
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('shopit_sellers', '[]');
+      localStorage.setItem('shopit_products_ready_made', '[]');
+      localStorage.removeItem('shopit_products');
+      localStorage.setItem('shopit_orders', '[]');
+      localStorage.setItem('shopit_wallets', '{}');
+      localStorage.setItem('shopit_cart', '[]');
+      localStorage.setItem('shopit_wishlist', '[]');
+      localStorage.setItem('shopit_conversations', '[]');
+      localStorage.setItem('shopit_messages', '{}');
+      localStorage.setItem('shopit_verification_requests', '[]');
+      localStorage.setItem('shopit_disputes', '[]');
+      localStorage.setItem('shopit_anti_bypass_flags', '[]');
+      localStorage.setItem('shopit_ledger_entries_v5', '[]');
+      localStorage.setItem('shopit_paystack_webhooks_v5', '[]');
+      localStorage.setItem('shopit_commissions', '[]');
+      localStorage.setItem('shopit_campus_drops', '[]');
+      localStorage.setItem('shopit_style_posts', '[]');
+      localStorage.setItem('shopit_registered_users', JSON.stringify([ROOT_MODERATOR_USER]));
+      localStorage.setItem('shopit_current_user', JSON.stringify(ROOT_MODERATOR_USER));
+      localStorage.setItem('shopit_db_purged_moderator_only_v4', 'true');
+    }
+
+    addAdminAuditLog(
+      'DATABASE_PURGED',
+      'Full database wipe executed by Moderator Adeyinka Joseph. All sellers, businesses, listings, and accounts removed. Moderator preserved.'
+    );
+
+    notify('Database successfully cleared! All sellers, accounts, and businesses wiped. Only Adeyinka Joseph (Moderator) remains.', 'success');
+  };
+
   return (
     <AppContext.Provider
       value={{
@@ -2570,6 +2853,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         adminForceDeleteProduct,
         adminForceReleaseEscrow,
         adminForceRefundOrder,
+        broadcastAnnouncement,
+        updateBroadcastAnnouncement,
+        emergencyControls,
+        updateEmergencyControls,
+        adminAuditLogs,
+        addAdminAuditLog,
+        clearMarketplaceDatabase,
         // Phase 4: Campus Safe Logistics & Handshake OTP
         safePickupSpots,
         campusRunners,
@@ -2626,6 +2916,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         toggleLowDataMode,
         language,
         toggleLanguage,
+        theme,
+        toggleTheme,
         notifications,
         notify,
         dismissNotification,

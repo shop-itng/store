@@ -241,30 +241,30 @@ export const SellerWalletView: React.FC = () => {
         </div>
 
         {/* Balance 2: Pending Balance (Held in Escrow) */}
-        <div className="bg-white rounded-3xl p-6 sm:p-7 border-2 border-[#111111] shadow-[0_4px_0_#111111] flex flex-col justify-between">
+        <div className="bg-white dark:bg-[#15161C] rounded-3xl p-6 sm:p-7 border-2 border-[#111111] dark:border-[#27272A] shadow-[0_4px_0_#111111] dark:shadow-none flex flex-col justify-between">
           <div>
-            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-[#27272A]">
               <div className="flex items-center gap-2">
                 <Clock className="w-4 h-4 text-[#FF6B00]" />
-                <span className="text-xs font-bold text-slate-900">Pending in Escrow</span>
+                <span className="text-xs font-bold text-slate-900 dark:text-white">Pending in Escrow</span>
               </div>
-              <span className="text-[11px] font-bold text-[#111111] bg-[#FF6B00]/20 px-2.5 py-0.5 rounded-md border border-[#FF6B00]">
+              <span className="text-[11px] font-bold text-[#111111] dark:text-[#FF6B00] bg-[#FF6B00]/20 px-2.5 py-0.5 rounded-md border border-[#FF6B00]">
                 Awaiting Buyer Confirmation
               </span>
             </div>
 
             <div className="py-4">
-              <div className="text-3xl sm:text-4xl font-black font-mono-numbers tracking-tight text-slate-900">
+              <div className="text-3xl sm:text-4xl font-black font-mono-numbers tracking-tight text-slate-900 dark:text-white">
                 {formatNaira(currentWallet.pendingBalance)}
               </div>
-              <p className="text-xs text-slate-500 mt-1">
+              <p className="text-xs text-slate-500 dark:text-[#A1A1AA] mt-1">
                 Held safely until the buyer taps <strong>"Item received"</strong> or 5 days elapse without an open dispute.
               </p>
             </div>
           </div>
 
-          <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 text-xs text-slate-700 flex items-center gap-2">
-            <ShieldCheck className="w-4 h-4 text-[#16A34A] shrink-0" />
+          <div className="p-3 bg-slate-50 dark:bg-[#1E2028] rounded-xl border border-slate-200 dark:border-[#27272A] text-xs text-slate-700 dark:text-[#E4E4E7] flex items-center gap-2">
+            <ShieldCheck className="w-4 h-4 text-[#16A34A] dark:text-[#9FE870] shrink-0" />
             <span>
               <strong>Rule 2: </strong>
               Money moves to Available only after delivery confirmation or after the 5-day auto-release (if no open dispute).
@@ -274,11 +274,11 @@ export const SellerWalletView: React.FC = () => {
       </div>
 
       {/* Verified Payout Accounts Strip (Rule 4: OPay or Nigerian Bank via Paystack Transfers API) */}
-      <div className="bg-white rounded-2xl border-2 border-[#111111] p-5 space-y-3 shadow-xs">
+      <div className="bg-white dark:bg-[#15161C] rounded-2xl border-2 border-[#111111] dark:border-[#27272A] p-5 space-y-3 shadow-xs">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <Building2 className="w-4 h-4 text-slate-900" />
-            <h3 className="text-sm font-black text-slate-900">Verified Payout Accounts (OPay / Banks)</h3>
+            <Building2 className="w-4 h-4 text-slate-900 dark:text-white" />
+            <h3 className="text-sm font-black text-slate-900 dark:text-white">Verified Payout Accounts (OPay / Banks)</h3>
           </div>
           <button
             onClick={() => setIsAddAccountModalOpen(true)}
@@ -296,7 +296,7 @@ export const SellerWalletView: React.FC = () => {
               return (
                 <div
                   key={acc.id}
-                  className="p-3.5 rounded-xl border-2 border-slate-200 bg-slate-50 flex items-center justify-between gap-3 text-xs"
+                  className="p-3.5 rounded-xl border-2 border-slate-200 dark:border-[#27272A] bg-slate-50 dark:bg-[#1E2028] flex items-center justify-between gap-3 text-xs"
                 >
                   <div>
                     <div className="flex items-center gap-1.5 font-black text-slate-900">

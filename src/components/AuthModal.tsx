@@ -30,6 +30,7 @@ export const AuthModal: React.FC = () => {
     submitSellerRegistration,
     login,
     notify,
+    emergencyControls,
   } = useApp();
 
   // Login form state
@@ -253,25 +254,25 @@ export const AuthModal: React.FC = () => {
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
-      <div className="bg-white rounded-3xl max-w-md w-full p-6 sm:p-8 space-y-6 shadow-2xl relative">
+    <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+      <div className="bg-white dark:bg-[#15161C] rounded-3xl max-w-md w-full p-6 sm:p-8 space-y-6 shadow-2xl relative border border-neutral-200 dark:border-[#27272A]">
         {/* Close Button */}
         <button
           onClick={closeAuthModal}
-          className="absolute top-5 right-5 text-slate-400 hover:text-slate-700 min-h-[38px] min-w-[38px] flex items-center justify-center rounded-full hover:bg-slate-100 transition-colors"
+          className="absolute top-5 right-5 text-slate-400 hover:text-slate-700 dark:hover:text-white min-h-[38px] min-w-[38px] flex items-center justify-center rounded-full hover:bg-slate-100 dark:hover:bg-[#1E2028] transition-colors"
         >
           <X className="w-5 h-5" />
         </button>
 
         {/* Header Tabs */}
         {authTab !== 'otp' && authTab !== 'seller_register' && authTab !== 'forgot_password' && (
-          <div className="flex border-b border-[#E4E4E7] pb-2">
+          <div className="flex border-b border-[#E4E4E7] dark:border-[#27272A] pb-2">
             <button
               onClick={() => setAuthTab('login')}
               className={`flex-1 text-center py-2 text-sm font-bold border-b-2 transition-all ${
                 authTab === 'login'
-                  ? 'border-[#FF6B00] text-[#111111]'
-                  : 'border-transparent text-[#71717A] hover:text-[#111111]'
+                  ? 'border-[#FF6B00] text-[#111111] dark:text-white'
+                  : 'border-transparent text-[#71717A] dark:text-[#A1A1AA] hover:text-[#111111] dark:hover:text-white'
               }`}
             >
               Sign In
@@ -280,8 +281,8 @@ export const AuthModal: React.FC = () => {
               onClick={() => setAuthTab('signup')}
               className={`flex-1 text-center py-2 text-sm font-bold border-b-2 transition-all ${
                 authTab === 'signup'
-                  ? 'border-[#FF6B00] text-[#111111]'
-                  : 'border-transparent text-[#71717A] hover:text-[#111111]'
+                  ? 'border-[#FF6B00] text-[#111111] dark:text-white'
+                  : 'border-transparent text-[#71717A] dark:text-[#A1A1AA] hover:text-[#111111] dark:hover:text-white'
               }`}
             >
               Create Account
@@ -293,15 +294,15 @@ export const AuthModal: React.FC = () => {
         {authTab === 'login' && (
           <div className="space-y-4">
             <div>
-              <h2 className="text-xl font-black text-[#111111]">Sign In to Shop It</h2>
-              <p className="text-xs text-[#71717A] mt-1">
+              <h2 className="text-xl font-black text-[#111111] dark:text-white">Sign In to Shop It</h2>
+              <p className="text-xs text-[#71717A] dark:text-[#A1A1AA] mt-1">
                 Enter your email and password to access your account.
               </p>
             </div>
 
             <form onSubmit={handleLoginFormSubmit} className="space-y-3.5">
               <div>
-                <label className="text-xs font-semibold text-slate-700 block mb-1">
+                <label className="text-xs font-semibold text-slate-700 dark:text-slate-300 block mb-1">
                   Email Address
                 </label>
                 <input
@@ -310,13 +311,13 @@ export const AuthModal: React.FC = () => {
                   placeholder="e.g. yourname@gmail.com"
                   value={loginEmail}
                   onChange={e => setLoginEmail(e.target.value)}
-                  className="w-full h-11 px-3.5 rounded-xl border border-slate-200 text-xs sm:text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#FF6B00]"
+                  className="w-full h-11 px-3.5 rounded-xl border border-slate-200 dark:border-[#27272A] bg-white dark:bg-[#1E2028] text-xs sm:text-sm text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-[#FF6B00]"
                 />
               </div>
 
               <div>
                 <div className="flex items-center justify-between mb-1">
-                  <label className="text-xs font-semibold text-slate-700">
+                  <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">
                     Password
                   </label>
                   <button
@@ -337,7 +338,7 @@ export const AuthModal: React.FC = () => {
                   placeholder="••••••••"
                   value={loginPassword}
                   onChange={e => setLoginPassword(e.target.value)}
-                  className="w-full h-11 px-3.5 rounded-xl border border-slate-200 text-xs sm:text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#FF6B00]"
+                  className="w-full h-11 px-3.5 rounded-xl border border-slate-200 dark:border-[#27272A] bg-white dark:bg-[#1E2028] text-xs sm:text-sm text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-[#FF6B00]"
                 />
               </div>
 
@@ -350,8 +351,8 @@ export const AuthModal: React.FC = () => {
               </button>
             </form>
 
-            <div className="pt-3 border-t border-slate-100 text-center">
-              <p className="text-xs text-[#71717A]">
+            <div className="pt-3 border-t border-slate-100 dark:border-[#27272A] text-center">
+              <p className="text-xs text-[#71717A] dark:text-[#A1A1AA]">
                 Don't have an account?{' '}
                 <button
                   type="button"
@@ -526,17 +527,31 @@ export const AuthModal: React.FC = () => {
               </button>
               <button
                 type="button"
-                onClick={() => setRole('seller')}
+                onClick={() => {
+                  if (emergencyControls?.pauseSellerSignups) {
+                    notify('New seller registrations are temporarily paused by platform moderation. Please join as a shopper for now.', 'info');
+                    return;
+                  }
+                  setRole('seller');
+                }}
                 className={`py-2 text-xs font-bold rounded-lg transition-all flex items-center justify-center gap-1.5 ${
+                  emergencyControls?.pauseSellerSignups ? 'opacity-60 cursor-not-allowed' : ''
+                } ${
                   role === 'seller'
                     ? 'bg-white text-[#111111] shadow-xs font-black'
                     : 'text-slate-600 hover:text-slate-900'
                 }`}
               >
                 <Store className="w-3.5 h-3.5 text-[#FF6B00]" />
-                <span>Youth Seller</span>
+                <span>Youth Seller {emergencyControls?.pauseSellerSignups ? '(Paused)' : ''}</span>
               </button>
             </div>
+
+            {emergencyControls?.pauseSellerSignups && (
+              <div className="p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-[11px] text-amber-900 leading-tight">
+                <strong>Moderator Notice:</strong> New artisan seller registrations are temporarily paused for routine safety review. Buyer signups are fully open.
+              </div>
+            )}
 
             <div>
               <label className="text-xs font-semibold text-slate-700 block mb-1">Full Name</label>

@@ -33,10 +33,16 @@ import {
   Store,
   Package,
   X,
+  Megaphone,
+  Radio,
+  Power,
+  ShieldAlert,
+  History,
 } from 'lucide-react';
 import { formatNaira, calculateServiceFee, getPricingBreakdown } from '../utils/pricing';
-import { AdminSubRole, LedgerEntryType } from '../types';
+import { AdminSubRole, LedgerEntryType, Order } from '../types';
 import { PAYSTACK_CONFIG } from '../utils/paystackService';
+import { EscrowReceiptModal } from './EscrowReceiptModal';
 
 export const AdminPanel: React.FC = () => {
   const {
@@ -70,7 +76,16 @@ export const AdminPanel: React.FC = () => {
     adminForceDeleteProduct,
     adminForceReleaseEscrow,
     adminForceRefundOrder,
+    broadcastAnnouncement,
+    updateBroadcastAnnouncement,
+    emergencyControls,
+    updateEmergencyControls,
+    adminAuditLogs,
+    clearMarketplaceDatabase,
   } = useApp();
+
+  const [isClearDbModalOpen, setIsClearDbModalOpen] = useState(false);
+  const [clearDbConfirmText, setClearDbConfirmText] = useState('');
 
   const [activeTab, setActiveTab] = useState<AdminSubRole>(adminSubRole || 'moderator');
   const [selectedVerificationDoc, setSelectedVerificationDoc] = useState<string | null>(null);
@@ -126,6 +141,13 @@ export const AdminPanel: React.FC = () => {
     newPassword: '',
   });
   const [searchProductQuery, setSearchProductQuery] = useState('');
+  const [broadcastForm, setBroadcastForm] = useState({
+    title: broadcastAnnouncement.title,
+    message: broadcastAnnouncement.message,
+    tone: broadcastAnnouncement.tone,
+    isActive: broadcastAnnouncement.isActive,
+  });
+  const [selectedAdminReceiptOrder, setSelectedAdminReceiptOrder] = useState<Order | null>(null);
 
   // Calculate live financial figures
   const pendingOrders = orders.filter(o => o.status === 'paid' || o.status === 'packed' || o.status === 'shipped' || o.status === 'delivered');
@@ -159,39 +181,55 @@ export const AdminPanel: React.FC = () => {
           </p>
         </div>
 
-        {/* Sub-role selector tabs */}
-        <div className="flex items-center bg-stone-900 p-1.5 rounded-xl border border-stone-800 shrink-0 overflow-x-auto gap-1">
-          {[
-            { id: 'moderator', label: 'NIN & Safety', icon: ShieldCheck, badge: verificationRequests.filter(r => r.status === 'pending').length },
-            { id: 'accounts', label: 'All Accounts & Powers', icon: Users, badge: registeredUsers.length },
-            { id: 'finance', label: 'Finance & Escrow', icon: DollarSign, badge: undefined },
-            { id: 'support', label: 'Support & Disputes', icon: Headphones, badge: disputes.filter(d => d.status === 'open').length },
-          ].map(tab => {
-            const Icon = tab.icon;
-            const isActive = activeTab === tab.id;
-            return (
-              <button
-                key={tab.id}
-                onClick={() => {
-                  setActiveTab(tab.id as AdminSubRole);
-                  setAdminSubRole(tab.id as AdminSubRole);
-                }}
-                className={`flex items-center gap-2 px-3 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-black transition-all ${
-                  isActive
-                    ? 'bg-[#FF6B00] text-[#111111] border-2 border-[#111111] shadow-[0_2px_0_#9FE870]'
-                    : 'text-stone-400 hover:text-white hover:bg-stone-800'
-                }`}
-              >
-                <Icon className={`w-4 h-4 shrink-0 ${isActive ? 'text-[#111111]' : ''}`} />
-                <span>{tab.label}</span>
-                {tab.badge !== undefined && tab.badge > 0 && (
-                  <span className="w-5 h-5 rounded-full bg-[#9FE870] text-[#111111] border border-[#111111] text-[10px] font-black flex items-center justify-center shrink-0">
-                    {tab.badge}
-                  </span>
-                )}
-              </button>
-            );
-          })}
+        {/* Sub-role selector tabs and Quick Database Wipe */}
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+          <div className="flex items-center bg-stone-900 p-1.5 rounded-xl border border-stone-800 shrink-0 overflow-x-auto gap-1">
+            {[
+              { id: 'moderator', label: 'NIN & Safety', icon: ShieldCheck, badge: verificationRequests.filter(r => r.status === 'pending').length },
+              { id: 'accounts', label: 'All Accounts & Powers', icon: Users, badge: registeredUsers.length },
+              { id: 'finance', label: 'Finance & Escrow', icon: DollarSign, badge: undefined },
+              { id: 'support', label: 'Support & Disputes', icon: Headphones, badge: disputes.filter(d => d.status === 'open').length },
+              { id: 'emergency', label: 'Broadcast & Killswitches', icon: Megaphone, badge: broadcastAnnouncement.isActive ? 1 : undefined },
+            ].map(tab => {
+              const Icon = tab.icon;
+              const isActive = activeTab === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  onClick={() => {
+                    setActiveTab(tab.id as AdminSubRole);
+                    setAdminSubRole(tab.id as AdminSubRole);
+                  }}
+                  className={`flex items-center gap-2 px-3 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-black transition-all ${
+                    isActive
+                      ? 'bg-[#FF6B00] text-[#111111] border-2 border-[#111111] shadow-[0_2px_0_#9FE870]'
+                      : 'text-stone-400 hover:text-white hover:bg-stone-800'
+                  }`}
+                >
+                  <Icon className={`w-4 h-4 shrink-0 ${isActive ? 'text-[#111111]' : ''}`} />
+                  <span>{tab.label}</span>
+                  {tab.badge !== undefined && tab.badge > 0 && (
+                    <span className="w-5 h-5 rounded-full bg-[#9FE870] text-[#111111] border border-[#111111] text-[10px] font-black flex items-center justify-center shrink-0">
+                      {tab.badge}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+
+          <button
+            type="button"
+            onClick={() => {
+              setClearDbConfirmText('');
+              setIsClearDbModalOpen(true);
+            }}
+            className="px-3.5 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-black transition-all flex items-center justify-center gap-1.5 border border-red-500 shadow-md shrink-0 active:scale-95"
+            title="Wipe database: removes all sellers, businesses, and accounts except Moderator"
+          >
+            <Trash2 className="w-4 h-4" />
+            <span>Clear Database</span>
+          </button>
         </div>
       </div>
 
@@ -402,6 +440,363 @@ export const AdminPanel: React.FC = () => {
                 </div>
               ))}
             </div>
+          </div>
+
+          {/* Moderator Listings Governance & Pruning */}
+          <div className="bg-white rounded-2xl border border-stone-200 overflow-hidden shadow-xs">
+            <div className="p-4 sm:p-5 border-b border-stone-200 bg-stone-50/60 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <h3 className="text-base font-bold font-heading text-stone-900 flex items-center gap-2">
+                  <Package className="w-4 h-4 text-[#FF6B00]" />
+                  <span>Marketplace Listings Oversight & Instant Pruning</span>
+                </h3>
+                <p className="text-xs text-stone-500 mt-0.5">
+                  Permanently delete counterfeit, inappropriate, or prohibited crafts listed by sellers.
+                </p>
+              </div>
+              <div className="relative">
+                <Search className="w-3.5 h-3.5 text-stone-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  value={searchProductQuery}
+                  onChange={e => setSearchProductQuery(e.target.value)}
+                  placeholder="Search craft title..."
+                  className="pl-8 pr-3 py-1.5 rounded-xl border border-stone-300 text-xs bg-white"
+                />
+              </div>
+            </div>
+
+            {products.length > 0 ? (
+              <div className="divide-y divide-stone-100 max-h-96 overflow-y-auto">
+                {products
+                  .filter(p => !searchProductQuery || p.title.toLowerCase().includes(searchProductQuery.toLowerCase()))
+                  .map(product => (
+                    <div key={product.id} className="p-3.5 sm:p-4 flex items-center justify-between gap-3 hover:bg-stone-50/50">
+                      <div className="flex items-center gap-3">
+                        <div className="w-12 h-12 rounded-xl bg-stone-100 overflow-hidden border border-stone-200 shrink-0">
+                          <img src={product.images[0]} alt={product.title} className="w-full h-full object-cover" />
+                        </div>
+                        <div>
+                          <h4 className="text-xs font-bold text-stone-900 line-clamp-1">{product.title}</h4>
+                          <div className="flex items-center gap-2 text-[11px] text-stone-500 mt-0.5">
+                            <span>Shop: <strong>{product.sellerShopName}</strong></span>
+                            <span>·</span>
+                            <span>Price: <strong className="text-stone-800">{formatNaira(product.displayPrice)}</strong></span>
+                            <span>·</span>
+                            <span>Stock: {product.stock}</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => toggleProductStock(product.id)}
+                          className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-colors ${
+                            product.stock > 0
+                              ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                              : 'bg-rose-50 text-rose-800 border border-rose-200'
+                          }`}
+                        >
+                          {product.stock > 0 ? 'In Stock' : 'Out of Stock'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => adminForceDeleteProduct(product.id)}
+                          className="px-2.5 py-1 rounded-lg bg-red-600 hover:bg-red-700 text-white text-xs font-bold flex items-center gap-1 transition-colors shadow-2xs"
+                          title="Permanently remove listing from marketplace"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          <span>Delete</span>
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+              </div>
+            ) : (
+              <div className="p-8 text-center text-xs text-stone-500">
+                No active listings on the marketplace.
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================= */}
+      {/* 1.5 ACCOUNTS & GOVERNANCE TAB (MODERATOR SUPER-POWERS)    */}
+      {/* ========================================================= */}
+      {activeTab === 'accounts' && (
+        <div className="space-y-6">
+          {/* Metrics */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+            <div className="p-4 bg-white rounded-xl border border-stone-200 shadow-2xs">
+              <span className="text-xs text-stone-500 font-medium">Registered Accounts</span>
+              <p className="text-xl sm:text-2xl font-bold font-mono-numbers text-stone-900 mt-1">
+                {registeredUsers.length}
+              </p>
+              <span className="text-[11px] text-stone-500">Live platform accounts</span>
+            </div>
+
+            <div className="p-4 bg-white rounded-xl border border-stone-200 shadow-2xs">
+              <span className="text-xs text-stone-500 font-medium">Youth Sellers</span>
+              <p className="text-xl sm:text-2xl font-bold font-mono-numbers text-[#f95700] mt-1">
+                {registeredUsers.filter(u => u.role === 'seller').length}
+              </p>
+              <span className="text-[11px] text-stone-500">Store owners</span>
+            </div>
+
+            <div className="p-4 bg-white rounded-xl border border-stone-200 shadow-2xs">
+              <span className="text-xs text-stone-500 font-medium">Campus Shoppers</span>
+              <p className="text-xl sm:text-2xl font-bold font-mono-numbers text-blue-600 mt-1">
+                {registeredUsers.filter(u => u.role === 'buyer').length}
+              </p>
+              <span className="text-[11px] text-stone-500">Buyer profiles</span>
+            </div>
+
+            <div className="p-4 bg-white rounded-xl border border-stone-200 shadow-2xs">
+              <span className="text-xs text-stone-500 font-medium">Suspended Accounts</span>
+              <p className="text-xl sm:text-2xl font-bold font-mono-numbers text-red-600 mt-1">
+                {registeredUsers.filter(u => u.isBanned).length}
+              </p>
+              <span className="text-[11px] text-red-500 font-medium">Moderator restricted</span>
+            </div>
+          </div>
+
+          {/* Accounts Governance Table Card */}
+          <div className="bg-white rounded-2xl border border-stone-200 overflow-hidden shadow-xs">
+            <div className="p-4 sm:p-5 border-b border-stone-200 bg-stone-50/60 flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div>
+                <h3 className="text-base font-bold font-heading text-stone-900 flex items-center gap-2">
+                  <Users className="w-4 h-4 text-[#FF6B00]" />
+                  <span>Platform Account Governance & Moderator Control</span>
+                </h3>
+                <p className="text-xs text-stone-500 mt-0.5">
+                  Full administrative authority: delete bad accounts, ban violators, reset passwords, and toggle NIN verification badges.
+                </p>
+              </div>
+
+              {/* Search & Role Filter */}
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="relative">
+                  <Search className="w-3.5 h-3.5 text-stone-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={searchUserQuery}
+                    onChange={e => setSearchUserQuery(e.target.value)}
+                    placeholder="Search name or email..."
+                    className="pl-8 pr-3 py-1.5 rounded-xl border border-stone-300 text-xs bg-white focus:outline-hidden focus:border-[#FF6B00]"
+                  />
+                </div>
+
+                <div className="flex items-center bg-stone-200/70 p-1 rounded-xl text-xs font-bold">
+                  {(['all', 'seller', 'buyer'] as const).map(role => (
+                    <button
+                      key={role}
+                      onClick={() => setFilterUserRole(role)}
+                      className={`px-2.5 py-1 rounded-lg capitalize transition-all ${
+                        filterUserRole === role
+                          ? 'bg-white text-stone-900 shadow-xs'
+                          : 'text-stone-600 hover:text-stone-900'
+                      }`}
+                    >
+                      {role}
+                    </button>
+                  ))}
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setClearDbConfirmText('');
+                    setIsClearDbModalOpen(true);
+                  }}
+                  className="px-3 py-1.5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-black transition-all flex items-center gap-1.5 border border-red-700 shadow-2xs active:scale-95"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>Wipe All Other Accounts</span>
+                </button>
+              </div>
+            </div>
+
+            {/* List of Users */}
+            {(() => {
+              const filteredUsers = registeredUsers.filter(u => {
+                if (filterUserRole !== 'all' && u.role !== filterUserRole) return false;
+                if (!searchUserQuery) return true;
+                const q = searchUserQuery.toLowerCase();
+                return (
+                  u.name.toLowerCase().includes(q) ||
+                  u.email.toLowerCase().includes(q) ||
+                  u.id.toLowerCase().includes(q)
+                );
+              });
+
+              if (filteredUsers.length === 0) {
+                return (
+                  <div className="p-12 text-center text-stone-500 space-y-2">
+                    <UserX className="w-8 h-8 text-stone-300 mx-auto" />
+                    <p className="text-sm font-semibold">No registered accounts found matching your filters.</p>
+                  </div>
+                );
+              }
+
+              return (
+                <div className="divide-y divide-stone-100">
+                  {filteredUsers.map(user => {
+                    const isMasterAdmin = user.id === 'admin_adeyinka_joseph';
+                    const sellerObj = sellers.find(s => s.id === user.id);
+                    const userProductsCount = products.filter(p => p.sellerId === user.id).length;
+
+                    return (
+                      <div
+                        key={user.id}
+                        className={`p-4 sm:p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4 transition-colors ${
+                          user.isBanned ? 'bg-red-50/50' : 'hover:bg-stone-50/50'
+                        }`}
+                      >
+                        <div className="flex items-start gap-3.5">
+                          <div className={`w-11 h-11 rounded-xl flex items-center justify-center font-bold text-sm shrink-0 border ${
+                            user.role === 'admin'
+                              ? 'bg-black text-[#9FE870] border-black'
+                              : user.role === 'seller'
+                              ? 'bg-amber-100 text-[#FF6B00] border-amber-200'
+                              : 'bg-blue-100 text-blue-700 border-blue-200'
+                          }`}>
+                            {user.name[0]?.toUpperCase() || 'U'}
+                          </div>
+
+                          <div className="space-y-1">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <h4 className="text-sm font-bold text-stone-900">{user.name}</h4>
+                              <span className="text-xs text-stone-500">({user.email})</span>
+
+                              {/* Role Badge */}
+                              <span className={`px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider border ${
+                                user.role === 'admin'
+                                  ? 'bg-black text-[#9FE870] border-black'
+                                  : user.role === 'seller'
+                                  ? 'bg-[#FF6B00] text-white border-[#FF6B00]'
+                                  : 'bg-blue-100 text-blue-800 border-blue-200'
+                              }`}>
+                                {user.role === 'admin' ? 'MODERATOR' : user.role.toUpperCase()}
+                              </span>
+
+                              {/* Status Badge */}
+                              {user.isBanned ? (
+                                <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-red-100 text-red-800 border border-red-200">
+                                  SUSPENDED
+                                </span>
+                              ) : (
+                                <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-emerald-100 text-emerald-800 border border-emerald-200">
+                                  ACTIVE
+                                </span>
+                              )}
+
+                              {isMasterAdmin && (
+                                <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-stone-900 text-stone-200 border border-stone-700">
+                                  PROTECTED ROOT ADMIN
+                                </span>
+                              )}
+                            </div>
+
+                            <div className="flex items-center gap-3 text-xs text-stone-500 flex-wrap">
+                              <span>ID: <code className="text-stone-700 font-mono">{user.id}</code></span>
+                              {user.phone && <span>· Phone: <strong className="text-stone-700">{user.phone}</strong></span>}
+                              {user.locationArea && <span>· Area: <strong className="text-stone-700">{user.locationArea}</strong></span>}
+                              {user.role === 'seller' && (
+                                <span className="text-[#FF6B00] font-semibold">
+                                  · Shop: "{sellerObj?.shopName || user.name}" ({userProductsCount} listings)
+                                </span>
+                              )}
+                            </div>
+
+                            {user.role === 'seller' && (
+                              <div className="pt-1 flex items-center gap-2 text-xs">
+                                <span className={`px-2 py-0.5 rounded-md text-[11px] font-bold ${
+                                  sellerObj?.isVerifiedSeller
+                                    ? 'bg-emerald-100 text-emerald-800'
+                                    : 'bg-stone-100 text-stone-600'
+                                }`}>
+                                  {sellerObj?.isVerifiedSeller ? '✓ NIN Verified Maker' : 'Unverified NIN'}
+                                </span>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Moderator Action Buttons for this user */}
+                        <div className="flex items-center gap-2 flex-wrap shrink-0">
+                          {user.role === 'seller' && (
+                            <button
+                              type="button"
+                              onClick={() => adminToggleSellerVerification(user.id, !sellerObj?.isVerifiedSeller)}
+                              className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition-colors flex items-center gap-1 ${
+                                sellerObj?.isVerifiedSeller
+                                  ? 'border-stone-300 text-stone-700 hover:bg-stone-100'
+                                  : 'border-emerald-300 bg-emerald-50 text-emerald-800 hover:bg-emerald-100'
+                              }`}
+                              title="Toggle NIN verified trust badge"
+                            >
+                              <ShieldCheck className="w-3.5 h-3.5" />
+                              <span>{sellerObj?.isVerifiedSeller ? 'Revoke NIN' : 'Grant NIN Badge'}</span>
+                            </button>
+                          )}
+
+                          <button
+                            type="button"
+                            onClick={() => setResetPasswordModal({
+                              isOpen: true,
+                              userId: user.id,
+                              userName: user.name,
+                              newPassword: '',
+                            })}
+                            className="px-3 py-1.5 rounded-xl border border-stone-300 text-stone-700 hover:bg-stone-100 text-xs font-bold transition-colors flex items-center gap-1"
+                            title="Reset password for user"
+                          >
+                            <Key className="w-3.5 h-3.5" />
+                            <span>Reset Pass</span>
+                          </button>
+
+                          {!isMasterAdmin && (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => banUserAccount(user.id, !user.isBanned)}
+                                className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition-colors flex items-center gap-1 ${
+                                  user.isBanned
+                                    ? 'border-emerald-300 text-emerald-800 bg-emerald-50 hover:bg-emerald-100'
+                                    : 'border-amber-300 text-amber-800 bg-amber-50 hover:bg-amber-100'
+                                }`}
+                                title={user.isBanned ? 'Unsuspend account' : 'Suspend account and freeze wallet'}
+                              >
+                                <Ban className="w-3.5 h-3.5" />
+                                <span>{user.isBanned ? 'Unsuspend' : 'Suspend'}</span>
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={() => setDeleteConfirmModal({
+                                  isOpen: true,
+                                  userId: user.id,
+                                  userName: user.name,
+                                  userEmail: user.email,
+                                  role: user.role,
+                                })}
+                                className="px-3 py-1.5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-bold transition-all shadow-2xs flex items-center gap-1 active:translate-y-0.5"
+                                title="Permanently delete user account"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                                <span>Delete Account</span>
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })()}
           </div>
         </div>
       )}
@@ -629,6 +1024,129 @@ export const AdminPanel: React.FC = () => {
             </div>
           </div>
 
+          {/* Orders & Escrow Financial Super-Powers (Moderator Authority) */}
+          <div className="bg-white rounded-2xl border border-stone-200 overflow-hidden shadow-xs">
+            <div className="p-4 sm:p-5 border-b border-stone-200 bg-stone-50/60 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div>
+                <h3 className="text-base font-bold font-heading text-stone-900 flex items-center gap-2">
+                  <ShieldCheck className="w-4 h-4 text-emerald-600" />
+                  <span>Escrow Vault Authority & Direct Intervention</span>
+                </h3>
+                <p className="text-xs text-stone-500 mt-0.5">
+                  Moderator authority over every transaction: bypass the 5-day release timer to instantly credit a seller, or force-refund a buyer immediately.
+                </p>
+              </div>
+              <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200">
+                {orders.length} Total Marketplace Orders
+              </span>
+            </div>
+
+            {orders.length > 0 ? (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-stone-100/70 border-b border-stone-200 text-stone-700 font-semibold">
+                    <tr>
+                      <th className="p-3.5">Order ID & Date</th>
+                      <th className="p-3.5">Customer</th>
+                      <th className="p-3.5">Artisan Shop</th>
+                      <th className="p-3.5">Grand Total</th>
+                      <th className="p-3.5">Escrow Status</th>
+                      <th className="p-3.5">Auto-Release Due</th>
+                      <th className="p-3.5 text-right">Moderator Super-Powers</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-stone-200">
+                    {orders.map(order => {
+                      const canRelease = order.status !== 'completed' && order.status !== 'cancelled';
+                      const canRefund = order.status !== 'completed' && order.status !== 'cancelled';
+
+                      return (
+                        <tr key={order.id} className="hover:bg-stone-50/50">
+                          <td className="p-3.5">
+                            <span className="font-mono font-bold text-stone-900 block">{order.id}</span>
+                            <span className="text-[11px] text-stone-400">
+                              {new Date(order.createdAt).toLocaleDateString()}
+                            </span>
+                          </td>
+                          <td className="p-3.5">
+                            <span className="font-medium text-stone-900 block">{order.buyerName || order.buyerMaskedId}</span>
+                            <span className="text-[11px] text-stone-500">{order.deliveryArea}</span>
+                          </td>
+                          <td className="p-3.5">
+                            <span className="font-semibold text-[#FF6B00] block">{order.items[0]?.sellerShopName || 'Artisan'}</span>
+                            <span className="text-[11px] text-stone-400">{order.items.length} item(s)</span>
+                          </td>
+                          <td className="p-3.5 font-mono-numbers font-bold text-stone-900">
+                            {formatNaira(order.grandTotal)}
+                          </td>
+                          <td className="p-3.5">
+                            <span className={`px-2 py-0.5 rounded-md font-bold text-[10px] uppercase tracking-wider ${
+                              order.status === 'completed'
+                                ? 'bg-emerald-100 text-emerald-800'
+                                : order.status === 'disputed'
+                                ? 'bg-rose-100 text-rose-800'
+                                : order.status === 'cancelled'
+                                ? 'bg-stone-200 text-stone-700'
+                                : 'bg-amber-100 text-amber-900'
+                            }`}>
+                              {order.status}
+                            </span>
+                          </td>
+                          <td className="p-3.5 text-[11px] font-mono text-stone-500">
+                            {order.status === 'completed'
+                              ? 'Funds Released'
+                              : order.status === 'cancelled'
+                              ? 'Refunded'
+                              : new Date(order.autoReleaseAt).toLocaleDateString()}
+                          </td>
+                          <td className="p-3.5 text-right">
+                            <div className="flex items-center justify-end gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => setSelectedAdminReceiptOrder(order)}
+                                className="px-2.5 py-1.5 rounded-lg border border-stone-300 hover:bg-stone-100 text-stone-700 font-bold text-[11px] transition-colors"
+                                title="Inspect official safe pass, 4-digit OTP, and cryptographic receipt"
+                              >
+                                Safe Pass
+                              </button>
+                              {canRelease && (
+                                <button
+                                  type="button"
+                                  onClick={() => adminForceReleaseEscrow(order.id)}
+                                  className="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[11px] transition-colors shadow-2xs"
+                                  title="Bypass 5-day timer and immediately credit seller available balance"
+                                >
+                                  Release Escrow
+                                </button>
+                              )}
+                              {canRefund && (
+                                <button
+                                  type="button"
+                                  onClick={() => adminForceRefundOrder(order.id, 'Moderator direct intervention')}
+                                  className="px-2.5 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white font-bold text-[11px] transition-colors shadow-2xs"
+                                  title="Immediately cancel order and refund buyer in full"
+                                >
+                                  Force Refund
+                                </button>
+                              )}
+                              {!canRelease && !canRefund && (
+                                <span className="text-stone-400 text-xs italic">Settled</span>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div className="p-8 text-center text-xs text-stone-500">
+                No orders placed yet. Orders will appear here with live escrow intervention controls.
+              </div>
+            )}
+          </div>
+
           {/* Seller Wallets Audit Table (Rule 2 & Rule 5) */}
           <div className="bg-white rounded-2xl border border-stone-200 overflow-hidden shadow-xs">
             <div className="p-4 sm:p-5 border-b border-stone-200 bg-stone-50/60 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
@@ -833,7 +1351,7 @@ export const AdminPanel: React.FC = () => {
 
             <div className="p-3 bg-stone-50 border-t border-stone-200 flex items-center justify-between text-[11px] text-stone-500">
               <span className="flex items-center gap-1.5 font-sans">
-                <CheckCircle className="w-3.5 h-3.5 text-emerald-600" />
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
                 <span>Append-only verification: Ledgers cannot be deleted or edited. Audit matches 100%.</span>
               </span>
               <span className="font-mono">{ledgerEntries.length} immutable records</span>
@@ -1041,6 +1559,462 @@ export const AdminPanel: React.FC = () => {
         </div>
       )}
 
+      {/* ========================================================= */}
+      {/* 4. EMERGENCY BROADCAST & PLATFORM KILLSWITCHES           */}
+      {/* ========================================================= */}
+      {activeTab === 'emergency' && (
+        <div className="space-y-6">
+          {/* Emergency Metrics & Master Status */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+            <div className={`p-4 rounded-xl border ${
+              broadcastAnnouncement.isActive
+                ? 'bg-amber-50 border-amber-300'
+                : 'bg-white border-stone-200'
+            }`}>
+              <span className="text-xs text-stone-500 font-medium">Broadcast Banner</span>
+              <p className={`text-xl sm:text-2xl font-bold font-mono-numbers mt-1 ${
+                broadcastAnnouncement.isActive ? 'text-amber-800' : 'text-stone-900'
+              }`}>
+                {broadcastAnnouncement.isActive ? 'LIVE ON SITE' : 'INACTIVE'}
+              </p>
+              <span className="text-[11px] text-stone-500">
+                {broadcastAnnouncement.isActive ? `Tone: ${broadcastAnnouncement.tone.toUpperCase()}` : 'Draft ready to publish'}
+              </span>
+            </div>
+
+            <div className={`p-4 rounded-xl border ${
+              emergencyControls.maintenanceMode
+                ? 'bg-red-50 border-red-300'
+                : 'bg-white border-stone-200'
+            }`}>
+              <span className="text-xs text-stone-500 font-medium">Maintenance Mode</span>
+              <p className={`text-xl sm:text-2xl font-bold font-mono-numbers mt-1 ${
+                emergencyControls.maintenanceMode ? 'text-red-700' : 'text-emerald-700'
+              }`}>
+                {emergencyControls.maintenanceMode ? 'LOCKDOWN ACTIVE' : 'DISABLED'}
+              </p>
+              <span className="text-[11px] text-stone-500">
+                {emergencyControls.maintenanceMode ? 'Visitors blocked from feed' : 'Public marketplace open'}
+              </span>
+            </div>
+
+            <div className={`p-4 rounded-xl border ${
+              emergencyControls.pauseNewOrders
+                ? 'bg-rose-50 border-rose-300'
+                : 'bg-white border-stone-200'
+            }`}>
+              <span className="text-xs text-stone-500 font-medium">Checkout Engine</span>
+              <p className={`text-xl sm:text-2xl font-bold font-mono-numbers mt-1 ${
+                emergencyControls.pauseNewOrders ? 'text-rose-700' : 'text-emerald-700'
+              }`}>
+                {emergencyControls.pauseNewOrders ? 'ORDERS PAUSED' : 'OPERATIONAL'}
+              </p>
+              <span className="text-[11px] text-stone-500">
+                {emergencyControls.pauseNewOrders ? 'New checkouts blocked' : 'Paystack escrow live'}
+              </span>
+            </div>
+
+            <div className="p-4 bg-white rounded-xl border border-stone-200">
+              <span className="text-xs text-stone-500 font-medium">Moderator Audit Trail</span>
+              <p className="text-xl sm:text-2xl font-bold font-mono-numbers text-stone-900 mt-1">
+                {adminAuditLogs.length}
+              </p>
+              <span className="text-[11px] text-stone-500">Actions logged this session</span>
+            </div>
+          </div>
+
+          {/* Broadcast Studio */}
+          <div className="bg-white rounded-2xl border border-stone-200 overflow-hidden shadow-xs">
+            <div className="p-4 sm:p-5 border-b border-stone-200 bg-stone-50/60 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <h3 className="text-base font-bold font-heading text-stone-900 flex items-center gap-2">
+                  <Megaphone className="w-4 h-4 text-[#FF6B00]" />
+                  <span>Site-Wide Emergency & Advisory Broadcast Studio</span>
+                </h3>
+                <p className="text-xs text-stone-500 mt-0.5">
+                  Broadcast an immediate official notice to all visitors and sellers across every page of Shop It.
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-semibold text-stone-700">Broadcast Status:</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const nextActive = !broadcastForm.isActive;
+                    setBroadcastForm(prev => ({ ...prev, isActive: nextActive }));
+                    updateBroadcastAnnouncement({ isActive: nextActive, title: broadcastForm.title, message: broadcastForm.message, tone: broadcastForm.tone });
+                  }}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-black transition-all border ${
+                    broadcastForm.isActive
+                      ? 'bg-red-600 hover:bg-red-700 text-white border-red-700 shadow-xs'
+                      : 'bg-stone-200 hover:bg-stone-300 text-stone-700 border-stone-300'
+                  }`}
+                >
+                  {broadcastForm.isActive ? 'DEACTIVATE BANNER' : 'ACTIVATE LIVE ON SITE'}
+                </button>
+              </div>
+            </div>
+
+            <div className="p-4 sm:p-6 space-y-5">
+              {/* Quick Presets */}
+              <div>
+                <span className="text-xs font-bold text-stone-700 block mb-2">
+                  Quick 1-Tap Advisory Templates:
+                </span>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setBroadcastForm({
+                        title: 'Campus Safe Handshake Protocol',
+                        message: 'Always verify your 4-digit Handshake OTP in person at a daylight porter station before accepting orders.',
+                        tone: 'warning',
+                        isActive: true,
+                      });
+                      updateBroadcastAnnouncement({
+                        title: 'Campus Safe Handshake Protocol',
+                        message: 'Always verify your 4-digit Handshake OTP in person at a daylight porter station before accepting orders.',
+                        tone: 'warning',
+                        isActive: true,
+                      });
+                    }}
+                    className="px-3 py-1.5 rounded-xl border border-amber-300 bg-amber-50 hover:bg-amber-100 text-xs font-semibold text-amber-950 transition-colors"
+                  >
+                    Handshake OTP Safety Protocol
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setBroadcastForm({
+                        title: 'Banking Network Advisory',
+                        message: 'Paystack bank transfers are experiencing slight delays. Card payments clear immediately into safe escrow.',
+                        tone: 'info',
+                        isActive: true,
+                      });
+                      updateBroadcastAnnouncement({
+                        title: 'Banking Network Advisory',
+                        message: 'Paystack bank transfers are experiencing slight delays. Card payments clear immediately into safe escrow.',
+                        tone: 'info',
+                        isActive: true,
+                      });
+                    }}
+                    className="px-3 py-1.5 rounded-xl border border-blue-300 bg-blue-50 hover:bg-blue-100 text-xs font-semibold text-blue-950 transition-colors"
+                  >
+                    Bank Network Notice
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setBroadcastForm({
+                        title: 'Urgent Safety Advisory',
+                        message: 'Moderator Notice: Deliveries after 7:00 PM are suspended. Please reschedule handoffs for daylight hours.',
+                        tone: 'emergency',
+                        isActive: true,
+                      });
+                      updateBroadcastAnnouncement({
+                        title: 'Urgent Safety Advisory',
+                        message: 'Moderator Notice: Deliveries after 7:00 PM are suspended. Please reschedule handoffs for daylight hours.',
+                        tone: 'emergency',
+                        isActive: true,
+                      });
+                    }}
+                    className="px-3 py-1.5 rounded-xl border border-red-300 bg-red-50 hover:bg-red-100 text-xs font-semibold text-red-950 transition-colors"
+                  >
+                    Night Delivery Restriction
+                  </button>
+                </div>
+              </div>
+
+              {/* Form Controls */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="md:col-span-2 space-y-1.5">
+                  <label className="text-xs font-bold text-stone-800">
+                    Broadcast Headline
+                  </label>
+                  <input
+                    type="text"
+                    value={broadcastForm.title}
+                    onChange={e => setBroadcastForm(prev => ({ ...prev, title: e.target.value }))}
+                    placeholder="e.g. Campus Safety Advisory"
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-stone-300 text-xs text-stone-900 bg-stone-50 focus:bg-white focus:outline-hidden focus:border-[#FF6B00]"
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-stone-800">
+                    Banner Tone & Urgency
+                  </label>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {(['info', 'warning', 'emergency', 'promo'] as const).map(t => (
+                      <button
+                        key={t}
+                        type="button"
+                        onClick={() => setBroadcastForm(prev => ({ ...prev, tone: t }))}
+                        className={`px-2.5 py-2 rounded-xl text-xs font-bold capitalize transition-all border ${
+                          broadcastForm.tone === t
+                            ? 'bg-stone-950 text-white border-stone-950 shadow-xs'
+                            : 'bg-white text-stone-700 border-stone-300 hover:bg-stone-50'
+                        }`}
+                      >
+                        {t}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-stone-800">
+                  Broadcast Message Body
+                </label>
+                <textarea
+                  rows={3}
+                  value={broadcastForm.message}
+                  onChange={e => setBroadcastForm(prev => ({ ...prev, message: e.target.value }))}
+                  placeholder="Enter the full announcement text visible to buyers and sellers..."
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-stone-300 text-xs text-stone-900 bg-stone-50 focus:bg-white focus:outline-hidden focus:border-[#FF6B00]"
+                />
+              </div>
+
+              {/* Live Preview Card */}
+              <div className="p-4 rounded-xl bg-stone-100 border border-stone-200 space-y-2">
+                <span className="text-[11px] font-bold text-stone-500 uppercase tracking-wider block">
+                  Live Banner Preview (Exactly how visitors see it)
+                </span>
+                <div className={`p-3 rounded-xl text-xs flex items-center justify-between gap-3 text-white ${
+                  broadcastForm.tone === 'emergency'
+                    ? 'bg-red-700 border border-red-900'
+                    : broadcastForm.tone === 'warning'
+                    ? 'bg-amber-500 text-stone-950 border border-amber-600'
+                    : broadcastForm.tone === 'promo'
+                    ? 'bg-[#123524] text-white border border-[#1b4330]'
+                    : 'bg-stone-900 text-white border border-stone-800'
+                }`}>
+                  <div className="flex items-center gap-2 truncate">
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-black/30">
+                      {broadcastForm.tone.toUpperCase()}
+                    </span>
+                    <strong className="underline decoration-white/40">{broadcastForm.title || 'Broadcast Title'}</strong>
+                    <span className="hidden sm:inline opacity-75">·</span>
+                    <span className="truncate opacity-90">{broadcastForm.message || 'Broadcast message description will appear here.'}</span>
+                  </div>
+                  <span className="text-[10px] opacity-75 shrink-0 hidden md:inline">
+                    By Adeyinka Joseph (Moderator)
+                  </span>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    updateBroadcastAnnouncement({
+                      title: broadcastForm.title,
+                      message: broadcastForm.message,
+                      tone: broadcastForm.tone,
+                      isActive: broadcastForm.isActive,
+                    });
+                  }}
+                  className="px-5 py-2.5 rounded-xl bg-stone-950 hover:bg-black text-[#9FE870] font-black text-xs transition-all shadow-md active:scale-95 flex items-center gap-2"
+                >
+                  <Megaphone className="w-4 h-4" />
+                  <span>Save & Push Broadcast</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Platform Killswitches Hub */}
+          <div className="bg-white rounded-2xl border border-stone-200 overflow-hidden shadow-xs">
+            <div className="p-4 sm:p-5 border-b border-stone-200 bg-stone-50/60">
+              <h3 className="text-base font-bold font-heading text-stone-900 flex items-center gap-2">
+                <Power className="w-4 h-4 text-red-600" />
+                <span>Marketplace Emergency Killswitches</span>
+              </h3>
+              <p className="text-xs text-stone-500 mt-0.5">
+                Instant operational controls to protect campus marketplace integrity during emergencies.
+              </p>
+            </div>
+
+            <div className="p-4 sm:p-6 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              {/* Killswitch 1: Maintenance Mode */}
+              <div className={`p-4 rounded-2xl border-2 transition-all space-y-3 ${
+                emergencyControls.maintenanceMode
+                  ? 'border-red-600 bg-red-50/70'
+                  : 'border-stone-200 bg-stone-50/50'
+              }`}>
+                <div className="flex items-center justify-between">
+                  <div className={`w-9 h-9 rounded-xl flex items-center justify-center ${
+                    emergencyControls.maintenanceMode ? 'bg-red-600 text-white' : 'bg-stone-200 text-stone-700'
+                  }`}>
+                    <ShieldAlert className="w-5 h-5" />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => updateEmergencyControls({ maintenanceMode: !emergencyControls.maintenanceMode })}
+                    className={`px-3 py-1 rounded-xl text-xs font-black transition-all border ${
+                      emergencyControls.maintenanceMode
+                        ? 'bg-red-600 text-white border-red-700 shadow-xs'
+                        : 'bg-white text-stone-800 border-stone-300'
+                    }`}
+                  >
+                    {emergencyControls.maintenanceMode ? 'ACTIVE' : 'OFF'}
+                  </button>
+                </div>
+                <div>
+                  <h4 className="text-sm font-bold text-stone-950">Maintenance Lockdown</h4>
+                  <p className="text-[11px] text-stone-500 mt-1 leading-relaxed">
+                    Directs all non-admin visitors to an emergency security maintenance splash screen. Only you (the moderator) can navigate the store.
+                  </p>
+                </div>
+              </div>
+
+              {/* Killswitch 2: Pause Orders */}
+              <div className={`p-4 rounded-2xl border-2 transition-all space-y-3 ${
+                emergencyControls.pauseNewOrders
+                  ? 'border-amber-600 bg-amber-50/70'
+                  : 'border-stone-200 bg-stone-50/50'
+              }`}>
+                <div className="flex items-center justify-between">
+                  <div className={`w-9 h-9 rounded-xl flex items-center justify-center ${
+                    emergencyControls.pauseNewOrders ? 'bg-amber-600 text-white' : 'bg-stone-200 text-stone-700'
+                  }`}>
+                    <DollarSign className="w-5 h-5" />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => updateEmergencyControls({ pauseNewOrders: !emergencyControls.pauseNewOrders })}
+                    className={`px-3 py-1 rounded-xl text-xs font-black transition-all border ${
+                      emergencyControls.pauseNewOrders
+                        ? 'bg-amber-600 text-white border-amber-700 shadow-xs'
+                        : 'bg-white text-stone-800 border-stone-300'
+                    }`}
+                  >
+                    {emergencyControls.pauseNewOrders ? 'PAUSED' : 'ACTIVE'}
+                  </button>
+                </div>
+                <div>
+                  <h4 className="text-sm font-bold text-stone-950">Pause New Orders</h4>
+                  <p className="text-[11px] text-stone-500 mt-1 leading-relaxed">
+                    Temporarily halts new Paystack checkout sessions if courier networks or campus banking has widespread downtime.
+                  </p>
+                </div>
+              </div>
+
+              {/* Killswitch 3: Pause Seller Signups */}
+              <div className={`p-4 rounded-2xl border-2 transition-all space-y-3 ${
+                emergencyControls.pauseSellerSignups
+                  ? 'border-stone-900 bg-stone-100'
+                  : 'border-stone-200 bg-stone-50/50'
+              }`}>
+                <div className="flex items-center justify-between">
+                  <div className={`w-9 h-9 rounded-xl flex items-center justify-center ${
+                    emergencyControls.pauseSellerSignups ? 'bg-stone-900 text-white' : 'bg-stone-200 text-stone-700'
+                  }`}>
+                    <Store className="w-5 h-5" />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => updateEmergencyControls({ pauseSellerSignups: !emergencyControls.pauseSellerSignups })}
+                    className={`px-3 py-1 rounded-xl text-xs font-black transition-all border ${
+                      emergencyControls.pauseSellerSignups
+                        ? 'bg-stone-900 text-white border-stone-950 shadow-xs'
+                        : 'bg-white text-stone-800 border-stone-300'
+                    }`}
+                  >
+                    {emergencyControls.pauseSellerSignups ? 'CLOSED' : 'OPEN'}
+                  </button>
+                </div>
+                <div>
+                  <h4 className="text-sm font-bold text-stone-950">Pause Seller Signups</h4>
+                  <p className="text-[11px] text-stone-500 mt-1 leading-relaxed">
+                    Temporarily freezes new artisan registrations during spam waves or manual NIN verification backlogs.
+                  </p>
+                </div>
+              </div>
+
+              {/* Killswitch 4: Nuclear Database Wipe */}
+              <div className="p-4 rounded-2xl border-2 border-red-300 bg-red-50/60 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="w-9 h-9 rounded-xl bg-red-600 text-white flex items-center justify-center">
+                    <Trash2 className="w-5 h-5" />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setClearDbConfirmText('');
+                      setIsClearDbModalOpen(true);
+                    }}
+                    className="px-3 py-1 rounded-xl text-xs font-black transition-all border bg-red-600 hover:bg-red-700 text-white border-red-700 shadow-xs active:scale-95"
+                  >
+                    WIPE DB
+                  </button>
+                </div>
+                <div>
+                  <h4 className="text-sm font-bold text-red-950">Nuclear Database Wipe</h4>
+                  <p className="text-[11px] text-red-700 mt-1 leading-relaxed">
+                    Instantly wipes all sellers, shops, products, and buyer accounts, leaving only Adeyinka Joseph (Moderator).
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Live Moderator Security Audit Log */}
+          <div className="bg-white rounded-2xl border border-stone-200 overflow-hidden shadow-xs">
+            <div className="p-4 sm:p-5 border-b border-stone-200 bg-stone-50/60 flex items-center justify-between">
+              <div>
+                <h3 className="text-base font-bold font-heading text-stone-900 flex items-center gap-2">
+                  <History className="w-4 h-4 text-emerald-700" />
+                  <span>Moderator Action Security Audit Trail</span>
+                </h3>
+                <p className="text-xs text-stone-500 mt-0.5">
+                  Chronological, non-editable audit trail of high-power actions executed by Adeyinka Joseph.
+                </p>
+              </div>
+              <span className="text-xs font-mono font-semibold text-emerald-800 bg-emerald-50 px-2.5 py-1 rounded-lg border border-emerald-200">
+                {adminAuditLogs.length} Events Logged
+              </span>
+            </div>
+
+            <div className="divide-y divide-stone-100 max-h-96 overflow-y-auto font-mono text-xs">
+              {adminAuditLogs.map(log => (
+                <div key={log.id} className="p-3.5 sm:p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-2 hover:bg-stone-50/60">
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className={`px-2 py-0.5 rounded text-[10px] font-black ${
+                        log.action.includes('DELETED') || log.action.includes('SUSPENDED')
+                          ? 'bg-red-100 text-red-800'
+                          : log.action.includes('GRANTED') || log.action.includes('RELEASED')
+                          ? 'bg-emerald-100 text-emerald-800'
+                          : 'bg-stone-200 text-stone-800'
+                      }`}>
+                        {log.action}
+                      </span>
+                      <span className="font-sans text-stone-900 font-medium">
+                        {log.details}
+                      </span>
+                    </div>
+                    {log.targetId && (
+                      <span className="text-[11px] text-stone-400 block font-mono">
+                        Target ID: {log.targetId}
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-right shrink-0 text-[11px] text-stone-400 font-sans">
+                    <span className="text-stone-700 font-semibold block">{log.moderatorName}</span>
+                    <span>{log.timestamp}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Document Inspection Lightbox Modal */}
       {selectedVerificationDoc && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-xs">
@@ -1156,6 +2130,253 @@ export const AdminPanel: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* Moderator Delete Account Confirmation Modal */}
+      {deleteConfirmModal.isOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-xs">
+          <div className="bg-white rounded-3xl max-w-md w-full p-6 space-y-4 shadow-2xl border-2 border-red-600 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between pb-3 border-b border-stone-200">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-red-100 text-red-600 flex items-center justify-center">
+                  <Trash2 className="w-5 h-5" />
+                </div>
+                <div>
+                  <h4 className="text-base font-black text-stone-950">
+                    Delete User Account
+                  </h4>
+                  <span className="text-xs text-red-600 font-bold">
+                    Irreversible Moderator Action
+                  </span>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDeleteConfirmModal(prev => ({ ...prev, isOpen: false }))}
+                className="text-stone-400 hover:text-stone-700 p-1 font-bold text-sm"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-3.5 bg-red-50 rounded-2xl border border-red-200 space-y-1.5 text-xs text-red-950">
+              <p className="font-bold">Are you sure you want to delete this account?</p>
+              <div className="text-[11px] space-y-0.5 text-red-900">
+                <p><strong>Name:</strong> {deleteConfirmModal.userName}</p>
+                <p><strong>Email:</strong> {deleteConfirmModal.userEmail}</p>
+                <p><strong>Account ID:</strong> <code className="font-mono">{deleteConfirmModal.userId}</code></p>
+                <p><strong>Role:</strong> {deleteConfirmModal.role.toUpperCase()}</p>
+              </div>
+            </div>
+
+            <div className="text-xs text-stone-600 space-y-1 bg-stone-50 p-3 rounded-xl border border-stone-200">
+              <p className="font-bold text-stone-900">Cascading Deletions Executed:</p>
+              <ul className="list-disc list-inside text-[11px] text-stone-600 space-y-0.5">
+                <li>Permanently removes profile from registered database</li>
+                {deleteConfirmModal.role === 'seller' && (
+                  <>
+                    <li>Deletes artisan store profile and branding</li>
+                    <li>Wipes all craft products from the public storefront</li>
+                    <li>Cancels pending verification requests</li>
+                    <li>Zeroes out and archives seller wallet</li>
+                  </>
+                )}
+                <li>Revokes authentication tokens and login sessions</li>
+              </ul>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setDeleteConfirmModal(prev => ({ ...prev, isOpen: false }))}
+                className="px-4 py-2.5 rounded-xl text-xs font-bold text-stone-600 hover:bg-stone-100 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  deleteUserAccount(deleteConfirmModal.userId);
+                  setDeleteConfirmModal(prev => ({ ...prev, isOpen: false }));
+                }}
+                className="px-5 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white font-black text-xs transition-all shadow-md active:scale-95 flex items-center gap-1.5"
+              >
+                <Trash2 className="w-4 h-4" />
+                <span>Permanently Delete</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Moderator Reset Password Modal */}
+      {resetPasswordModal.isOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-xs">
+          <div className="bg-white rounded-3xl max-w-md w-full p-6 space-y-4 shadow-2xl border-2 border-stone-900 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between pb-3 border-b border-stone-200">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-amber-100 text-[#FF6B00] flex items-center justify-center">
+                  <Key className="w-5 h-5" />
+                </div>
+                <div>
+                  <h4 className="text-base font-black text-stone-950">
+                    Reset User Password
+                  </h4>
+                  <span className="text-xs text-stone-500">
+                    Moderator Override Authority
+                  </span>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setResetPasswordModal(prev => ({ ...prev, isOpen: false }))}
+                className="text-stone-400 hover:text-stone-700 p-1 font-bold text-sm"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="text-xs text-stone-600 space-y-1">
+              <p>
+                Resetting password for: <strong className="text-stone-900">{resetPasswordModal.userName}</strong>
+              </p>
+              <p className="text-[11px] text-stone-400">
+                User ID: <code className="font-mono">{resetPasswordModal.userId}</code>
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-stone-800 block">
+                New Password
+              </label>
+              <div className="relative">
+                <input
+                  type="text"
+                  value={resetPasswordModal.newPassword}
+                  onChange={e => setResetPasswordModal(prev => ({ ...prev, newPassword: e.target.value }))}
+                  placeholder="Enter temporary or new secure password..."
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-stone-300 text-xs text-stone-900 bg-stone-50 focus:bg-white focus:outline-hidden focus:border-[#FF6B00]"
+                />
+              </div>
+              <div className="flex items-center justify-between text-[11px] pt-1">
+                <span className="text-stone-500">Min 6 characters</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const randomSuffix = Math.floor(1000 + Math.random() * 9000);
+                    setResetPasswordModal(prev => ({ ...prev, newPassword: `ShopIt#${randomSuffix}` }));
+                  }}
+                  className="text-[#FF6B00] font-bold hover:underline"
+                >
+                  Generate Safe Password
+                </button>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setResetPasswordModal(prev => ({ ...prev, isOpen: false }))}
+                className="px-4 py-2.5 rounded-xl text-xs font-bold text-stone-600 hover:bg-stone-100 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={resetPasswordModal.newPassword.trim().length < 6}
+                onClick={() => {
+                  adminResetUserPassword(resetPasswordModal.userId, resetPasswordModal.newPassword.trim());
+                  setResetPasswordModal(prev => ({ ...prev, isOpen: false }));
+                }}
+                className="px-5 py-2.5 rounded-xl bg-stone-900 hover:bg-black text-[#9FE870] font-black text-xs transition-all shadow-md disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
+              >
+                <Check className="w-4 h-4" />
+                <span>Update Password</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Moderator Clear Entire Database Modal */}
+      {isClearDbModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-xs">
+          <div className="bg-white dark:bg-[#18181B] rounded-3xl max-w-lg w-full p-6 space-y-5 shadow-2xl border-2 border-red-600 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between pb-3 border-b border-stone-200 dark:border-stone-800">
+              <div className="flex items-center gap-2.5">
+                <div className="w-10 h-10 rounded-2xl bg-red-100 dark:bg-red-950/60 text-red-600 dark:text-red-400 flex items-center justify-center shrink-0">
+                  <Trash2 className="w-5 h-5" />
+                </div>
+                <div>
+                  <h4 className="text-base font-black text-stone-950 dark:text-white">
+                    Clear Marketplace Database
+                  </h4>
+                  <span className="text-xs text-red-600 dark:text-red-400 font-bold">
+                    Irreversible Master Moderator Action
+                  </span>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsClearDbModalOpen(false)}
+                className="text-stone-400 hover:text-stone-700 dark:hover:text-stone-200 p-1 font-bold text-sm"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-4 bg-red-50 dark:bg-red-950/30 rounded-2xl border border-red-200 dark:border-red-900/60 space-y-2 text-xs text-red-950 dark:text-red-200">
+              <p className="font-bold flex items-center gap-1.5 text-sm text-red-700 dark:text-red-400">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                <span>Are you sure you want to completely clear the database?</span>
+              </p>
+              <p className="text-[11px] leading-relaxed text-red-900 dark:text-red-300">
+                This action will completely wipe all registered sellers, businesses, craft listings, orders, buyer accounts, and wallet records across the platform.
+              </p>
+            </div>
+
+            <div className="text-xs space-y-2 bg-stone-50 dark:bg-[#27272A]/50 p-4 rounded-2xl border border-stone-200 dark:border-stone-800">
+              <p className="font-bold text-stone-900 dark:text-stone-100">Database Purge Summary:</p>
+              <ul className="list-disc list-inside text-[11px] text-stone-600 dark:text-stone-400 space-y-1">
+                <li><strong className="text-stone-800 dark:text-stone-200">Sellers & Businesses:</strong> All shops, artisan profiles, and NIN verifications deleted.</li>
+                <li><strong className="text-stone-800 dark:text-stone-200">Product Listings:</strong> All crafts, catalogs, and listings wiped (0 items).</li>
+                <li><strong className="text-stone-800 dark:text-stone-200">User Accounts:</strong> All non-moderator accounts removed.</li>
+                <li><strong className="text-stone-800 dark:text-stone-200">Orders & Wallets:</strong> All transactions, escrows, and balances cleared.</li>
+                <li className="text-emerald-700 dark:text-emerald-400 font-bold">
+                  ✓ Protected: Adeyinka Joseph (joeadeyinka12@gmail.com) is preserved as the sole Moderator.
+                </li>
+              </ul>
+            </div>
+
+            <div className="flex items-center justify-end gap-2.5 pt-2">
+              <button
+                type="button"
+                onClick={() => setIsClearDbModalOpen(false)}
+                className="px-4 py-2.5 rounded-xl text-xs font-bold text-stone-600 dark:text-stone-400 hover:bg-stone-100 dark:hover:bg-stone-800 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  clearMarketplaceDatabase();
+                  setIsClearDbModalOpen(false);
+                }}
+                className="px-5 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white font-black text-xs transition-all shadow-md active:scale-95 flex items-center gap-2"
+              >
+                <Trash2 className="w-4 h-4" />
+                <span>Yes, Clear Everything Now</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Moderator Escrow Safe Pass & Digital Receipt Modal */}
+      <EscrowReceiptModal
+        order={selectedAdminReceiptOrder}
+        isOpen={!!selectedAdminReceiptOrder}
+        onClose={() => setSelectedAdminReceiptOrder(null)}
+      />
     </div>
   );
 };

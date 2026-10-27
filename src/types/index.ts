@@ -1,5 +1,5 @@
 export type UserRole = 'buyer' | 'seller' | 'admin';
-export type AdminSubRole = 'moderator' | 'accounts' | 'finance' | 'support';
+export type AdminSubRole = 'moderator' | 'accounts' | 'finance' | 'support' | 'emergency';
 
 export type Campus =
   | 'UNILAG (Akoka)'
@@ -564,6 +564,35 @@ export interface ReferralReward {
   rewardAmount: number;
   status: 'credited' | 'pending_first_sale';
   date: string;
+}
+
+// ==========================================
+// MODERATOR EMERGENCY BROADCAST & AUDIT LOGS
+// ==========================================
+
+export interface BroadcastAnnouncement {
+  id: string;
+  isActive: boolean;
+  title: string;
+  message: string;
+  tone: 'info' | 'warning' | 'emergency' | 'promo';
+  createdAt: string;
+  author: string;
+}
+
+export interface EmergencyControls {
+  maintenanceMode: boolean;
+  pauseNewOrders: boolean;
+  pauseSellerSignups: boolean;
+}
+
+export interface AdminAuditLog {
+  id: string;
+  action: string;
+  targetId?: string;
+  details: string;
+  timestamp: string;
+  moderatorName: string;
 }
 
 

@@ -19,13 +19,13 @@ export const MobileBottomNav: React.FC = () => {
   );
 
   return (
-    <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-t border-[#E4E4E7] shadow-lg">
+    <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 dark:bg-[#0D0E12]/95 backdrop-blur-md border-t border-[#E4E4E7] dark:border-[#27272A] shadow-lg transition-colors duration-200">
       <div className="grid grid-cols-5 items-center h-16 max-w-lg mx-auto px-1">
         {/* Tab 1: Marketplace */}
         <button
           onClick={() => setActiveView('catalog')}
           className={`flex flex-col items-center justify-center min-h-[44px] transition-colors ${
-            activeView === 'catalog' ? 'text-[#FF6B00] font-black' : 'text-[#71717A]'
+            activeView === 'catalog' ? 'text-[#FF6B00] font-black' : 'text-[#71717A] dark:text-[#A1A1AA]'
           }`}
         >
           <Compass className="w-5 h-5" />
@@ -60,7 +60,7 @@ export const MobileBottomNav: React.FC = () => {
         <button
           onClick={() => setActiveView('chat')}
           className={`relative flex flex-col items-center justify-center min-h-[44px] transition-colors ${
-            activeView === 'chat' ? 'text-[#FF6B00] font-black' : 'text-[#71717A]'
+            activeView === 'chat' ? 'text-[#FF6B00] font-black' : 'text-[#71717A] dark:text-[#A1A1AA]'
           }`}
         >
           <MessageSquare className="w-5 h-5" />
@@ -76,12 +76,12 @@ export const MobileBottomNav: React.FC = () => {
         <button
           onClick={() => setActiveView('orders')}
           className={`relative flex flex-col items-center justify-center min-h-[44px] transition-colors ${
-            activeView === 'orders' ? 'text-[#FF6B00] font-black' : 'text-[#71717A]'
+            activeView === 'orders' ? 'text-[#FF6B00] font-black' : 'text-[#71717A] dark:text-[#A1A1AA]'
           }`}
         >
           <ShieldCheck className="w-5 h-5" />
           {buyerActiveOrdersCount > 0 && (
-            <span className="absolute top-1 right-2.5 w-4 h-4 rounded-full bg-[#111111] text-[#9FE870] text-[10px] font-black flex items-center justify-center font-mono-numbers">
+            <span className="absolute top-1 right-2.5 w-4 h-4 rounded-full bg-[#111111] dark:bg-[#1E2028] text-[#9FE870] border border-stone-800 text-[10px] font-black flex items-center justify-center font-mono-numbers">
               {buyerActiveOrdersCount}
             </span>
           )}
@@ -92,12 +92,12 @@ export const MobileBottomNav: React.FC = () => {
         <button
           onClick={() => setActiveView('cart')}
           className={`relative flex flex-col items-center justify-center min-h-[44px] transition-colors ${
-            activeView === 'cart' ? 'text-[#FF6B00] font-black' : 'text-[#71717A]'
+            activeView === 'cart' ? 'text-[#FF6B00] font-black' : 'text-[#71717A] dark:text-[#A1A1AA]'
           }`}
         >
           <ShoppingBag className="w-5 h-5" />
           {cartCount > 0 && (
-            <span className="absolute top-1 right-2.5 w-4 h-4 rounded-full bg-[#FF6B00] text-white text-[10px] font-black flex items-center justify-center font-mono-numbers">
+            <span className="absolute top-1 right-2.5 w-4 h-4 rounded-full bg-[#FF6B00] text-[#111111] text-[10px] font-black flex items-center justify-center font-mono-numbers">
               {cartCount}
             </span>
           )}

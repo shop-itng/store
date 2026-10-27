@@ -32,6 +32,7 @@ export const CheckoutModal: React.FC = () => {
     applyCoupon,
     removeCoupon,
     notify,
+    emergencyControls,
   } = useApp();
 
   const [paymentMethod, setPaymentMethod] = useState<'paystack_card' | 'paystack_transfer' | 'ussd'>('paystack_card');
@@ -135,22 +136,22 @@ export const CheckoutModal: React.FC = () => {
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
-      <div className="bg-white rounded-3xl max-w-xl w-full p-5 sm:p-8 space-y-5 shadow-2xl relative my-6">
+    <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
+      <div className="bg-white dark:bg-[#15161C] rounded-3xl max-w-xl w-full p-5 sm:p-8 space-y-5 shadow-2xl relative my-6 border border-slate-200 dark:border-[#27272A]">
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-slate-100 pb-4">
+        <div className="flex items-center justify-between border-b border-slate-100 dark:border-[#27272A] pb-4">
           <div className="flex items-center gap-2.5">
             <div className="w-9 h-9 rounded-xl bg-[#00C3F7] flex items-center justify-center text-[#111111] font-black text-sm shadow-xs">
               P
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 className="text-base font-extrabold text-slate-900">Paystack Escrow Checkout</h2>
+                <h2 className="text-base font-extrabold text-slate-900 dark:text-white">Paystack Escrow Checkout</h2>
                 <span className="text-[10px] font-black text-[#111111] bg-[#9FE870] px-2 py-0.5 rounded-full border border-[#111111]">
                   TEST MODE
                 </span>
               </div>
-              <p className="text-[11px] text-slate-500">
+              <p className="text-[11px] text-slate-500 dark:text-[#A1A1AA]">
                 Rule 1: Direct payment · No buyer wallet needed · Card never stored
               </p>
             </div>
@@ -158,40 +159,40 @@ export const CheckoutModal: React.FC = () => {
 
           <button
             onClick={closeCheckoutModal}
-            className="p-1.5 text-slate-400 hover:text-slate-700 rounded-full hover:bg-slate-100 min-h-[38px] min-w-[38px] flex items-center justify-center"
+            className="p-1.5 text-slate-400 hover:text-slate-700 dark:hover:text-white rounded-full hover:bg-slate-100 dark:hover:bg-[#1E2028] min-h-[38px] min-w-[38px] flex items-center justify-center"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
         {/* Rule 1 Guarantee Banner */}
-        <div className="p-3 bg-amber-50/70 border border-amber-200 rounded-xl text-xs space-y-1">
-          <div className="flex items-center gap-1.5 font-bold text-amber-900">
+        <div className="p-3 bg-amber-50/70 dark:bg-[#1E2028] border border-amber-200 dark:border-amber-700/50 rounded-xl text-xs space-y-1">
+          <div className="flex items-center gap-1.5 font-bold text-amber-900 dark:text-amber-200">
             <ShieldCheck className="w-4 h-4 text-[#FF6B00]" />
             <span>Paystack Protected Checkout & Refund Guarantee</span>
           </div>
-          <p className="text-[11px] text-amber-800 leading-relaxed">
+          <p className="text-[11px] text-amber-800 dark:text-[#A1A1AA] leading-relaxed">
             Buyers pay directly at checkout. We <strong>never store card details</strong>. If an order is canceled or returned, refunds are automatically credited back to your original payment method via Paystack.
           </p>
         </div>
 
         {/* Delivery / Campus Hub Selection */}
-        <div className="space-y-3 bg-slate-50 p-4 rounded-2xl border border-slate-200/90 text-xs">
+        <div className="space-y-3 bg-slate-50 dark:bg-[#1E2028] p-4 rounded-2xl border border-slate-200/90 dark:border-[#27272A] text-xs">
           <div className="flex items-center justify-between">
-            <span className="font-bold text-slate-900 flex items-center gap-1.5">
-              <MapPin className="w-4 h-4 text-emerald-600" />
+            <span className="font-bold text-slate-900 dark:text-white flex items-center gap-1.5">
+              <MapPin className="w-4 h-4 text-emerald-600 dark:text-[#9FE870]" />
               <span>Campus Delivery Destination</span>
             </span>
-            <span className="text-slate-500 text-[11px]">Handled in-app</span>
+            <span className="text-slate-500 dark:text-[#A1A1AA] text-[11px]">Handled in-app</span>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             <div>
-              <label className="text-[11px] font-semibold text-slate-600 block mb-1">Campus</label>
+              <label className="text-[11px] font-semibold text-slate-600 dark:text-slate-300 block mb-1">Campus</label>
               <select
                 value={selectedCampus}
                 onChange={e => setSelectedCampus(e.target.value as Campus)}
-                className="w-full h-9 px-2.5 rounded-lg border border-slate-200 bg-white text-xs text-slate-900"
+                className="w-full h-9 px-2.5 rounded-lg border border-slate-200 dark:border-[#27272A] bg-white dark:bg-[#15161C] text-xs text-slate-900 dark:text-white"
               >
                 {CAMPUSES.filter(c => c !== 'All Campuses').map(c => (
                   <option key={c} value={c}>
@@ -202,7 +203,7 @@ export const CheckoutModal: React.FC = () => {
             </div>
 
             <div>
-              <label className="text-[11px] font-semibold text-slate-600 block mb-1">
+              <label className="text-[11px] font-semibold text-slate-600 dark:text-slate-300 block mb-1">
                 Pickup Point / Quad
               </label>
               <input
@@ -210,13 +211,13 @@ export const CheckoutModal: React.FC = () => {
                 value={deliveryAreaNote}
                 onChange={e => setDeliveryAreaNote(e.target.value)}
                 placeholder="e.g. New Hall Quad or SUB Gate"
-                className="w-full h-9 px-2.5 rounded-lg border border-slate-200 bg-white text-xs text-slate-900"
+                className="w-full h-9 px-2.5 rounded-lg border border-slate-200 dark:border-[#27272A] bg-white dark:bg-[#15161C] text-xs text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-stone-500"
               />
             </div>
           </div>
 
           {/* Privacy Notice on exact delivery address */}
-          <div className="p-2 bg-white rounded-lg border border-slate-200 text-[11px] text-slate-500">
+          <div className="p-2 bg-white dark:bg-[#15161C] rounded-lg border border-slate-200 dark:border-[#27272A] text-[11px] text-slate-500 dark:text-[#A1A1AA]">
             <strong>Anti-Bypass Privacy: </strong>
             The seller only sees your <strong>Buyer #ID</strong> and campus area (
             {selectedCampus}). Your private phone number and room number are never exposed to the seller.
@@ -447,13 +448,25 @@ export const CheckoutModal: React.FC = () => {
           </div>
         </div>
 
+        {/* Emergency Pause Notice if activated by Moderator */}
+        {emergencyControls?.pauseNewOrders && (
+          <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-900 flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+            <span>
+              <strong>Orders Temporarily Paused:</strong> Moderator has paused new checkouts for network verification. Please try again in a few minutes.
+            </span>
+          </div>
+        )}
+
         {/* Pay Button */}
         <button
           onClick={handleCompletePayment}
-          disabled={isProcessing}
-          className="w-full h-12 bg-[#FF6B00] hover:bg-[#ff7a1a] disabled:bg-stone-300 text-[#111111] font-black text-xs sm:text-sm rounded-xl transition-all border-2 border-[#111111] shadow-[0_3px_0_#111111] active:translate-y-0.5 active:shadow-[0_1px_0_#111111] flex items-center justify-center gap-2"
+          disabled={isProcessing || emergencyControls?.pauseNewOrders}
+          className="w-full h-12 bg-[#FF6B00] hover:bg-[#ff7a1a] disabled:bg-stone-300 disabled:border-stone-400 disabled:text-stone-500 disabled:shadow-none text-[#111111] font-black text-xs sm:text-sm rounded-xl transition-all border-2 border-[#111111] shadow-[0_3px_0_#111111] active:translate-y-0.5 active:shadow-[0_1px_0_#111111] flex items-center justify-center gap-2"
         >
-          {isProcessing ? (
+          {emergencyControls?.pauseNewOrders ? (
+            <span className="font-bold">Checkout Temporarily Disabled by Moderation</span>
+          ) : isProcessing ? (
             <div className="flex items-center gap-2 text-[#111111]">
               <div className="w-4 h-4 border-2 border-[#111111]/30 border-t-[#111111] rounded-full animate-spin shrink-0" />
               <span className="font-extrabold text-[11px] sm:text-xs tracking-tight truncate max-w-sm">

@@ -1,6 +1,6 @@
 import React from 'react';
 import { useApp } from '../context/AppContext';
-import { ShieldCheck, MapPin, Zap, Lock, LogOut, User } from 'lucide-react';
+import { ShieldCheck, MapPin, Zap, Lock, LogOut, User, Sun, Moon } from 'lucide-react';
 
 export const RoleSwitcherBar: React.FC = () => {
   const {
@@ -12,6 +12,8 @@ export const RoleSwitcherBar: React.FC = () => {
     setActiveView,
     userLocation,
     openAuthModal,
+    theme,
+    toggleTheme,
   } = useApp();
 
   return (
@@ -83,6 +85,29 @@ export const RoleSwitcherBar: React.FC = () => {
               <span>Sign In</span>
             </button>
           )}
+
+          {/* Dark / Light Theme Toggle */}
+          <button
+            onClick={toggleTheme}
+            className={`flex items-center gap-1.5 px-2.5 py-0.5 rounded text-[11px] font-bold transition-all ${
+              theme === 'dark'
+                ? 'bg-[#1E2028] text-[#9FE870] border border-[#27272A]'
+                : 'text-[#A1A1AA] hover:text-white bg-[#18181B]'
+            }`}
+            title={`Switch to ${theme === 'dark' ? 'Light' : 'Night/Dark'} Mode`}
+          >
+            {theme === 'dark' ? (
+              <>
+                <Sun className="w-3 h-3 text-[#9FE870]" />
+                <span>Light</span>
+              </>
+            ) : (
+              <>
+                <Moon className="w-3 h-3 text-[#FF6B00]" />
+                <span>Dark</span>
+              </>
+            )}
+          </button>
 
           {/* Low-data toggle */}
           <button

@@ -143,12 +143,12 @@ export const TypoSearchBar: React.FC = () => {
             }}
             onChange={e => setSearchQuery(e.target.value)}
             placeholder="Search waist beads, perfume oils, crochet tote bags, fashion in your area..."
-            className="w-full h-11 pl-10 pr-9 rounded-xl bg-white border border-[#E4E4E7] text-xs sm:text-sm text-[#111111] placeholder:text-[#A1A1AA] focus:outline-none focus:border-[#FF6B00] focus:ring-1 focus:ring-[#FF6B00] transition-all font-medium"
+            className="w-full h-11 pl-10 pr-9 rounded-xl bg-white dark:bg-[#15161C] border border-[#E4E4E7] dark:border-[#27272A] text-xs sm:text-sm text-[#111111] dark:text-white placeholder:text-[#A1A1AA] focus:outline-none focus:border-[#FF6B00] focus:ring-1 focus:ring-[#FF6B00] transition-all font-medium"
           />
           {searchQuery && (
             <button
               onClick={() => setSearchQuery('')}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-[#A1A1AA] hover:text-[#111111] p-1"
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-[#A1A1AA] hover:text-[#111111] dark:hover:text-white p-1"
             >
               <X className="w-4 h-4" />
             </button>
@@ -156,9 +156,9 @@ export const TypoSearchBar: React.FC = () => {
 
           {/* Recent Searches Floating Dropdown (Last 5 searches) */}
           {isSearchFocused && recentSearches.length > 0 && (
-            <div className="absolute top-full left-0 right-0 mt-1.5 z-40 bg-white border-2 border-[#111111] rounded-2xl shadow-xl p-3 space-y-2.5">
-              <div className="flex items-center justify-between text-xs pb-1.5 border-b border-[#E4E4E7]">
-                <div className="flex items-center gap-1.5 font-black text-[#111111]">
+            <div className="absolute top-full left-0 right-0 mt-1.5 z-40 bg-white dark:bg-[#15161C] border-2 border-[#111111] dark:border-[#27272A] rounded-2xl shadow-xl p-3 space-y-2.5">
+              <div className="flex items-center justify-between text-xs pb-1.5 border-b border-[#E4E4E7] dark:border-[#27272A]">
+                <div className="flex items-center gap-1.5 font-black text-[#111111] dark:text-white">
                   <Clock className="w-3.5 h-3.5 text-[#FF6B00]" />
                   <span>Recent Searches</span>
                 </div>
@@ -168,7 +168,7 @@ export const TypoSearchBar: React.FC = () => {
                     e.preventDefault();
                     clearAllRecentSearches();
                   }}
-                  className="text-[11px] font-bold text-[#71717A] hover:text-[#FF6B00] transition-colors"
+                  className="text-[11px] font-bold text-[#71717A] dark:text-[#A1A1AA] hover:text-[#FF6B00] transition-colors"
                 >
                   Clear all
                 </button>
@@ -182,9 +182,9 @@ export const TypoSearchBar: React.FC = () => {
                       e.preventDefault();
                       handleSelectRecent(term);
                     }}
-                    className="group inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#F4F4F5] hover:bg-[#111111] hover:text-[#9FE870] rounded-xl text-xs font-bold text-[#111111] transition-all cursor-pointer border border-[#E4E4E7] hover:border-[#111111]"
+                    className="group inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#F4F4F5] dark:bg-[#1E2028] hover:bg-[#111111] dark:hover:bg-[#27272A] hover:text-[#9FE870] rounded-xl text-xs font-bold text-[#111111] dark:text-white transition-all cursor-pointer border border-[#E4E4E7] dark:border-[#27272A] hover:border-[#111111]"
                   >
-                    <Clock className="w-3 h-3 text-[#71717A] group-hover:text-[#9FE870]" />
+                    <Clock className="w-3 h-3 text-[#71717A] dark:text-[#A1A1AA] group-hover:text-[#9FE870]" />
                     <span>{term}</span>
                     <button
                       type="button"
@@ -212,11 +212,11 @@ export const TypoSearchBar: React.FC = () => {
             <select
               value={selectedState}
               onChange={e => handleStateChange(e.target.value)}
-              className="w-full h-11 pl-9 pr-6 rounded-xl bg-white border border-[#E4E4E7] text-xs sm:text-sm font-semibold text-[#111111] focus:outline-none focus:border-[#FF6B00] cursor-pointer"
+              className="w-full h-11 pl-9 pr-6 rounded-xl bg-white dark:bg-[#15161C] border border-[#E4E4E7] dark:border-[#27272A] text-xs sm:text-sm font-semibold text-[#111111] dark:text-white focus:outline-none focus:border-[#FF6B00] cursor-pointer"
             >
-              <option value="all">All States (Nigeria)</option>
+              <option value="all" className="dark:bg-[#15161C] dark:text-white">All States (Nigeria)</option>
               {NIGERIAN_STATES.map(s => (
-                <option key={s.state} value={s.state}>
+                <option key={s.state} value={s.state} className="dark:bg-[#15161C] dark:text-white">
                   {s.state} State
                 </option>
               ))}
@@ -230,8 +230,8 @@ export const TypoSearchBar: React.FC = () => {
             onClick={() => setShowFilters(!showFilters)}
             className={`w-full h-11 px-3.5 rounded-xl border flex items-center justify-center gap-1.5 text-xs font-bold transition-all shadow-xs ${
               showFilters || selectedCity !== 'all' || selectedArea !== 'all' || priceFilter !== 'all' || sortBy !== 'newest'
-                ? 'bg-[#111111] text-white border-[#111111]'
-                : 'bg-white text-[#111111] border-[#E4E4E7] hover:border-[#111111]'
+                ? 'bg-[#111111] dark:bg-stone-800 text-white border-[#111111] dark:border-stone-700'
+                : 'bg-white dark:bg-[#15161C] text-[#111111] dark:text-white border-[#E4E4E7] dark:border-[#27272A] hover:border-[#111111] dark:hover:border-stone-600'
             }`}
           >
             <SlidersHorizontal className="w-4 h-4 text-[#FF6B00]" />
@@ -242,18 +242,18 @@ export const TypoSearchBar: React.FC = () => {
 
       {/* Expanded City > Area & Price/Sort Filter Drawer */}
       {showFilters && (
-        <div className="p-4 bg-white rounded-2xl border border-[#E4E4E7] space-y-4 shadow-xs">
+        <div className="p-4 bg-white dark:bg-[#15161C] rounded-2xl border border-[#E4E4E7] dark:border-[#27272A] space-y-4 shadow-xs">
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
             {/* City Dropdown */}
             <div>
-              <label className="block text-[11px] font-bold text-[#111111] uppercase tracking-wider mb-1">
+              <label className="block text-[11px] font-bold text-[#111111] dark:text-white uppercase tracking-wider mb-1">
                 City / District
               </label>
               <select
                 disabled={selectedState === 'all'}
                 value={selectedCity}
                 onChange={e => handleCityChange(e.target.value)}
-                className="w-full h-10 px-3 rounded-xl border border-[#E4E4E7] bg-white text-xs font-semibold text-[#111111] focus:outline-none focus:border-[#FF6B00] disabled:bg-[#F4F4F5] disabled:text-[#A1A1AA]"
+                className="w-full h-10 px-3 rounded-xl border border-[#E4E4E7] dark:border-[#27272A] bg-white dark:bg-[#1E2028] text-xs font-semibold text-[#111111] dark:text-white focus:outline-none focus:border-[#FF6B00] disabled:bg-[#F4F4F5] dark:disabled:bg-[#15161C] disabled:text-[#A1A1AA]"
               >
                 <option value="all">
                   {selectedState === 'all' ? 'Select State first' : 'All Cities'}
@@ -268,14 +268,14 @@ export const TypoSearchBar: React.FC = () => {
 
             {/* Area Dropdown (Public Area Filter) */}
             <div>
-              <label className="block text-[11px] font-bold text-[#111111] uppercase tracking-wider mb-1">
+              <label className="block text-[11px] font-bold text-[#111111] dark:text-white uppercase tracking-wider mb-1">
                 Area (Local Delivery)
               </label>
               <select
                 disabled={selectedCity === 'all'}
                 value={selectedArea}
                 onChange={e => setSelectedArea(e.target.value)}
-                className="w-full h-10 px-3 rounded-xl border border-[#E4E4E7] bg-white text-xs font-bold text-[#FF6B00] focus:outline-none focus:border-[#FF6B00] disabled:bg-[#F4F4F5] disabled:text-[#A1A1AA]"
+                className="w-full h-10 px-3 rounded-xl border border-[#E4E4E7] dark:border-[#27272A] bg-white dark:bg-[#1E2028] text-xs font-bold text-[#FF6B00] focus:outline-none focus:border-[#FF6B00] disabled:bg-[#F4F4F5] dark:disabled:bg-[#15161C] disabled:text-[#A1A1AA]"
               >
                 <option value="all">
                   {selectedCity === 'all' ? 'Select City first' : 'All Areas'}
@@ -290,13 +290,13 @@ export const TypoSearchBar: React.FC = () => {
 
             {/* Price Filter */}
             <div>
-              <label className="block text-[11px] font-bold text-[#111111] uppercase tracking-wider mb-1">
+              <label className="block text-[11px] font-bold text-[#111111] dark:text-white uppercase tracking-wider mb-1">
                 Price Range
               </label>
               <select
                 value={priceFilter}
                 onChange={e => setPriceFilter(e.target.value as any)}
-                className="w-full h-10 px-3 rounded-xl border border-[#E4E4E7] bg-white text-xs font-semibold text-[#111111] focus:outline-none focus:border-[#FF6B00]"
+                className="w-full h-10 px-3 rounded-xl border border-[#E4E4E7] dark:border-[#27272A] bg-white dark:bg-[#1E2028] text-xs font-semibold text-[#111111] dark:text-white focus:outline-none focus:border-[#FF6B00]"
               >
                 <option value="all">All Prices</option>
                 <option value="under2k">Under ₦2,000</option>
@@ -308,13 +308,13 @@ export const TypoSearchBar: React.FC = () => {
 
             {/* Sort By */}
             <div>
-              <label className="block text-[11px] font-bold text-[#111111] uppercase tracking-wider mb-1">
+              <label className="block text-[11px] font-bold text-[#111111] dark:text-white uppercase tracking-wider mb-1">
                 Sort By
               </label>
               <select
                 value={sortBy}
                 onChange={e => setSortBy(e.target.value as any)}
-                className="w-full h-10 px-3 rounded-xl border border-[#E4E4E7] bg-white text-xs font-semibold text-[#111111] focus:outline-none focus:border-[#FF6B00]"
+                className="w-full h-10 px-3 rounded-xl border border-[#E4E4E7] dark:border-[#27272A] bg-white dark:bg-[#1E2028] text-xs font-semibold text-[#111111] dark:text-white focus:outline-none focus:border-[#FF6B00]"
               >
                 <option value="newest">Newest First</option>
                 <option value="price_asc">Price: Low to High</option>
@@ -329,7 +329,7 @@ export const TypoSearchBar: React.FC = () => {
       {/* Quick Recent Searches Chips Row (Last 5 searches in localStorage) */}
       {recentSearches.length > 0 && (
         <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5 scrollbar-none text-xs">
-          <span className="text-[11px] font-bold text-[#71717A] flex items-center gap-1 shrink-0 mr-1">
+          <span className="text-[11px] font-bold text-[#71717A] dark:text-[#A1A1AA] flex items-center gap-1 shrink-0 mr-1">
             <Clock className="w-3 h-3 text-[#FF6B00]" />
             <span>Recent:</span>
           </span>
@@ -337,7 +337,7 @@ export const TypoSearchBar: React.FC = () => {
             <div
               key={term}
               onClick={() => handleSelectRecent(term)}
-              className="inline-flex items-center gap-1 px-2.5 py-1 bg-white hover:bg-[#111111] hover:text-[#9FE870] border border-[#E4E4E7] hover:border-[#111111] rounded-lg text-[11px] font-bold text-[#3F3F46] transition-all cursor-pointer shrink-0 shadow-2xs group"
+              className="inline-flex items-center gap-1 px-2.5 py-1 bg-white dark:bg-[#15161C] hover:bg-[#111111] dark:hover:bg-[#27272A] hover:text-[#9FE870] border border-[#E4E4E7] dark:border-[#27272A] hover:border-[#111111] rounded-lg text-[11px] font-bold text-[#3F3F46] dark:text-[#F4F4F5] transition-all cursor-pointer shrink-0 shadow-2xs group"
             >
               <span>{term}</span>
               <button
@@ -346,7 +346,7 @@ export const TypoSearchBar: React.FC = () => {
                   e.stopPropagation();
                   removeRecentSearch(term);
                 }}
-                className="text-[#A1A1AA] hover:text-red-500 p-0.5 rounded-full"
+                className="text-[#A1A1AA] hover:text-red-500 ml-1 p-0.5 rounded-full"
                 title="Remove"
               >
                 <X className="w-2.5 h-2.5" />
@@ -372,8 +372,8 @@ export const TypoSearchBar: React.FC = () => {
               onClick={() => setSelectedCategory(cat.id)}
               className={`h-9 px-3.5 rounded-xl whitespace-nowrap shrink-0 font-black transition-all flex items-center gap-1.5 ${
                 isActive
-                  ? 'bg-[#111111] text-[#9FE870] border-2 border-[#FF6B00] shadow-[0_2px_0_#111111]'
-                  : 'bg-white text-[#111111] border-2 border-[#E4E4E7] hover:border-[#111111]'
+                  ? 'bg-[#111111] text-[#9FE870] border-2 border-[#FF6B00] shadow-[0_2px_0_#111111] dark:shadow-none'
+                  : 'bg-white dark:bg-[#15161C] text-[#111111] dark:text-white border-2 border-[#E4E4E7] dark:border-[#27272A] hover:border-[#111111] dark:hover:border-stone-600'
               }`}
             >
               {isActive && <span className="w-1.5 h-1.5 rounded-full bg-[#FF6B00]" />}
@@ -385,20 +385,20 @@ export const TypoSearchBar: React.FC = () => {
 
       {/* Active filters summary */}
       {hasActiveFilters && (
-        <div className="flex items-center justify-between text-xs text-[#71717A] pt-1 px-1">
+        <div className="flex items-center justify-between text-xs text-[#71717A] dark:text-[#A1A1AA] pt-1 px-1">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="font-semibold">Filtering:</span>
             {selectedState !== 'all' && (
-              <span className="font-bold text-[#111111]">State: {selectedState}</span>
+              <span className="font-bold text-[#111111] dark:text-white">State: {selectedState}</span>
             )}
             {selectedCity !== 'all' && (
-              <span className="font-bold text-[#111111]">· City: {selectedCity}</span>
+              <span className="font-bold text-[#111111] dark:text-white">· City: {selectedCity}</span>
             )}
             {selectedArea !== 'all' && (
               <span className="font-black text-[#FF6B00]">· Area: 📍 {selectedArea}</span>
             )}
             {selectedCategory !== 'all' && (
-              <span className="font-bold text-[#111111]">
+              <span className="font-bold text-[#111111] dark:text-white">
                 · {CATEGORIES.find(c => c.id === selectedCategory)?.label}
               </span>
             )}

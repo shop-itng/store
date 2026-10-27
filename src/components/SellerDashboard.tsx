@@ -282,16 +282,16 @@ export const SellerDashboard: React.FC = () => {
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 sm:py-8 space-y-8">
       {/* Top Welcome & Shop Status Header */}
-      <div className="bg-white rounded-2xl border border-slate-200 p-6 flex flex-col md:flex-row md:items-center justify-between gap-6 shadow-xs">
+      <div className="bg-white dark:bg-[#15161C] rounded-2xl border border-slate-200 dark:border-[#27272A] p-6 flex flex-col md:flex-row md:items-center justify-between gap-6 shadow-xs">
         <div>
           <div className="flex items-center gap-2">
-            <h1 className="text-2xl font-black text-slate-900">{currentSeller.shopName}</h1>
-            <span className="text-xs font-semibold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+            <h1 className="text-2xl font-black text-slate-900 dark:text-white">{currentSeller.shopName}</h1>
+            <span className="text-xs font-semibold text-emerald-800 dark:text-[#9FE870] bg-emerald-50 dark:bg-[#1E2028] px-2 py-0.5 rounded border border-emerald-200 dark:border-[#27272A]">
               Level {currentSeller.level} Seller
             </span>
           </div>
-          <p className="text-xs text-slate-500 mt-1">
-            Campus: <strong className="text-slate-800">{currentSeller.campus}</strong> · Payouts: Verified Account ·{' '}
+          <p className="text-xs text-slate-500 dark:text-[#A1A1AA] mt-1">
+            Campus: <strong className="text-slate-800 dark:text-white">{currentSeller.campus}</strong> · Payouts: Verified Account ·{' '}
             {currentSeller.under18 ? 'Guardian Consent Active' : 'NIN Slip Verified'}
           </p>
         </div>
@@ -302,8 +302,8 @@ export const SellerDashboard: React.FC = () => {
             onClick={() => toggleVacationMode(currentSeller.id)}
             className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 min-h-[44px] ${
               currentSeller.vacationMode
-                ? 'bg-amber-100 text-amber-900 border border-amber-300'
-                : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                ? 'bg-amber-100 dark:bg-amber-950/60 text-amber-900 dark:text-amber-200 border border-amber-300 dark:border-amber-700'
+                : 'bg-slate-100 dark:bg-[#1E2028] text-slate-700 dark:text-[#A1A1AA] hover:bg-slate-200 dark:hover:bg-[#27272A]'
             }`}
           >
             <Palmtree className="w-4 h-4 text-amber-600" />
@@ -316,7 +316,7 @@ export const SellerDashboard: React.FC = () => {
               resetForm();
               setIsAddModalOpen(true);
             }}
-            className="px-4 py-2.5 bg-[#FF6B00] hover:bg-[#ff7a1a] text-[#111111] rounded-xl text-xs sm:text-sm font-black border-2 border-[#111111] shadow-[0_3px_0_#111111] active:translate-y-0.5 flex items-center gap-1.5 transition-all min-h-[44px]"
+            className="px-4 py-2.5 bg-[#FF6B00] hover:bg-[#ff7a1a] text-[#111111] rounded-xl text-xs sm:text-sm font-black border-2 border-[#111111] dark:border-stone-800 shadow-[0_3px_0_#111111] dark:shadow-none active:translate-y-0.5 flex items-center gap-1.5 transition-all min-h-[44px]"
           >
             <div className="w-5 h-5 rounded-md bg-[#9FE870] border border-[#111111] flex items-center justify-center text-[#111111]">
               <Plus className="w-3.5 h-3.5 stroke-[3]" />
@@ -330,10 +330,10 @@ export const SellerDashboard: React.FC = () => {
       <div
         className={`p-5 rounded-2xl border-2 transition-all ${
           isVerified
-            ? 'bg-emerald-50/80 border-emerald-300 text-emerald-950 shadow-xs'
+            ? 'bg-emerald-50/80 dark:bg-[#15161C] border-emerald-300 dark:border-emerald-600/50 text-emerald-950 dark:text-emerald-100 shadow-xs'
             : isVerifPending
-            ? 'bg-amber-50/80 border-amber-300 text-amber-950 shadow-xs'
-            : 'bg-white border-[#111111] shadow-[0_3px_0_#111111]'
+            ? 'bg-amber-50/80 dark:bg-[#15161C] border-amber-300 dark:border-amber-600/50 text-amber-950 dark:text-amber-100 shadow-xs'
+            : 'bg-white dark:bg-[#15161C] border-[#111111] dark:border-[#27272A] shadow-[0_3px_0_#111111] dark:shadow-none'
         }`}
       >
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -358,7 +358,7 @@ export const SellerDashboard: React.FC = () => {
 
             <div className="space-y-1">
               <div className="flex items-center gap-2 flex-wrap">
-                <h3 className="text-base font-black text-[#111111]">
+                <h3 className="text-base font-black text-[#111111] dark:text-white">
                   {isVerified
                     ? 'Verified Artisan Store (NIN Slip on File)'
                     : isVerifPending
@@ -368,9 +368,9 @@ export const SellerDashboard: React.FC = () => {
                 <span
                   className={`px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider border ${
                     isVerified
-                      ? 'bg-emerald-100 text-emerald-900 border-emerald-300'
+                      ? 'bg-emerald-100 dark:bg-emerald-950 text-emerald-900 dark:text-emerald-300 border-emerald-300 dark:border-emerald-700'
                       : isVerifPending
-                      ? 'bg-amber-100 text-amber-900 border-amber-300 animate-pulse'
+                      ? 'bg-amber-100 dark:bg-amber-950 text-amber-900 dark:text-amber-300 border-amber-300 dark:border-amber-700 animate-pulse'
                       : 'bg-[#FF6B00] text-[#111111] border-[#111111]'
                   }`}
                 >
@@ -378,7 +378,7 @@ export const SellerDashboard: React.FC = () => {
                 </span>
               </div>
 
-              <p className="text-xs text-slate-600 max-w-2xl leading-relaxed">
+              <p className="text-xs text-slate-600 dark:text-[#A1A1AA] max-w-2xl leading-relaxed">
                 {isVerified
                   ? 'Your store is officially verified with your NIMC National Identification Number (NIN) Slip. The verified maker badge is displayed on your listings and storefront to give buyers and parents complete confidence.'
                   : isVerifPending
@@ -390,20 +390,20 @@ export const SellerDashboard: React.FC = () => {
 
           <div className="shrink-0 flex items-center">
             {isVerified ? (
-              <div className="flex items-center gap-1.5 px-3.5 py-2 bg-emerald-100 text-emerald-900 rounded-xl text-xs font-black border border-emerald-300">
-                <CheckCircle2 className="w-4 h-4 text-emerald-700" />
+              <div className="flex items-center gap-1.5 px-3.5 py-2 bg-emerald-100 dark:bg-emerald-950 text-emerald-900 dark:text-emerald-300 rounded-xl text-xs font-black border border-emerald-300 dark:border-emerald-700">
+                <CheckCircle2 className="w-4 h-4 text-emerald-700 dark:text-emerald-400" />
                 <span>Verified NIN on File</span>
               </div>
             ) : isVerifPending ? (
-              <div className="flex items-center gap-1.5 px-3.5 py-2 bg-amber-100 text-amber-900 rounded-xl text-xs font-bold border border-amber-300">
-                <Clock className="w-4 h-4 text-amber-700" />
+              <div className="flex items-center gap-1.5 px-3.5 py-2 bg-amber-100 dark:bg-amber-950 text-amber-900 dark:text-amber-300 rounded-xl text-xs font-bold border border-amber-300 dark:border-amber-700">
+                <Clock className="w-4 h-4 text-amber-700 dark:text-amber-400" />
                 <span>Pending Review (24h)</span>
               </div>
             ) : (
               <button
                 type="button"
                 onClick={() => setIsVerifModalOpen(true)}
-                className="px-4 py-2.5 bg-[#FF6B00] hover:bg-[#FF7A1A] text-[#111111] rounded-xl text-xs sm:text-sm font-black border-2 border-[#111111] shadow-[0_2.5px_0_#111111] active:translate-y-0.5 transition-all flex items-center gap-2"
+                className="px-4 py-2.5 bg-[#FF6B00] hover:bg-[#FF7A1A] text-[#111111] rounded-xl text-xs sm:text-sm font-black border-2 border-[#111111] dark:border-stone-800 shadow-[0_2.5px_0_#111111] dark:shadow-none active:translate-y-0.5 transition-all flex items-center gap-2"
               >
                 <Upload className="w-4 h-4 text-[#111111]" />
                 <span>Upload NIN Slip</span>
@@ -415,55 +415,55 @@ export const SellerDashboard: React.FC = () => {
 
       {/* Escrow & Earnings Wallet Preview Strip */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="bg-white p-4 rounded-xl border border-slate-200">
-          <div className="text-xs text-slate-500 font-medium">Pending in Escrow</div>
-          <div className="text-2xl font-extrabold text-blue-700 font-mono-numbers mt-1">
+        <div className="bg-white dark:bg-[#15161C] p-4 rounded-xl border border-slate-200 dark:border-[#27272A]">
+          <div className="text-xs text-slate-500 dark:text-[#A1A1AA] font-medium">Pending in Escrow</div>
+          <div className="text-2xl font-extrabold text-blue-700 dark:text-blue-400 font-mono-numbers mt-1">
             {formatNaira(pendingEscrowEarnings)}
           </div>
-          <div className="text-[11px] text-slate-400 mt-0.5">
+          <div className="text-[11px] text-slate-400 dark:text-[#71717A] mt-0.5">
             Releases when buyer confirms
           </div>
         </div>
 
-        <div className="bg-white p-4 rounded-xl border border-slate-200">
-          <div className="text-xs text-slate-500 font-medium">Available to Withdraw</div>
-          <div className="text-2xl font-extrabold text-emerald-700 font-mono-numbers mt-1">
+        <div className="bg-white dark:bg-[#15161C] p-4 rounded-xl border border-slate-200 dark:border-[#27272A]">
+          <div className="text-xs text-slate-500 dark:text-[#A1A1AA] font-medium">Available to Withdraw</div>
+          <div className="text-2xl font-extrabold text-emerald-700 dark:text-[#9FE870] font-mono-numbers mt-1">
             {formatNaira(availableEarnings)}
           </div>
-          <div className="text-[11px] text-slate-400 mt-0.5">
+          <div className="text-[11px] text-slate-400 dark:text-[#71717A] mt-0.5">
             Opay / Bank transfer ready
           </div>
         </div>
 
-        <div className="bg-white p-4 rounded-xl border border-slate-200">
-          <div className="text-xs text-slate-500 font-medium">Active Orders</div>
-          <div className="text-2xl font-extrabold text-slate-900 font-mono-numbers mt-1">
+        <div className="bg-white dark:bg-[#15161C] p-4 rounded-xl border border-slate-200 dark:border-[#27272A]">
+          <div className="text-xs text-slate-500 dark:text-[#A1A1AA] font-medium">Active Orders</div>
+          <div className="text-2xl font-extrabold text-slate-900 dark:text-white font-mono-numbers mt-1">
             {sellerOrders.filter(o => o.status !== 'completed' && o.status !== 'cancelled').length}
           </div>
-          <div className="text-[11px] text-slate-400 mt-0.5">
+          <div className="text-[11px] text-slate-400 dark:text-[#71717A] mt-0.5">
             Fulfillment in progress
           </div>
         </div>
 
-        <div className="bg-white p-4 rounded-xl border border-slate-200">
-          <div className="text-xs text-slate-500 font-medium">Artisan Rating</div>
-          <div className="text-2xl font-extrabold text-amber-600 font-mono-numbers mt-1">
+        <div className="bg-white dark:bg-[#15161C] p-4 rounded-xl border border-slate-200 dark:border-[#27272A]">
+          <div className="text-xs text-slate-500 dark:text-[#A1A1AA] font-medium">Artisan Rating</div>
+          <div className="text-2xl font-extrabold text-amber-600 dark:text-amber-400 font-mono-numbers mt-1">
             ★ {currentSeller.rating.toFixed(1)}
           </div>
-          <div className="text-[11px] text-slate-400 mt-0.5">
+          <div className="text-[11px] text-slate-400 dark:text-[#71717A] mt-0.5">
             {currentSeller.reviewCount} verified campus reviews
           </div>
         </div>
       </div>
 
       {/* Dashboard Section Switcher (Inventory vs Orders vs Wallet) */}
-      <div className="flex border-b border-slate-200 gap-2 sm:gap-6 text-xs sm:text-sm overflow-x-auto">
+      <div className="flex border-b border-slate-200 dark:border-[#27272A] gap-2 sm:gap-6 text-xs sm:text-sm overflow-x-auto">
         <button
           onClick={() => setDashboardTab('inventory')}
           className={`pb-3 font-bold border-b-2 transition-all flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
             dashboardTab === 'inventory'
-              ? 'border-[#FF6B00] text-slate-900'
-              : 'border-transparent text-slate-500 hover:text-slate-800'
+              ? 'border-[#FF6B00] text-slate-900 dark:text-white'
+              : 'border-transparent text-slate-500 dark:text-[#A1A1AA] hover:text-slate-800 dark:hover:text-white'
           }`}
         >
           <Package className="w-4 h-4" />
@@ -474,8 +474,8 @@ export const SellerDashboard: React.FC = () => {
           onClick={() => setDashboardTab('orders')}
           className={`pb-3 font-bold border-b-2 transition-all flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
             dashboardTab === 'orders'
-              ? 'border-[#FF6B00] text-slate-900'
-              : 'border-transparent text-slate-500 hover:text-slate-800'
+              ? 'border-[#FF6B00] text-slate-900 dark:text-white'
+              : 'border-transparent text-slate-500 dark:text-[#A1A1AA] hover:text-slate-800 dark:hover:text-white'
           }`}
         >
           <Inbox className="w-4 h-4" />
@@ -489,8 +489,8 @@ export const SellerDashboard: React.FC = () => {
           onClick={() => setDashboardTab('wallet')}
           className={`pb-3 font-bold border-b-2 transition-all flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
             dashboardTab === 'wallet'
-              ? 'border-[#FF6B00] text-slate-900'
-              : 'border-transparent text-slate-500 hover:text-slate-800'
+              ? 'border-[#FF6B00] text-slate-900 dark:text-white'
+              : 'border-transparent text-slate-500 dark:text-[#A1A1AA] hover:text-slate-800 dark:hover:text-white'
           }`}
         >
           <Wallet className="w-4 h-4" />

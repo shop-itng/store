@@ -25,7 +25,7 @@ export const Footer: React.FC = () => {
   };
 
   return (
-    <footer className="bg-white border-t border-[#E4E4E7] mt-16 pt-12 pb-28 md:pb-14 text-xs text-[#52525B]">
+    <footer className="bg-white dark:bg-[#0D0E12] border-t border-[#E4E4E7] dark:border-[#27272A] mt-16 pt-12 pb-28 md:pb-14 text-xs text-[#52525B] dark:text-[#A1A1AA] transition-colors duration-200">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 space-y-10">
         {/* Main Footer Links & Info */}
         <div className="grid grid-cols-1 md:grid-cols-12 gap-8">
@@ -38,20 +38,20 @@ export const Footer: React.FC = () => {
                 className="w-9 h-9 rounded-xl object-contain shadow-xs"
               />
               <div>
-                <span className="text-xl font-black text-[#111111] tracking-tight block leading-none">
+                <span className="text-xl font-black text-[#111111] dark:text-white tracking-tight block leading-none">
                   Shop It
                 </span>
-                <span className="text-[11px] font-semibold text-[#71717A] block mt-0.5">
+                <span className="text-[11px] font-semibold text-[#71717A] dark:text-[#A1A1AA] block mt-0.5">
                   Nigerian Teens & Youth Marketplace
                 </span>
               </div>
             </div>
 
-            <p className="text-xs text-[#52525B] leading-relaxed max-w-sm">
+            <p className="text-xs text-[#52525B] dark:text-[#A1A1AA] leading-relaxed max-w-sm">
               The dedicated safe marketplace built for Nigerian teens and youth to buy and sell handmade beads, fashion, fragrance oils, crochet wear, and crafts with full escrow protection.
             </p>
 
-            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-[#FAFAFA] border border-[#E4E4E7] text-[11px] text-[#111111] font-semibold">
+            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-[#FAFAFA] dark:bg-[#15161C] border border-[#E4E4E7] dark:border-[#27272A] text-[11px] text-[#111111] dark:text-white font-semibold">
               <span className="w-2 h-2 rounded-full bg-[#9FE870] border border-[#111111]" />
               <span>Direct Peer-to-Peer Youth Commerce</span>
             </div>
@@ -59,10 +59,10 @@ export const Footer: React.FC = () => {
 
           {/* Col 2: Categories */}
           <div className="md:col-span-3 space-y-3">
-            <span className="font-bold text-[#111111] uppercase tracking-wider text-[11px] block">
+            <span className="font-bold text-[#111111] dark:text-white uppercase tracking-wider text-[11px] block">
               Popular Categories
             </span>
-            <ul className="space-y-2 text-[#52525B]">
+            <ul className="space-y-2 text-[#52525B] dark:text-[#A1A1AA]">
               {[
                 { label: 'Waist Beads & Jewelry', cat: 'beads' },
                 { label: 'Perfume Oils & Scent Mists', cat: 'fragrance' },
@@ -78,7 +78,7 @@ export const Footer: React.FC = () => {
                       setActiveView('catalog');
                       window.scrollTo({ top: 0, behavior: 'smooth' });
                     }}
-                    className="hover:text-[#FF6B00] transition-colors font-medium text-left"
+                    className="hover:text-[#FF6B00] dark:hover:text-[#FF6B00] transition-colors font-medium text-left"
                   >
                     {item.label}
                   </button>
@@ -89,17 +89,17 @@ export const Footer: React.FC = () => {
 
           {/* Col 3: Safe Spots & Quick Links */}
           <div className="md:col-span-2 space-y-3">
-            <span className="font-bold text-[#111111] uppercase tracking-wider text-[11px] block">
+            <span className="font-bold text-[#111111] dark:text-white uppercase tracking-wider text-[11px] block">
               Quick Links
             </span>
-            <ul className="space-y-2 text-[#52525B]">
+            <ul className="space-y-2 text-[#52525B] dark:text-[#A1A1AA]">
               <li>
                 <button
                   onClick={() => {
                     setActiveView('catalog');
                     window.scrollTo({ top: 0, behavior: 'smooth' });
                   }}
-                  className="hover:text-[#FF6B00] font-medium"
+                  className="hover:text-[#FF6B00] dark:hover:text-[#FF6B00] font-medium"
                 >
                   Marketplace Feed
                 </button>
@@ -107,7 +107,7 @@ export const Footer: React.FC = () => {
               <li>
                 <button
                   onClick={() => setActiveView('campus_logistics')}
-                  className="hover:text-[#FF6B00] font-medium"
+                  className="hover:text-[#FF6B00] dark:hover:text-[#FF6B00] font-medium"
                 >
                   Safe Pickup Spots
                 </button>
@@ -115,7 +115,7 @@ export const Footer: React.FC = () => {
               <li>
                 <button
                   onClick={() => setActiveView('orders')}
-                  className="hover:text-[#FF6B00] font-medium"
+                  className="hover:text-[#FF6B00] dark:hover:text-[#FF6B00] font-medium"
                 >
                   Track Escrow Orders
                 </button>
@@ -123,7 +123,7 @@ export const Footer: React.FC = () => {
               <li>
                 <button
                   onClick={() => openAuthModal('seller_register')}
-                  className="hover:text-[#FF6B00] font-medium"
+                  className="hover:text-[#FF6B00] dark:hover:text-[#FF6B00] font-medium"
                 >
                   Open Youth Shop
                 </button>
@@ -131,9 +131,9 @@ export const Footer: React.FC = () => {
               <li>
                 <button
                   onClick={() => openAuthModal('login')}
-                  className="hover:text-[#FF6B00] font-medium flex items-center gap-1"
+                  className="hover:text-[#FF6B00] dark:hover:text-[#FF6B00] font-medium flex items-center gap-1"
                 >
-                  <Lock className="w-3 h-3 text-[#71717A]" />
+                  <Lock className="w-3 h-3 text-[#71717A] dark:text-[#A1A1AA]" />
                   <span>Admin / Moderator</span>
                 </button>
               </li>
@@ -142,18 +142,18 @@ export const Footer: React.FC = () => {
 
           {/* Col 4: Safety Notice */}
           <div className="md:col-span-3 space-y-3">
-            <span className="font-bold text-[#111111] uppercase tracking-wider text-[11px] block">
+            <span className="font-bold text-[#111111] dark:text-white uppercase tracking-wider text-[11px] block">
               Youth Safety Rules
             </span>
-            <p className="text-[11px] text-[#52525B] leading-relaxed">
+            <p className="text-[11px] text-[#52525B] dark:text-[#A1A1AA] leading-relaxed">
               Never accept payments outside Shop It. Digits and number words are blocked in in-app chat to protect teen buyers and sellers from off-platform fraud.
             </p>
-            <div className="p-3 bg-[#FAFAFA] rounded-xl border border-[#E4E4E7] text-[11px] space-y-1">
-              <span className="font-bold text-[#111111] flex items-center gap-1">
+            <div className="p-3 bg-[#FAFAFA] dark:bg-[#15161C] rounded-xl border border-[#E4E4E7] dark:border-[#27272A] text-[11px] space-y-1">
+              <span className="font-bold text-[#111111] dark:text-white flex items-center gap-1">
                 <MapPin className="w-3.5 h-3.5 text-[#FF6B00]" />
                 <span>All 36 States + FCT Supported</span>
               </span>
-              <p className="text-[#71717A]">
+              <p className="text-[#71717A] dark:text-[#A1A1AA]">
                 Shop locally within your area or arrange safe interstate courier delivery.
               </p>
             </div>
@@ -161,9 +161,9 @@ export const Footer: React.FC = () => {
         </div>
 
         {/* All 36 Nigerian States + FCT Directory */}
-        <div className="pt-6 border-t border-[#E4E4E7] space-y-3">
+        <div className="pt-6 border-t border-[#E4E4E7] dark:border-[#27272A] space-y-3">
           <div className="flex items-center justify-between">
-            <span className="font-bold text-[#111111] uppercase tracking-wider text-[11px]">
+            <span className="font-bold text-[#111111] dark:text-white uppercase tracking-wider text-[11px]">
               Browse Marketplace by Nigerian State ({NIGERIAN_STATES.length} States &amp; FCT)
             </span>
             <button
@@ -182,7 +182,7 @@ export const Footer: React.FC = () => {
                 <button
                   key={st}
                   onClick={() => handleStateClick(st)}
-                  className="px-2.5 py-1 rounded-lg border border-[#E4E4E7] bg-white hover:border-[#FF6B00] hover:text-[#FF6B00] transition-colors font-medium"
+                  className="px-2.5 py-1 rounded-lg border border-[#E4E4E7] dark:border-[#27272A] bg-white dark:bg-[#15161C] hover:border-[#FF6B00] dark:hover:border-[#FF6B00] hover:text-[#FF6B00] dark:hover:text-[#FF6B00] text-[#111111] dark:text-[#F4F4F5] transition-colors font-medium"
                 >
                   📍 {st}
                 </button>
@@ -195,7 +195,7 @@ export const Footer: React.FC = () => {
                 const zoneStates = NIGERIAN_STATES.filter(s => s.zone === zone);
                 return (
                   <div key={zone} className="space-y-1.5">
-                    <span className="font-bold text-[#111111] text-[10px] uppercase tracking-wider block text-[#71717A]">
+                    <span className="font-bold text-[#111111] dark:text-white text-[10px] uppercase tracking-wider block">
                       {zone}
                     </span>
                     <ul className="space-y-1">
@@ -203,7 +203,7 @@ export const Footer: React.FC = () => {
                         <li key={st.state}>
                           <button
                             onClick={() => handleStateClick(st.state)}
-                            className="text-[11px] text-[#52525B] hover:text-[#FF6B00] transition-colors truncate block text-left"
+                            className="text-[11px] text-[#52525B] dark:text-[#A1A1AA] hover:text-[#FF6B00] dark:hover:text-[#FF6B00] transition-colors truncate block text-left"
                           >
                             {st.state}
                           </button>
@@ -218,14 +218,14 @@ export const Footer: React.FC = () => {
         </div>
 
         {/* Bottom copyright - strictly as requested: "copyright 2026 shop it made by teeds" */}
-        <div className="pt-6 border-t border-[#E4E4E7] flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-[#71717A]">
-          <div className="font-semibold text-[#111111]">
+        <div className="pt-6 border-t border-[#E4E4E7] dark:border-[#27272A] flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-[#71717A] dark:text-[#A1A1AA]">
+          <div className="font-semibold text-[#111111] dark:text-white">
             © 2026 Shop It. Made by TEEDS.
           </div>
           <div className="flex items-center gap-4 text-[11px]">
             <span>Currency: Nigerian Naira (₦)</span>
             <span>·</span>
-            <span className="text-[#166534] font-bold bg-[#DCFCE7] px-2 py-0.5 rounded">
+            <span className="text-[#166534] dark:text-[#9FE870] font-bold bg-[#DCFCE7] dark:bg-[#1E2028] border dark:border-[#27272A] px-2 py-0.5 rounded">
               Escrow Secured
             </span>
           </div>

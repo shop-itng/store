@@ -19,7 +19,9 @@ import {
   CornerDownRight,
   ExternalLink,
   KeyRound,
+  FileText,
 } from 'lucide-react';
+import { EscrowReceiptModal } from './EscrowReceiptModal';
 
 export const OrdersView: React.FC = () => {
   const {
@@ -36,12 +38,13 @@ export const OrdersView: React.FC = () => {
     openReportProblemModal,
   } = useApp();
 
-  // Modal states for Dispute & Review
+  // Modal states for Dispute, Review & Safe Pass Receipt
   const [selectedDisputeOrder, setSelectedDisputeOrder] = useState<Order | null>(null);
   const [disputeReason, setDisputeReason] = useState('');
   const [selectedReviewOrder, setSelectedReviewOrder] = useState<Order | null>(null);
   const [reviewRating, setReviewRating] = useState(5);
   const [reviewComment, setReviewComment] = useState('');
+  const [selectedReceiptOrder, setSelectedReceiptOrder] = useState<Order | null>(null);
 
   const [activeTab, setActiveTab] = useState<'all' | 'active' | 'completed'>('all');
 
@@ -100,27 +103,27 @@ export const OrdersView: React.FC = () => {
         <div>
           <button
             onClick={() => setActiveView('catalog')}
-            className="flex items-center gap-1.5 text-xs sm:text-sm font-semibold text-slate-600 hover:text-slate-900 transition-colors mb-2 min-h-[38px]"
+            className="flex items-center gap-1.5 text-xs sm:text-sm font-semibold text-slate-600 dark:text-[#A1A1AA] hover:text-slate-900 dark:hover:text-white transition-colors mb-2 min-h-[38px]"
           >
             <ArrowLeft className="w-4 h-4" />
             <span>Back to Marketplace</span>
           </button>
-          <h1 className="text-xl sm:text-2xl font-black text-slate-900">
+          <h1 className="text-xl sm:text-2xl font-black text-slate-900 dark:text-white">
             My Orders & Escrow Tracking
           </h1>
-          <p className="text-xs text-slate-500 mt-0.5">
+          <p className="text-xs text-slate-500 dark:text-[#A1A1AA] mt-0.5">
             Track handmade shipments, confirm delivery to release funds, or report an issue.
           </p>
         </div>
 
         {/* Tab Filters */}
-        <div className="flex items-center gap-1.5 bg-slate-100 p-1.5 rounded-xl self-start sm:self-auto text-xs border border-slate-200">
+        <div className="flex items-center gap-1.5 bg-slate-100 dark:bg-[#1E2028] p-1.5 rounded-xl self-start sm:self-auto text-xs border border-slate-200 dark:border-[#27272A]">
           <button
             onClick={() => setActiveTab('all')}
             className={`px-3.5 py-1.5 rounded-lg font-black transition-all ${
               activeTab === 'all'
-                ? 'bg-[#111111] text-[#9FE870] border-2 border-[#111111] shadow-[0_2px_0_#FF6B00]'
-                : 'text-slate-600 hover:text-slate-900'
+                ? 'bg-[#111111] dark:bg-stone-800 text-[#9FE870] border-2 border-[#111111] dark:border-stone-700 shadow-[0_2px_0_#FF6B00]'
+                : 'text-slate-600 dark:text-[#A1A1AA] hover:text-slate-900 dark:hover:text-white'
             }`}
           >
             All ({orders.length})
@@ -129,8 +132,8 @@ export const OrdersView: React.FC = () => {
             onClick={() => setActiveTab('active')}
             className={`px-3.5 py-1.5 rounded-lg font-black transition-all ${
               activeTab === 'active'
-                ? 'bg-[#111111] text-[#9FE870] border-2 border-[#111111] shadow-[0_2px_0_#FF6B00]'
-                : 'text-slate-600 hover:text-slate-900'
+                ? 'bg-[#111111] dark:bg-stone-800 text-[#9FE870] border-2 border-[#111111] dark:border-stone-700 shadow-[0_2px_0_#FF6B00]'
+                : 'text-slate-600 dark:text-[#A1A1AA] hover:text-slate-900 dark:hover:text-white'
             }`}
           >
             Active In-Transit
@@ -139,8 +142,8 @@ export const OrdersView: React.FC = () => {
             onClick={() => setActiveTab('completed')}
             className={`px-3.5 py-1.5 rounded-lg font-black transition-all ${
               activeTab === 'completed'
-                ? 'bg-[#111111] text-[#9FE870] border-2 border-[#111111] shadow-[0_2px_0_#FF6B00]'
-                : 'text-slate-600 hover:text-slate-900'
+                ? 'bg-[#111111] dark:bg-stone-800 text-[#9FE870] border-2 border-[#111111] dark:border-stone-700 shadow-[0_2px_0_#FF6B00]'
+                : 'text-slate-600 dark:text-[#A1A1AA] hover:text-slate-900 dark:hover:text-white'
             }`}
           >
             Past Orders
@@ -160,16 +163,16 @@ export const OrdersView: React.FC = () => {
             return (
               <div
                 key={order.id}
-                className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-xs space-y-4 p-5 sm:p-6"
+                className="bg-white dark:bg-[#15161C] rounded-2xl border border-slate-200 dark:border-[#27272A] overflow-hidden shadow-xs space-y-4 p-5 sm:p-6"
               >
                 {/* Order Top Bar: Reference & Status */}
-                <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-100">
+                <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-100 dark:border-[#27272A]">
                   <div className="flex items-center gap-2">
-                    <span className="text-xs font-bold text-slate-900 font-mono tracking-wide">
+                    <span className="text-xs font-bold text-slate-900 dark:text-white font-mono tracking-wide">
                       {order.id}
                     </span>
-                    <span className="text-slate-400 text-xs">·</span>
-                    <span className="text-xs text-slate-500 font-mono-numbers">
+                    <span className="text-slate-400 dark:text-[#71717A] text-xs">·</span>
+                    <span className="text-xs text-slate-500 dark:text-[#A1A1AA] font-mono-numbers">
                       {new Date(order.createdAt).toLocaleDateString('en-NG', {
                         day: 'numeric',
                         month: 'short',
@@ -194,11 +197,11 @@ export const OrdersView: React.FC = () => {
                     <div className="grid grid-cols-4 gap-2 text-center text-[11px]">
                       {/* Step 1: Paid */}
                       <div className="space-y-1">
-                        <div className="w-6 h-6 rounded-full bg-slate-900 text-white flex items-center justify-center mx-auto text-xs font-bold">
+                        <div className="w-6 h-6 rounded-full bg-slate-900 dark:bg-stone-700 text-white flex items-center justify-center mx-auto text-xs font-bold">
                           ✓
                         </div>
-                        <span className="font-semibold text-slate-900 block">Paid</span>
-                        <span className="text-[10px] text-slate-400">Escrow held</span>
+                        <span className="font-semibold text-slate-900 dark:text-white block">Paid</span>
+                        <span className="text-[10px] text-slate-400 dark:text-[#71717A]">Escrow held</span>
                       </div>
 
                       {/* Step 2: Packed */}
@@ -206,20 +209,20 @@ export const OrdersView: React.FC = () => {
                         <div
                           className={`w-6 h-6 rounded-full flex items-center justify-center mx-auto text-xs font-bold ${
                             order.status !== 'paid'
-                              ? 'bg-slate-900 text-white'
-                              : 'bg-slate-100 text-slate-400'
+                              ? 'bg-slate-900 dark:bg-stone-700 text-white'
+                              : 'bg-slate-100 dark:bg-[#1E2028] text-slate-400 dark:text-[#71717A]'
                           }`}
                         >
                           {order.status !== 'paid' ? '✓' : '2'}
                         </div>
                         <span
                           className={`block ${
-                            order.status !== 'paid' ? 'font-semibold text-slate-900' : 'text-slate-400'
+                            order.status !== 'paid' ? 'font-semibold text-slate-900 dark:text-white' : 'text-slate-400 dark:text-[#71717A]'
                           }`}
                         >
                           Packed
                         </span>
-                        <span className="text-[10px] text-slate-400">Photo verified</span>
+                        <span className="text-[10px] text-slate-400 dark:text-[#71717A]">Photo verified</span>
                       </div>
 
                       {/* Step 3: Shipped */}
@@ -229,8 +232,8 @@ export const OrdersView: React.FC = () => {
                             order.status === 'shipped' ||
                             order.status === 'delivered' ||
                             order.status === 'completed'
-                              ? 'bg-slate-900 text-white'
-                              : 'bg-slate-100 text-slate-400'
+                              ? 'bg-slate-900 dark:bg-stone-700 text-white'
+                              : 'bg-slate-100 dark:bg-[#1E2028] text-slate-400 dark:text-[#71717A]'
                           }`}
                         >
                           {order.status === 'shipped' ||
@@ -244,13 +247,13 @@ export const OrdersView: React.FC = () => {
                             order.status === 'shipped' ||
                             order.status === 'delivered' ||
                             order.status === 'completed'
-                              ? 'font-semibold text-slate-900'
-                              : 'text-slate-400'
+                              ? 'font-semibold text-slate-900 dark:text-white'
+                              : 'text-slate-400 dark:text-[#71717A]'
                           }`}
                         >
                           Shipped
                         </span>
-                        <span className="text-[10px] text-slate-400">Campus rider</span>
+                        <span className="text-[10px] text-slate-400 dark:text-[#71717A]">Campus rider</span>
                       </div>
 
                       {/* Step 4: Delivered */}
@@ -259,7 +262,7 @@ export const OrdersView: React.FC = () => {
                           className={`w-6 h-6 rounded-full flex items-center justify-center mx-auto text-xs font-bold ${
                             order.status === 'delivered' || order.status === 'completed'
                               ? 'bg-emerald-600 text-white'
-                              : 'bg-slate-100 text-slate-400'
+                              : 'bg-slate-100 dark:bg-[#1E2028] text-slate-400 dark:text-[#71717A]'
                           }`}
                         >
                           {order.status === 'completed' ? '✓' : '4'}
@@ -267,13 +270,13 @@ export const OrdersView: React.FC = () => {
                         <span
                           className={`block ${
                             order.status === 'delivered' || order.status === 'completed'
-                              ? 'font-semibold text-emerald-800'
-                              : 'text-slate-400'
+                              ? 'font-semibold text-emerald-800 dark:text-[#9FE870]'
+                              : 'text-slate-400 dark:text-[#71717A]'
                           }`}
                         >
                           Delivered
                         </span>
-                        <span className="text-[10px] text-slate-400">Confirm craft</span>
+                        <span className="text-[10px] text-slate-400 dark:text-[#71717A]">Confirm craft</span>
                       </div>
                     </div>
                   </div>
@@ -281,17 +284,17 @@ export const OrdersView: React.FC = () => {
 
                 {/* Handshake PIN for Campus Handover (Phase 4) */}
                 {order.status !== 'cancelled' && order.status !== 'completed' && (
-                  <div className="p-3 bg-orange-50 border border-orange-200 rounded-xl flex items-center justify-between text-xs">
+                  <div className="p-3 bg-orange-50 dark:bg-[#1E2028] border border-orange-200 dark:border-[#FF6B00]/30 rounded-xl flex items-center justify-between text-xs">
                     <div className="flex items-center gap-2">
                       <KeyRound className="w-4 h-4 text-[#FF6B00] shrink-0" />
                       <div>
-                        <span className="font-bold text-slate-900">Delivery Handshake PIN:</span>
-                        <p className="text-[11px] text-slate-600">
+                        <span className="font-bold text-slate-900 dark:text-white">Delivery Handshake PIN:</span>
+                        <p className="text-[11px] text-slate-600 dark:text-[#A1A1AA]">
                           Show this 4-digit code to seller or runner at your area safe spot upon craft inspection to unlock escrow.
                         </p>
                       </div>
                     </div>
-                    <div className="px-3 py-1 bg-white border border-orange-300 rounded-lg font-mono-numbers font-extrabold text-sm text-[#FF6B00] tracking-widest shadow-xs shrink-0">
+                    <div className="px-3 py-1 bg-white dark:bg-[#15161C] border border-orange-300 dark:border-[#FF6B00] rounded-lg font-mono-numbers font-extrabold text-sm text-[#FF6B00] tracking-widest shadow-xs shrink-0">
                       {order.handshakeOtp || '7429'}
                     </div>
                   </div>
@@ -397,6 +400,16 @@ export const OrdersView: React.FC = () => {
                       Cancel Order (Auto-Refund)
                     </button>
                   )}
+
+                  {/* Safe Pass & Official Receipt */}
+                  <button
+                    type="button"
+                    onClick={() => setSelectedReceiptOrder(order)}
+                    className="px-3.5 py-2 text-xs font-black text-stone-900 bg-white hover:bg-stone-50 rounded-xl transition-all border-2 border-[#111111] shadow-[0_2px_0_#111111] active:translate-y-0.5 flex items-center gap-1.5"
+                  >
+                    <FileText className="w-3.5 h-3.5 text-[#FF6B00]" />
+                    <span>Safe Pass & Receipt</span>
+                  </button>
 
                   {/* Chat with Artisan */}
                   <button
@@ -580,6 +593,13 @@ export const OrdersView: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* Official Escrow Safe Pass & Digital Receipt Modal */}
+      <EscrowReceiptModal
+        order={selectedReceiptOrder}
+        isOpen={!!selectedReceiptOrder}
+        onClose={() => setSelectedReceiptOrder(null)}
+      />
     </div>
   );
 };
