@@ -582,7 +582,7 @@ export const CheckoutModal: React.FC = () => {
           <div className="p-3 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 rounded-xl text-xs text-rose-900 dark:text-rose-200 flex items-center gap-2">
             <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
             <span>
-              <strong>Orders Temporarily Paused:</strong> Moderator has paused new checkouts for network verification.
+              <strong>Orders Temporarily Paused:</strong> System security review has temporarily paused new checkouts for network verification.
             </span>
           </div>
         )}

@@ -66,7 +66,7 @@ const MarketplaceContent: React.FC = () => {
               onClick={() => openAuthModal('login')}
               className="text-xs text-stone-400 hover:text-white transition-colors underline decoration-stone-600"
             >
-              Sign in as Staff / Moderator
+              Sign in to Account
             </button>
           </div>
         </div>

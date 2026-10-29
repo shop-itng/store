@@ -12,9 +12,10 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
-// Host URL for webhooks and redirects (Cloud Run production URL or localhost in dev)
+// Host URL for webhooks and redirects (supports Vercel, production domain, or local dev)
 const APP_URL =
   process.env.APP_URL ||
+  (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : '') ||
   'https://ais-pre-wzajsxrjpydkrhqs4wnbqb-960736599572.europe-west2.run.app';
 
 // Security headers middleware
@@ -625,4 +626,9 @@ async function startServer() {
   });
 }
 
-startServer();
+// Start standalone server when running locally / directly
+if (!process.env.VERCEL) {
+  startServer();
+}
+
+export default app;

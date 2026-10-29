@@ -356,7 +356,7 @@ export const AuthModal: React.FC = () => {
               </button>
             </form>
 
-            <div className="pt-3 border-t border-slate-100 dark:border-[#27272A] space-y-2 text-center">
+            <div className="pt-3 border-t border-slate-100 dark:border-[#27272A] text-center">
               <p className="text-xs text-[#71717A] dark:text-[#A1A1AA]">
                 Don't have an account?{' '}
                 <button
@@ -367,19 +367,6 @@ export const AuthModal: React.FC = () => {
                   Create one now
                 </button>
               </p>
-              <div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setLoginEmail(ADMIN_CREDENTIALS.email);
-                    setLoginPassword(ADMIN_CREDENTIALS.password);
-                    notify('Moderator credentials loaded. Click "Sign In Securely" to enter.', 'info');
-                  }}
-                  className="text-[11px] text-[#71717A] dark:text-[#A1A1AA] hover:text-[#FF6B00] dark:hover:text-[#9FE870] transition-colors underline decoration-dotted"
-                >
-                  Are you Adeyinka Joseph? Fill Moderator Login
-                </button>
-              </div>
             </div>
           </div>
         )}
@@ -567,7 +554,7 @@ export const AuthModal: React.FC = () => {
 
             {emergencyControls?.pauseSellerSignups && (
               <div className="p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-[11px] text-amber-900 leading-tight">
-                <strong>Moderator Notice:</strong> New artisan seller registrations are temporarily paused for routine safety review. Buyer signups are fully open.
+                <strong>Safety Notice:</strong> New artisan seller registrations are temporarily paused for routine safety review. Buyer signups are fully open.
               </div>
             )}
 

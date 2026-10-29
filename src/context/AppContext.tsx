@@ -625,23 +625,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return saved ? JSON.parse(saved) : DEFAULT_FEE_SETTINGS;
   });
 
-  // Moderator Account Governance - Only root moderator Adeyinka Joseph retained by default
+  // Registered users repository (buyers, sellers, and system accounts)
   const [registeredUsers, setRegisteredUsers] = useState<User[]>(() => {
     try {
       const saved = localStorage.getItem('shopit_registered_users');
       if (saved) {
         const parsed: User[] = JSON.parse(saved);
-        // Only keep admin moderator account
-        const filtered = parsed.filter(
-          u => u.email?.toLowerCase() === ADMIN_CREDENTIALS.email.toLowerCase() || u.id === 'admin_adeyinka_joseph' || u.role === 'admin'
-        );
-        if (filtered.length > 0) return filtered;
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          // Ensure root moderator account is always present in system
+          if (!parsed.some(u => u.email?.toLowerCase() === ADMIN_CREDENTIALS.email.toLowerCase())) {
+            parsed.push(ROOT_MODERATOR_USER);
+          }
+          return parsed;
+        }
       }
     } catch {}
     return [ROOT_MODERATOR_USER];
   });
 
-  // Moderator Emergency Broadcast, Platform Killswitches & Audit Trail
+  // Site-wide Broadcast, Platform Killswitches & Audit Trail
   const [broadcastAnnouncement, setBroadcastAnnouncement] = useState<BroadcastAnnouncement>(() => {
     try {
       const saved = localStorage.getItem('shopit_broadcast_announcement');
@@ -654,7 +656,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             message: 'All campus craft handoffs must be verified using the 4-digit Handshake OTP in daylight safe spots.',
             tone: 'info',
             createdAt: new Date().toISOString(),
-            author: 'Adeyinka Joseph (Moderator)',
+            author: 'Shop It Safety Desk',
           };
     } catch {
       return {
@@ -664,7 +666,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         message: 'All campus craft handoffs must be verified using the 4-digit Handshake OTP in daylight safe spots.',
         tone: 'info',
         createdAt: new Date().toISOString(),
-        author: 'Adeyinka Joseph (Moderator)',
+        author: 'Shop It Safety Desk',
       };
     }
   });

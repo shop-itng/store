@@ -131,10 +131,9 @@ export const Footer: React.FC = () => {
               <li>
                 <button
                   onClick={() => openAuthModal('login')}
-                  className="hover:text-[#FF6B00] dark:hover:text-[#FF6B00] font-medium flex items-center gap-1"
+                  className="hover:text-[#FF6B00] dark:hover:text-[#FF6B00] font-medium"
                 >
-                  <Lock className="w-3 h-3 text-[#71717A] dark:text-[#A1A1AA]" />
-                  <span>Admin / Moderator</span>
+                  Member Sign In
                 </button>
               </li>
             </ul>
