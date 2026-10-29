@@ -344,8 +344,15 @@ interface AppContextType {
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  // One-time fix: Clear forced automatic moderator session so public visitors are not logged in as admin
+  if (typeof window !== 'undefined' && !localStorage.getItem('shopit_fix_auto_moderator_login_v2')) {
+    localStorage.removeItem('shopit_current_user');
+    localStorage.removeItem('shopit_admin_session_active');
+    localStorage.setItem('shopit_fix_auto_moderator_login_v2', 'true');
+  }
+
   // Automatic Database Purge Migration:
-  // Completely wipes all sellers, products, businesses, orders, chats, and accounts, retaining ONLY moderator Adeyinka Joseph.
+  // Completely wipes all sellers, products, businesses, orders, chats, and accounts, retaining ONLY moderator Adeyinka Joseph in registered users.
   if (typeof window !== 'undefined' && !localStorage.getItem('shopit_db_purged_moderator_only_v4')) {
     localStorage.setItem('shopit_sellers', '[]');
     localStorage.setItem('shopit_products_ready_made', '[]');
@@ -365,22 +372,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     localStorage.setItem('shopit_campus_drops', '[]');
     localStorage.setItem('shopit_style_posts', '[]');
     localStorage.setItem('shopit_registered_users', JSON.stringify([ROOT_MODERATOR_USER]));
-    localStorage.setItem('shopit_current_user', JSON.stringify(ROOT_MODERATOR_USER));
     localStorage.setItem('shopit_db_purged_moderator_only_v4', 'true');
   }
 
-  // Persistence helpers
+  // Persistence helpers: Public visitors start as guest (null), NEVER forced to moderator!
   const [currentUser, setCurrentUser] = useState<User | null>(() => {
     try {
       const saved = localStorage.getItem('shopit_current_user');
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (parsed.email?.toLowerCase() === ADMIN_CREDENTIALS.email.toLowerCase() || parsed.role === 'admin') {
+        if (parsed && typeof parsed === 'object' && parsed.id && parsed.email) {
+          const isAdmin = parsed.role === 'admin' || parsed.email?.toLowerCase() === ADMIN_CREDENTIALS.email.toLowerCase();
+          if (isAdmin) {
+            const hasExplicitAdminSession = localStorage.getItem('shopit_admin_session_active') === 'true';
+            if (hasExplicitAdminSession) {
+              return parsed;
+            }
+            // Clear auto-assigned or stale admin session without explicit credentials login
+            localStorage.removeItem('shopit_current_user');
+            return null;
+          }
           return parsed;
         }
       }
     } catch {}
-    return ROOT_MODERATOR_USER;
+    return null;
   });
 
   const [products, setProducts] = useState<Product[]>(() => {
@@ -707,6 +723,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   useEffect(() => {
     if (currentUser) {
       localStorage.setItem('shopit_current_user', JSON.stringify(currentUser));
+    } else {
+      localStorage.removeItem('shopit_current_user');
+      localStorage.removeItem('shopit_admin_session_active');
     }
   }, [currentUser]);
 
@@ -918,6 +937,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const logout = () => {
     setCurrentUser(null);
     localStorage.removeItem('shopit_current_user');
+    localStorage.removeItem('shopit_admin_session_active');
     setActiveView('catalog');
     notify('Logged out successfully', 'info');
   };

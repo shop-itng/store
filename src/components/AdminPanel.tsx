@@ -1358,6 +1358,62 @@ export const AdminPanel: React.FC = () => {
             </div>
           </div>
 
+          {/* Paystack Integration & Live Webhook Configuration Info */}
+          <div className="bg-[#111111] text-white p-5 rounded-2xl border-2 border-[#111111] shadow-[0_4px_0_#FF6B00] space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-stone-800 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-lg bg-[#00C3F7] text-[#111111] font-black flex items-center justify-center text-sm shadow-xs">
+                  P
+                </div>
+                <div>
+                  <h4 className="text-sm font-extrabold text-white flex items-center gap-2">
+                    <span>Paystack Webhook & Escrow Server Integration</span>
+                    <span className="text-[10px] bg-[#9FE870] text-[#111111] px-2 py-0.5 rounded-full font-bold">
+                      ACTIVE
+                    </span>
+                  </h4>
+                  <p className="text-[11px] text-stone-400">
+                    Server-authoritative kobo calculation · HMAC SHA-512 signature check · Strict idempotency
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] font-mono text-[#9FE870] bg-emerald-950/60 px-2.5 py-1 rounded-lg border border-emerald-800">
+                  Dual-Check: Webhook + Paystack API
+                </span>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-[11px] font-bold text-stone-300 block">
+                Your Exact Paystack Live Webhook URL (Copy & paste into Paystack Dashboard):
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  readOnly
+                  value="https://ais-pre-wzajsxrjpydkrhqs4wnbqb-960736599572.europe-west2.run.app/api/paystack/webhook"
+                  className="flex-1 bg-stone-900 border border-stone-700 text-xs text-[#9FE870] font-mono px-3 py-2 rounded-xl select-all focus:outline-hidden"
+                />
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(
+                      'https://ais-pre-wzajsxrjpydkrhqs4wnbqb-960736599572.europe-west2.run.app/api/paystack/webhook'
+                    );
+                    notify('Paystack Webhook URL copied to clipboard!', 'success');
+                  }}
+                  className="px-3.5 py-2 bg-[#FF6B00] hover:bg-[#ff7a1a] text-[#111111] font-black rounded-xl text-xs border border-[#111111] shadow-[0_2px_0_#ffffff] shrink-0"
+                >
+                  Copy URL
+                </button>
+              </div>
+              <p className="text-[11px] text-stone-400 leading-relaxed">
+                <strong>Paystack Setup:</strong> Go to Paystack Dashboard → <strong>Settings</strong> → <strong>API Keys &amp; Webhooks</strong> → In the <strong>Live Webhook URL</strong> field, paste the URL above and click <strong>Save Changes</strong>.
+              </p>
+            </div>
+          </div>
+
           {/* Paystack Webhook Ingestion Log (Rule 3) */}
           <div className="bg-white rounded-2xl border border-stone-200 overflow-hidden shadow-xs">
             <div className="p-4 sm:p-5 border-b border-stone-200 bg-stone-50/60 flex flex-col sm:flex-row sm:items-center justify-between gap-2">

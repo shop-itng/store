@@ -150,6 +150,7 @@ export const AuthModal: React.FC = () => {
       cleanEmail === ADMIN_CREDENTIALS.email.toLowerCase() &&
       cleanPass === ADMIN_CREDENTIALS.password
     ) {
+      localStorage.setItem('shopit_admin_session_active', 'true');
       login({
         id: 'admin_adeyinka_joseph',
         name: ADMIN_CREDENTIALS.name,
@@ -161,11 +162,12 @@ export const AuthModal: React.FC = () => {
         isVerifiedPhone: true,
       });
       closeAuthModal();
-      notify(`Welcome back, ${ADMIN_CREDENTIALS.name}!`, 'success');
+      notify(`Welcome back, ${ADMIN_CREDENTIALS.name}! (Moderator access active)`, 'success');
       return;
     }
 
     // Check localStorage registered users
+    localStorage.removeItem('shopit_admin_session_active');
     const registeredUsersStr = localStorage.getItem('shopit_registered_users');
     const registeredUsers: any[] = registeredUsersStr ? JSON.parse(registeredUsersStr) : [];
     const foundUser = registeredUsers.find(
@@ -173,6 +175,9 @@ export const AuthModal: React.FC = () => {
     );
 
     if (foundUser) {
+      if (foundUser.role === 'admin' || foundUser.email?.toLowerCase() === ADMIN_CREDENTIALS.email.toLowerCase()) {
+        localStorage.setItem('shopit_admin_session_active', 'true');
+      }
       login(foundUser);
       closeAuthModal();
       notify(`Welcome back, ${foundUser.name}!`, 'success');
@@ -351,7 +356,7 @@ export const AuthModal: React.FC = () => {
               </button>
             </form>
 
-            <div className="pt-3 border-t border-slate-100 dark:border-[#27272A] text-center">
+            <div className="pt-3 border-t border-slate-100 dark:border-[#27272A] space-y-2 text-center">
               <p className="text-xs text-[#71717A] dark:text-[#A1A1AA]">
                 Don't have an account?{' '}
                 <button
@@ -362,6 +367,19 @@ export const AuthModal: React.FC = () => {
                   Create one now
                 </button>
               </p>
+              <div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLoginEmail(ADMIN_CREDENTIALS.email);
+                    setLoginPassword(ADMIN_CREDENTIALS.password);
+                    notify('Moderator credentials loaded. Click "Sign In Securely" to enter.', 'info');
+                  }}
+                  className="text-[11px] text-[#71717A] dark:text-[#A1A1AA] hover:text-[#FF6B00] dark:hover:text-[#9FE870] transition-colors underline decoration-dotted"
+                >
+                  Are you Adeyinka Joseph? Fill Moderator Login
+                </button>
+              </div>
             </div>
           </div>
         )}

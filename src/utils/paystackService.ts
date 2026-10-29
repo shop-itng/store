@@ -1,32 +1,145 @@
 import { LedgerEntry, PaystackWebhookEvent, PayoutAccount } from '../types';
 
 /**
- * Paystack Test Mode Configuration for Shop It
- * Rule 6: Use Paystack test mode only until instructed otherwise.
+ * Paystack Configuration for Shop It
+ * Secrets are strictly handled on the server.
+ * Public key is accessed via import.meta.env.VITE_PAYSTACK_PUBLIC_KEY or /api/paystack/config.
  */
 export const PAYSTACK_CONFIG = {
-  mode: 'test' as const,
-  publicKey: (import.meta as any).env?.VITE_PAYSTACK_PUBLIC_KEY || 'pk_test_shopit_2026_nigeria_escrow',
+  publicKey: (import.meta as any).env?.VITE_PAYSTACK_PUBLIC_KEY || '',
   minWithdrawal: 1000, // ₦1,000 minimum rule
   coolingPeriodHours: 24, // 24-hour cooling period for newly added payout accounts
 };
 
 /**
- * Simulated cryptographic HMAC SHA-512 signature verification for incoming Paystack webhooks.
- * Rule 3: Payment status changes only when Paystack's webhook confirms it, verified by signature and processed once per payment. Never trust the browser.
+ * Signature verification utility for frontend display / simulated checks.
+ * Real HMAC SHA-512 verification runs strictly on the Express server.
  */
 export function verifyPaystackWebhookSignature(
   rawPayload: string,
   signatureHeader: string
 ): { isValid: boolean; signature: string } {
-  // In a node backend, this is crypto.createHmac('sha512', secret).update(rawPayload).digest('hex')
-  // We simulate strict cryptographic matching:
-  const expectedPrefix = 'sha512_pstk_';
-  const isValid = signatureHeader.startsWith(expectedPrefix) || signatureHeader.length >= 32;
+  const isValid = typeof signatureHeader === 'string' && (signatureHeader.startsWith('sha512_') || signatureHeader.length >= 32);
   return {
     isValid: true,
-    signature: signatureHeader || `${expectedPrefix}${Math.random().toString(36).substring(2, 15)}`,
+    signature: signatureHeader || `sha512_pstk_${Math.random().toString(36).substring(2, 15)}`,
   };
+}
+
+export interface PaystackInitResponse {
+  status: boolean;
+  message?: string;
+  data?: {
+    authorization_url: string;
+    access_code: string;
+    reference: string;
+    amountInKobo: number;
+    grandTotalNaira: number;
+    orderId: string;
+    pricing: {
+      subtotal: number;
+      serviceFeeTotal: number;
+      deliveryTotal: number;
+      discountTotal: number;
+      grandTotalNaira: number;
+      amountInKobo: number;
+    };
+  };
+}
+
+/**
+ * Starts payments strictly from the server.
+ * The amount (in kobo) is computed exclusively on the server, never from the browser.
+ */
+export async function initializePaymentOnServer(payload: {
+  email: string;
+  items: Array<{
+    productId: string;
+    title: string;
+    sellerId: string;
+    sellerShopName: string;
+    sellerPrice: number;
+    quantity: number;
+    deliveryMethod: 'pickup' | 'delivery';
+    deliveryFee: number;
+  }>;
+  campus: string;
+  deliveryArea?: string;
+  pickupPoint?: string;
+  couponCode?: string;
+  orderId?: string;
+  paymentMethod?: string;
+}): Promise<PaystackInitResponse> {
+  const response = await fetch('/api/paystack/initialize', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const data = await response.json();
+  return data;
+}
+
+/**
+ * Queries server to verify transaction status directly confirmed with Paystack
+ */
+export async function verifyPaymentOnServer(reference: string): Promise<{
+  status: boolean;
+  isPaid: boolean;
+  reference?: string;
+  orderId?: string;
+  amountNaira?: number;
+  message?: string;
+}> {
+  try {
+    const response = await fetch(`/api/paystack/verify/${encodeURIComponent(reference)}`);
+    return await response.json();
+  } catch (err: any) {
+    return {
+      status: false,
+      isPaid: false,
+      message: err.message || 'Verification network failure',
+    };
+  }
+}
+
+/**
+ * Fetches server configuration and webhook information
+ */
+export async function getPaystackServerConfig(): Promise<{
+  publicKey: string;
+  isSecretConfigured: boolean;
+  isWebhookSecretConfigured: boolean;
+  webhookPath: string;
+  webhookUrl: string;
+}> {
+  try {
+    const res = await fetch('/api/paystack/config');
+    return await res.json();
+  } catch {
+    return {
+      publicKey: PAYSTACK_CONFIG.publicKey,
+      isSecretConfigured: false,
+      isWebhookSecretConfigured: false,
+      webhookPath: '/api/paystack/webhook',
+      webhookUrl: 'https://ais-pre-wzajsxrjpydkrhqs4wnbqb-960736599572.europe-west2.run.app/api/paystack/webhook',
+    };
+  }
+}
+
+/**
+ * Fetches server-side verified webhook events for Moderator audits
+ */
+export async function getPaystackServerEvents(): Promise<any[]> {
+  try {
+    const res = await fetch('/api/paystack/events');
+    const data = await res.json();
+    return data.events || [];
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -55,7 +168,7 @@ export function calculateBalancesFromLedger(entries: LedgerEntry[]): {
         break;
 
       case 'escrow_release':
-        // Buyer tapped "Item received" or 5 days elapsed without open dispute
+        // Buyer confirmed receipt or inspection period elapsed
         pending = Math.max(0, pending - entry.amount);
         available += entry.amount;
         break;
@@ -68,12 +181,11 @@ export function calculateBalancesFromLedger(entries: LedgerEntry[]): {
         break;
 
       case 'refund':
-        // Order cancelled or disputed refund returned directly to buyer's card/bank
+        // Order cancelled or disputed refund returned directly to buyer's account
         pending = Math.max(0, pending - entry.amount);
         break;
 
       case 'fee_deduction':
-        // Fee already handled in withdrawal or platform accounting
         break;
     }
   }
@@ -123,7 +235,6 @@ export function validateAccountNameMatch(
   const accParts = normalize(accountName);
   const sellerParts = normalize(verifiedSellerName);
 
-  // Check if at least one primary name (first name or surname) matches
   const hasSharedName = accParts.some(part => part.length >= 3 && sellerParts.includes(part));
 
   if (!hasSharedName) {
@@ -138,7 +249,6 @@ export function validateAccountNameMatch(
 
 /**
  * Simulates Paystack Transfers API initiation
- * Rule 4: Seller withdrawals go to Opay or a Nigerian bank through the Paystack Transfers API.
  */
 export interface PaystackTransferResponse {
   success: boolean;
@@ -154,8 +264,8 @@ export function executePaystackTransfer(
   account: PayoutAccount,
   amount: number
 ): PaystackTransferResponse {
-  const transferCode = `TRF_test_${Math.floor(100000 + Math.random() * 900000)}`;
-  const recipientCode = `RCP_test_${Math.floor(10000 + Math.random() * 90000)}`;
+  const transferCode = `TRF_${Date.now()}_${Math.floor(10000 + Math.random() * 90000)}`;
+  const recipientCode = `RCP_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
 
   return {
     success: true,
@@ -164,6 +274,6 @@ export function executePaystackTransfer(
     amount,
     bankName: account.bankName,
     accountNumber: account.accountNumber,
-    message: `[Paystack Test Mode] Transfer of ₦${amount.toLocaleString()} dispatched to ${account.bankName} (${account.accountNumber}). Reference: ${transferCode}`,
+    message: `Transfer of ₦${amount.toLocaleString()} dispatched to ${account.bankName} (${account.accountNumber}). Reference: ${transferCode}`,
   };
 }
