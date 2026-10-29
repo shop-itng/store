@@ -14,12 +14,12 @@ Shop It is a direct peer-to-peer artisanal marketplace built for Nigerian teens 
 ### Step 2: Configure Environment Variables in Vercel
 In the Vercel project deployment screen, open **Environment Variables** and add the following:
 
-| Variable Name | Description | Example / Location |
+| Variable Name | Description | Value / Example |
 | :--- | :--- | :--- |
-| `VITE_PAYSTACK_PUBLIC_KEY` | Public key used for frontend checkout modal | `pk_live_...` (from Paystack Settings → API Keys) |
-| `PAYSTACK_SECRET_KEY` | Server-only secret key for verification | `sk_live_...` (from Paystack Settings → API Keys) |
+| `PAYSTACK_PUBLIC_KEY` | Public key used for checkout (no `VITE_` prefix required) | `pk_live_cc9a7381a83f3279812dfceaef5475977441cd94` |
+| `PAYSTACK_SECRET_KEY` | Server-only secret key for verification | `sk_live_...` (from your Paystack Dashboard) |
 | `PAYSTACK_WEBHOOK_SECRET` | Secret key used to verify webhook HMAC SHA-512 | `sk_live_...` (same as secret key) |
-| `APP_URL` | Your live Vercel URL (or custom domain) | `https://your-shopit-app.vercel.app` |
+| `APP_URL` | Your live Vercel URL | `https://shop-itng.vercel.app` |
 
 Click **Deploy**.
 
@@ -27,15 +27,14 @@ Click **Deploy**.
 
 ### Step 3: Set Your Paystack Webhook URL
 
-Once your Vercel deployment finishes and gives you your domain (e.g., `https://your-shopit-app.vercel.app`):
+In your [Paystack Dashboard](https://dashboard.paystack.com/):
 
-1. Log into your [Paystack Dashboard](https://dashboard.paystack.com/).
-2. Navigate to **Settings** → **API Keys & Webhooks**.
-3. Under **Live Webhook URL**, paste your endpoint:
+1. Go to **Settings** → **API Keys & Webhooks**.
+2. Under **Live Webhook URL**, paste your exact endpoint:
    ```text
-   https://<your-vercel-domain>/api/paystack/webhook
+   https://shop-itng.vercel.app/api/paystack/webhook
    ```
-4. Click **Save Changes** (and click **Test** to send a test event).
+3. Click **Save Changes** (and click **Test** to send a test event).
 
 ---
 

@@ -6,7 +6,10 @@ import { LedgerEntry, PaystackWebhookEvent, PayoutAccount } from '../types';
  * Public key is accessed via import.meta.env.VITE_PAYSTACK_PUBLIC_KEY or /api/paystack/config.
  */
 export const PAYSTACK_CONFIG = {
-  publicKey: (import.meta as any).env?.VITE_PAYSTACK_PUBLIC_KEY || '',
+  publicKey:
+    (import.meta as any).env?.PAYSTACK_PUBLIC_KEY ||
+    (import.meta as any).env?.VITE_PAYSTACK_PUBLIC_KEY ||
+    'pk_live_cc9a7381a83f3279812dfceaef5475977441cd94',
   minWithdrawal: 1000, // ₦1,000 minimum rule
   coolingPeriodHours: 24, // 24-hour cooling period for newly added payout accounts
 };

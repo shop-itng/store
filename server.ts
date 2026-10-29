@@ -12,11 +12,11 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
-// Host URL for webhooks and redirects (supports Vercel, production domain, or local dev)
+// Host URL for webhooks and redirects (configured for Vercel production)
 const APP_URL =
   process.env.APP_URL ||
   (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : '') ||
-  'https://ais-pre-wzajsxrjpydkrhqs4wnbqb-960736599572.europe-west2.run.app';
+  'https://shop-itng.vercel.app';
 
 // Security headers middleware
 app.use((_req, res, next) => {
@@ -56,7 +56,7 @@ app.use(
 // Backend secrets - loaded strictly from server environment secrets (never printed or exposed to client)
 const PAYSTACK_SECRET_KEY = (process.env.PAYSTACK_SECRET_KEY || '').trim().replace(/^["']|["']$/g, '');
 const PAYSTACK_WEBHOOK_SECRET = (process.env.PAYSTACK_WEBHOOK_SECRET || PAYSTACK_SECRET_KEY).trim().replace(/^["']|["']$/g, '');
-const PAYSTACK_PUBLIC_KEY = (process.env.VITE_PAYSTACK_PUBLIC_KEY || '').trim().replace(/^["']|["']$/g, '');
+const PAYSTACK_PUBLIC_KEY = (process.env.PAYSTACK_PUBLIC_KEY || process.env.VITE_PAYSTACK_PUBLIC_KEY || 'pk_live_cc9a7381a83f3279812dfceaef5475977441cd94').trim().replace(/^["']|["']$/g, '');
 
 // In-memory server order store and idempotency cache
 interface ServerOrder {
