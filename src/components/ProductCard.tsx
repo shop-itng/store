@@ -6,11 +6,13 @@ import { Heart, Star, MapPin, ImageOff, ShieldCheck } from 'lucide-react';
 
 interface ProductCardProps {
   product: Product;
+  index?: number;
 }
 
-export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
+export const ProductCard: React.FC<ProductCardProps> = ({ product, index = 0 }) => {
   const { openProduct, wishlist, toggleWishlist, lowDataMode, openSellerShop, getDeliveryFee } = useApp();
   const [imageError, setImageError] = useState(false);
+  const [imageLoaded, setImageLoaded] = useState(false);
   const isWishlisted = wishlist.includes(product.id);
 
   const mainImage = product.images[0] || '';
@@ -20,10 +22,16 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
   return (
     <article
       onClick={() => openProduct(product.id)}
-      className="group bg-white dark:bg-[#15161C] rounded-2xl border border-[#E4E4E7] dark:border-[#27272A] overflow-hidden cursor-pointer transition-all duration-200 hover:border-[#FF6B00] dark:hover:border-[#FF6B00] hover:shadow-md flex flex-col h-full"
+      style={{ animationDelay: `${Math.min(index * 45, 360)}ms` }}
+      className="group card-lift card-stagger bg-white dark:bg-[#15161C] rounded-2xl border border-[#E4E4E7] dark:border-[#27272A] overflow-hidden cursor-pointer hover:border-[#FF6B00] dark:hover:border-[#FF6B00] flex flex-col h-full"
     >
       {/* Product Image */}
       <div className="relative aspect-4/3 w-full bg-[#F4F4F5] dark:bg-[#1E2028] overflow-hidden">
+        {/* Subtle skeleton shimmer shown until image loads */}
+        {!lowDataMode && !imageError && mainImage && !imageLoaded && (
+          <div className="absolute inset-0 skeleton-shimmer z-0" />
+        )}
+
         {lowDataMode ? (
           <div className="w-full h-full flex flex-col items-center justify-center p-4 bg-[#F4F4F5] dark:bg-[#1E2028] text-[#71717A] dark:text-[#A1A1AA] text-center">
             <span className="text-xs font-semibold text-[#111111] dark:text-white line-clamp-1">{product.title}</span>
@@ -35,8 +43,11 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
             alt={product.title}
             referrerPolicy="no-referrer"
             loading="lazy"
+            onLoad={() => setImageLoaded(true)}
             onError={() => setImageError(true)}
-            className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
+            className={`w-full h-full object-cover transition-all duration-300 group-hover:scale-105 ${
+              imageLoaded ? 'opacity-100' : 'opacity-0'
+            }`}
           />
         ) : (
           <div className="w-full h-full flex flex-col items-center justify-center bg-[#F4F4F5] dark:bg-[#1E2028] p-4 text-[#A1A1AA]">

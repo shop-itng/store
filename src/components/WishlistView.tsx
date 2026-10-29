@@ -27,8 +27,8 @@ export const WishlistView: React.FC = () => {
 
       {savedProducts.length > 0 ? (
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 sm:gap-6">
-          {savedProducts.map(p => (
-            <ProductCard key={p.id} product={p} />
+          {savedProducts.map((p, idx) => (
+            <ProductCard key={p.id} product={p} index={idx} />
           ))}
         </div>
       ) : (

@@ -156,7 +156,7 @@ export const TypoSearchBar: React.FC = () => {
 
           {/* Recent Searches Floating Dropdown (Last 5 searches) */}
           {isSearchFocused && recentSearches.length > 0 && (
-            <div className="absolute top-full left-0 right-0 mt-1.5 z-40 bg-white dark:bg-[#15161C] border-2 border-[#111111] dark:border-[#27272A] rounded-2xl shadow-xl p-3 space-y-2.5">
+            <div className="absolute top-full left-0 right-0 mt-1.5 z-40 bg-white dark:bg-[#15161C] border-2 border-[#111111] dark:border-[#27272A] rounded-2xl shadow-xl p-3 space-y-2.5 animate-modal-enter">
               <div className="flex items-center justify-between text-xs pb-1.5 border-b border-[#E4E4E7] dark:border-[#27272A]">
                 <div className="flex items-center gap-1.5 font-black text-[#111111] dark:text-white">
                   <Clock className="w-3.5 h-3.5 text-[#FF6B00]" />
@@ -242,7 +242,7 @@ export const TypoSearchBar: React.FC = () => {
 
       {/* Expanded City > Area & Price/Sort Filter Drawer */}
       {showFilters && (
-        <div className="p-4 bg-white dark:bg-[#15161C] rounded-2xl border border-[#E4E4E7] dark:border-[#27272A] space-y-4 shadow-xs">
+        <div className="p-4 bg-white dark:bg-[#15161C] rounded-2xl border border-[#E4E4E7] dark:border-[#27272A] space-y-4 shadow-xs animate-modal-enter">
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
             {/* City Dropdown */}
             <div>

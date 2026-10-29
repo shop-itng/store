@@ -22,9 +22,18 @@ import { ToastContainer } from './components/ToastContainer';
 import { Footer } from './components/Footer';
 import { BroadcastBanner } from './components/BroadcastBanner';
 import { Analytics } from '@vercel/analytics/react';
+import { Loading } from './components/Loading';
 import { Store, ShieldCheck, MapPin, Star, ArrowRight, PackageOpen, PlusCircle, ShoppingBag, ShieldAlert } from 'lucide-react';
 
 const MarketplaceContent: React.FC = () => {
+  const [isInitialLoading, setIsInitialLoading] = React.useState(true);
+
+  React.useEffect(() => {
+    const timer = setTimeout(() => {
+      setIsInitialLoading(false);
+    }, 350);
+    return () => clearTimeout(timer);
+  }, []);
   const {
     activeView,
     setActiveView,
@@ -43,6 +52,11 @@ const MarketplaceContent: React.FC = () => {
   } = useApp();
 
   const selectedProduct = products.find(p => p.id === selectedProductId);
+
+  // Full-page initial loader with smooth fade-out
+  if (isInitialLoading) {
+    return <Loading fullPage text="Starting Shop It..." />;
+  }
 
   // If maintenanceMode is active and user is not admin, show emergency maintenance splash
   if (emergencyControls?.maintenanceMode && currentUser?.role !== 'admin') {
@@ -97,7 +111,7 @@ const MarketplaceContent: React.FC = () => {
       {/* Main View Router */}
       <main className="flex-1">
         {activeView === 'catalog' && (
-          <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6 animate-fade-in-up">
             {/* Search & Location Filter Bar (State > City > Area) */}
             <TypoSearchBar />
 
@@ -200,8 +214,8 @@ const MarketplaceContent: React.FC = () => {
                 </div>
               ) : filteredProducts.length > 0 ? (
                 <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3.5 sm:gap-5">
-                  {filteredProducts.map(product => (
-                    <ProductCard key={product.id} product={product} />
+                  {filteredProducts.map((product, idx) => (
+                    <ProductCard key={product.id} product={product} index={idx} />
                   ))}
                 </div>
               ) : (
@@ -236,11 +250,12 @@ const MarketplaceContent: React.FC = () => {
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-                  {sellers.map(seller => (
+                  {sellers.map((seller, idx) => (
                     <div
                       key={seller.id}
                       onClick={() => openSellerShop(seller.id)}
-                      className="bg-white dark:bg-[#15161C] p-4 rounded-2xl border border-[#E4E4E7] dark:border-[#27272A] hover:border-[#FF6B00] dark:hover:border-[#FF6B00] transition-all cursor-pointer flex flex-col justify-between shadow-2xs hover:shadow-xs"
+                      style={{ animationDelay: `${Math.min(idx * 50, 300)}ms` }}
+                      className="card-lift card-stagger bg-white dark:bg-[#15161C] p-4 rounded-2xl border border-[#E4E4E7] dark:border-[#27272A] hover:border-[#FF6B00] dark:hover:border-[#FF6B00] transition-all cursor-pointer flex flex-col justify-between shadow-2xs hover:shadow-xs"
                     >
                       <div className="space-y-2.5">
                         <div className="flex items-center gap-2.5">
@@ -296,44 +311,75 @@ const MarketplaceContent: React.FC = () => {
 
         {/* Other view routers */}
         {activeView === 'product_detail' && selectedProduct && (
-          <ProductDetailView
-            product={selectedProduct}
-            onBack={() => setActiveView('catalog')}
-          />
+          <div className="animate-fade-in-up">
+            <ProductDetailView
+              product={selectedProduct}
+              onBack={() => setActiveView('catalog')}
+            />
+          </div>
         )}
 
         {activeView === 'seller_shop' && selectedSellerId && (
-          <SellerShopView
-            sellerId={selectedSellerId}
-            onBack={() => setActiveView('catalog')}
-          />
+          <div className="animate-fade-in-up">
+            <SellerShopView
+              sellerId={selectedSellerId}
+              onBack={() => setActiveView('catalog')}
+            />
+          </div>
         )}
 
-        {activeView === 'seller_dashboard' && <SellerDashboard />}
-        {activeView === 'wishlist' && <WishlistView />}
-        {activeView === 'cart' && <CartView />}
-        {activeView === 'orders' && <OrdersView />}
-        {activeView === 'chat' && <LockedChatView />}
+        {activeView === 'seller_dashboard' && (
+          <div className="animate-fade-in-up">
+            <SellerDashboard />
+          </div>
+        )}
+
+        {activeView === 'wishlist' && (
+          <div className="animate-fade-in-up">
+            <WishlistView />
+          </div>
+        )}
+
+        {activeView === 'cart' && (
+          <div className="animate-fade-in-up">
+            <CartView />
+          </div>
+        )}
+
+        {activeView === 'orders' && (
+          <div className="animate-fade-in-up">
+            <OrdersView />
+          </div>
+        )}
+
+        {activeView === 'chat' && (
+          <div className="animate-fade-in-up">
+            <LockedChatView />
+          </div>
+        )}
+
         {activeView === 'admin' && (
-          currentUser?.role === 'admin' ? (
-            <AdminPanel />
-          ) : (
-            <div className="max-w-md mx-auto px-4 py-16 text-center space-y-4">
-              <div className="w-12 h-12 rounded-2xl bg-[#FFF4EC] dark:bg-[#1E2028] text-[#FF6B00] border border-[#FED7AA] dark:border-[#27272A] flex items-center justify-center mx-auto">
-                <ShieldCheck className="w-6 h-6" />
+          <div className="animate-fade-in-up">
+            {currentUser?.role === 'admin' ? (
+              <AdminPanel />
+            ) : (
+              <div className="max-w-md mx-auto px-4 py-16 text-center space-y-4">
+                <div className="w-12 h-12 rounded-2xl bg-[#FFF4EC] dark:bg-[#1E2028] text-[#FF6B00] border border-[#FED7AA] dark:border-[#27272A] flex items-center justify-center mx-auto">
+                  <ShieldCheck className="w-6 h-6" />
+                </div>
+                <h2 className="text-xl font-black text-[#111111] dark:text-white">Access Restricted</h2>
+                <p className="text-xs text-[#71717A] dark:text-[#A1A1AA] leading-relaxed">
+                  Please sign in with your account credentials to view this section.
+                </p>
+                <button
+                  onClick={() => openAuthModal('login')}
+                  className="px-5 py-2.5 bg-[#111111] hover:bg-[#27272A] text-white text-xs font-bold rounded-xl transition-all"
+                >
+                  Sign In
+                </button>
               </div>
-              <h2 className="text-xl font-black text-[#111111] dark:text-white">Access Restricted</h2>
-              <p className="text-xs text-[#71717A] dark:text-[#A1A1AA] leading-relaxed">
-                Please sign in with your account credentials to view this section.
-              </p>
-              <button
-                onClick={() => openAuthModal('login')}
-                className="px-5 py-2.5 bg-[#111111] hover:bg-[#27272A] text-white text-xs font-bold rounded-xl transition-all"
-              >
-                Sign In
-              </button>
-            </div>
-          )
+            )}
+          </div>
         )}
       </main>
 

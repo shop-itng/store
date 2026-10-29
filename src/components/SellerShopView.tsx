@@ -184,8 +184,8 @@ export const SellerShopView: React.FC<SellerShopViewProps> = ({ sellerId, onBack
 
         {sellerProducts.length > 0 ? (
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 sm:gap-6">
-            {sellerProducts.map(p => (
-              <ProductCard key={p.id} product={p} />
+            {sellerProducts.map((p, idx) => (
+              <ProductCard key={p.id} product={p} index={idx} />
             ))}
           </div>
         ) : (

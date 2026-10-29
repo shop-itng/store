@@ -305,8 +305,8 @@ export const CheckoutModal: React.FC = () => {
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
-      <div className="bg-white dark:bg-[#15161C] rounded-3xl max-w-xl w-full p-5 sm:p-7 space-y-4 shadow-2xl relative my-6 border border-slate-200 dark:border-[#27272A] transition-colors">
+    <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto animate-backdrop">
+      <div className="bg-white dark:bg-[#15161C] rounded-3xl max-w-xl w-full p-5 sm:p-7 space-y-4 shadow-2xl relative my-6 border border-slate-200 dark:border-[#27272A] transition-colors animate-modal-enter">
         {/* Header */}
         <div className="flex items-center justify-between border-b border-slate-100 dark:border-[#27272A] pb-3.5">
           <div className="flex items-center gap-2.5">

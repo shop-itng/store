@@ -168,3 +168,151 @@
   background: #D4D4D8;
   border-radius: 3px;
 }
+
+/* =========================================================
+   TASTEFUL ANIMATIONS & LOADER ENGINE (CSS ONLY)
+   Fast, Smooth, Mobile-Optimized & Reduced-Motion Aware
+   ========================================================= */
+
+/* 1. Bouncing Brand Dots Loader */
+@keyframes bounceDot {
+  0%, 80%, 100% {
+    transform: scale(0.65) translateY(0);
+    opacity: 0.4;
+  }
+  40% {
+    transform: scale(1.15) translateY(-7px);
+    opacity: 1;
+  }
+}
+
+.animate-bounce-dot {
+  animation: bounceDot 0.8s infinite ease-in-out both;
+}
+
+/* 2. Page Content & View Enter (Fade & Slide Up) */
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in-up {
+  animation: fadeInUp 0.24s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* 3. Product & Listing Card Stagger Entrance */
+@keyframes cardEnter {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.card-stagger {
+  animation: cardEnter 0.28s cubic-bezier(0.16, 1, 0.3, 1) backwards;
+}
+
+/* 4. Product Card Hover Lift & Soft Shadow */
+.card-lift {
+  transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.22s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.18s ease;
+}
+.card-lift:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 10px 20px -3px rgba(17, 17, 17, 0.07), 0 4px 6px -2px rgba(17, 17, 17, 0.03);
+}
+.dark .card-lift:hover {
+  box-shadow: 0 10px 20px -3px rgba(0, 0, 0, 0.5), 0 4px 6px -2px rgba(0, 0, 0, 0.3);
+}
+
+/* 5. Button Press Micro-Scale & Smooth Hover */
+button, input[type="button"], input[type="submit"] {
+  transition-property: background-color, border-color, color, box-shadow, transform, opacity;
+  transition-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+  transition-duration: 180ms;
+}
+button:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+/* 6. Modals, Menus & Dropdowns (Fade & Slide in) */
+@keyframes modalEnter {
+  from {
+    opacity: 0;
+    transform: scale(0.96) translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.animate-modal-enter {
+  animation: modalEnter 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes backdropFade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.animate-backdrop {
+  animation: backdropFade 0.18s ease forwards;
+}
+
+/* 7. Skeleton Shimmer for Image & Card Loading */
+@keyframes shimmerWave {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.skeleton-shimmer {
+  background: linear-gradient(
+    90deg,
+    rgba(228, 228, 231, 0.5) 0%,
+    rgba(244, 244, 245, 0.9) 50%,
+    rgba(228, 228, 231, 0.5) 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmerWave 1.4s infinite linear;
+}
+
+.dark .skeleton-shimmer {
+  background: linear-gradient(
+    90deg,
+    rgba(30, 32, 40, 0.6) 0%,
+    rgba(45, 48, 60, 0.9) 50%,
+    rgba(30, 32, 40, 0.6) 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmerWave 1.4s infinite linear;
+}
+
+/* 8. Reduced Motion Rule (Respects prefers-reduced-motion) */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  .card-lift:hover {
+    transform: none !important;
+  }
+  button:active:not(:disabled) {
+    transform: none !important;
+  }
+}

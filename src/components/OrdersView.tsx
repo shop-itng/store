@@ -154,7 +154,7 @@ export const OrdersView: React.FC = () => {
       {/* Orders List */}
       {filteredOrders.length > 0 ? (
         <div className="space-y-6">
-          {filteredOrders.map(order => {
+          {filteredOrders.map((order, idx) => {
             const badge = getStatusBadge(order.status);
             const isCancellable = order.status === 'paid';
             const isDelivered = order.status === 'delivered';
@@ -163,7 +163,8 @@ export const OrdersView: React.FC = () => {
             return (
               <div
                 key={order.id}
-                className="bg-white dark:bg-[#15161C] rounded-2xl border border-slate-200 dark:border-[#27272A] overflow-hidden shadow-xs space-y-4 p-5 sm:p-6"
+                style={{ animationDelay: `${Math.min(idx * 50, 300)}ms` }}
+                className="card-lift card-stagger bg-white dark:bg-[#15161C] rounded-2xl border border-slate-200 dark:border-[#27272A] overflow-hidden shadow-xs space-y-4 p-5 sm:p-6"
               >
                 {/* Order Top Bar: Reference & Status */}
                 <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-100 dark:border-[#27272A]">

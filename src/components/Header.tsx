@@ -257,8 +257,8 @@ export const Header: React.FC = () => {
 
       {/* Location Picker Modal (State > City > Area) */}
       {isLocationModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
-          <div className="bg-white dark:bg-[#15161C] rounded-2xl max-w-md w-full p-5 shadow-2xl border border-neutral-200 dark:border-[#27272A] space-y-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-backdrop">
+          <div className="bg-white dark:bg-[#15161C] rounded-2xl max-w-md w-full p-5 shadow-2xl border border-neutral-200 dark:border-[#27272A] space-y-4 animate-modal-enter">
             <div className="flex items-center justify-between border-b border-neutral-100 dark:border-[#27272A] pb-3">
               <div className="flex items-center gap-2">
                 <MapPin className="w-5 h-5 text-[#FF6B00]" />

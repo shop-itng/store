@@ -143,8 +143,8 @@ export const QuickListModal: React.FC = () => {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 overflow-y-auto">
-      <div className="bg-white rounded-2xl max-w-xl w-full max-h-[92vh] flex flex-col border border-[#E4E4E7] shadow-2xl overflow-hidden my-auto">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 overflow-y-auto animate-backdrop">
+      <div className="bg-white rounded-2xl max-w-xl w-full max-h-[92vh] flex flex-col border border-[#E4E4E7] shadow-2xl overflow-hidden my-auto animate-modal-enter">
         {/* Header */}
         <div className="p-4 sm:p-5 border-b border-[#E4E4E7] flex items-center justify-between bg-white">
           <div className="flex items-center gap-3">

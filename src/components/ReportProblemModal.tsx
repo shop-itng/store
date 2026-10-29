@@ -34,8 +34,8 @@ export const ReportProblemModal: React.FC = () => {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/75 backdrop-blur-xs">
-      <div className="relative w-full max-w-lg bg-white rounded-2xl shadow-2xl border border-stone-200 overflow-hidden flex flex-col max-h-[92vh]">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/75 backdrop-blur-xs animate-backdrop">
+      <div className="relative w-full max-w-lg bg-white rounded-2xl shadow-2xl border border-stone-200 overflow-hidden flex flex-col max-h-[92vh] animate-modal-enter">
         {/* Header */}
         <div className="p-4 sm:p-5 bg-[#0c0d10] text-white flex items-center justify-between">
           <div className="flex items-center gap-2.5">
