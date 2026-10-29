@@ -21,6 +21,7 @@ import { AuthModal } from './components/AuthModal';
 import { ToastContainer } from './components/ToastContainer';
 import { Footer } from './components/Footer';
 import { BroadcastBanner } from './components/BroadcastBanner';
+import { Analytics } from '@vercel/analytics/react';
 import { Store, ShieldCheck, MapPin, Star, ArrowRight, PackageOpen, PlusCircle, ShoppingBag, ShieldAlert } from 'lucide-react';
 
 const MarketplaceContent: React.FC = () => {
@@ -364,6 +365,7 @@ export default function App() {
   return (
     <AppProvider>
       <MarketplaceContent />
+      <Analytics />
     </AppProvider>
   );
 }
