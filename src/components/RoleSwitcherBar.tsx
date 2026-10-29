@@ -17,37 +17,38 @@ export const RoleSwitcherBar: React.FC = () => {
   } = useApp();
 
   return (
-    <div className="bg-[#111111] text-[#A1A1AA] text-xs py-1.5 px-4 sm:px-6 border-b border-[#27272A]">
-      <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-3">
-          <span className="flex items-center gap-1.5 text-white font-bold text-[11px]">
-            <span className="w-2 h-2 rounded-full bg-[#9FE870] animate-pulse" />
-            <span>Shop It Escrow Protected</span>
+    <div className="bg-[#111111] text-[#A1A1AA] text-xs py-1.5 px-3 sm:px-6 border-b border-[#27272A] w-full max-w-full overflow-hidden">
+      <div className="max-w-7xl mx-auto flex items-center justify-between gap-2 min-w-0">
+        <div className="flex items-center gap-2 min-w-0 shrink">
+          <span className="flex items-center gap-1.5 text-white font-bold text-[10px] sm:text-[11px] shrink-0">
+            <span className="w-2 h-2 rounded-full bg-[#9FE870] animate-pulse shrink-0" />
+            <span className="hidden xs:inline">Shop It Escrow Protected</span>
+            <span className="xs:hidden">Escrow Protected</span>
           </span>
 
           <span className="text-[#3F3F46] hidden sm:inline">|</span>
 
           {/* Current Location Badge */}
-          <span className="text-[#71717A] text-[11px] hidden sm:flex items-center gap-1">
-            <MapPin className="w-3 h-3 text-[#FF6B00]" />
-            <span>Location: <strong className="text-white">{userLocation.area}</strong>, {userLocation.state}</span>
+          <span className="text-[#71717A] text-[10px] sm:text-[11px] hidden sm:flex items-center gap-1 truncate">
+            <MapPin className="w-3 h-3 text-[#FF6B00] shrink-0" />
+            <span className="truncate">Location: <strong className="text-white">{userLocation.area}</strong>, {userLocation.state}</span>
           </span>
 
           {/* Admin Indicator: ONLY shown when Adeyinka Joseph is logged in! */}
           {currentUser?.role === 'admin' && (
-            <span className="bg-[#FF6B00] text-white px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-wider flex items-center gap-1">
-              <Lock className="w-3 h-3" />
-              <span>Admin: {currentUser.name}</span>
+            <span className="bg-[#FF6B00] text-white px-1.5 py-0.5 rounded text-[9px] sm:text-[10px] font-black uppercase tracking-wider flex items-center gap-1 shrink-0">
+              <Lock className="w-2.5 h-2.5" />
+              <span>Admin</span>
             </span>
           )}
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2 sm:gap-3 shrink-0">
           {currentUser?.role === 'admin' ? (
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5">
               <button
                 onClick={() => setActiveView('admin')}
-                className={`px-2.5 py-0.5 rounded text-xs font-bold transition-all ${
+                className={`px-2 py-0.5 rounded text-[10px] sm:text-xs font-bold transition-all ${
                   activeView === 'admin'
                     ? 'bg-white text-[#111111]'
                     : 'text-white hover:text-[#9FE870]'
@@ -57,21 +58,21 @@ export const RoleSwitcherBar: React.FC = () => {
               </button>
               <button
                 onClick={logout}
-                className="text-[#71717A] hover:text-white flex items-center gap-1 text-[11px]"
+                className="text-[#71717A] hover:text-white flex items-center gap-1 text-[10px] sm:text-[11px]"
                 title="Log out from moderator account"
               >
                 <LogOut className="w-3 h-3" />
-                <span>Exit</span>
+                <span className="hidden xs:inline">Exit</span>
               </button>
             </div>
           ) : currentUser ? (
-            <div className="flex items-center gap-2 text-[11px]">
-              <span className="text-white font-semibold">
-                {currentUser.name} {currentUser.role === 'seller' ? '(Seller)' : ''}
+            <div className="flex items-center gap-1.5 text-[10px] sm:text-[11px]">
+              <span className="text-white font-semibold max-w-[80px] sm:max-w-[140px] truncate">
+                {currentUser.name}
               </span>
               <button
                 onClick={logout}
-                className="text-[#71717A] hover:text-white underline"
+                className="text-[#71717A] hover:text-white underline text-[10px] sm:text-[11px]"
               >
                 Log Out
               </button>
@@ -79,7 +80,7 @@ export const RoleSwitcherBar: React.FC = () => {
           ) : (
             <button
               onClick={() => openAuthModal('login')}
-              className="text-[#A1A1AA] hover:text-white font-semibold text-[11px] flex items-center gap-1.5"
+              className="text-[#A1A1AA] hover:text-white font-semibold text-[10px] sm:text-[11px] flex items-center gap-1"
             >
               <User className="w-3 h-3 text-[#71717A]" />
               <span>Sign In</span>
@@ -89,7 +90,7 @@ export const RoleSwitcherBar: React.FC = () => {
           {/* Dark / Light Theme Toggle */}
           <button
             onClick={toggleTheme}
-            className={`flex items-center gap-1.5 px-2.5 py-0.5 rounded text-[11px] font-bold transition-all ${
+            className={`flex items-center gap-1 px-1.5 sm:px-2.5 py-0.5 rounded text-[10px] sm:text-[11px] font-bold transition-all ${
               theme === 'dark'
                 ? 'bg-[#1E2028] text-[#9FE870] border border-[#27272A]'
                 : 'text-[#A1A1AA] hover:text-white bg-[#18181B]'
@@ -99,20 +100,20 @@ export const RoleSwitcherBar: React.FC = () => {
             {theme === 'dark' ? (
               <>
                 <Sun className="w-3 h-3 text-[#9FE870]" />
-                <span>Light</span>
+                <span className="hidden sm:inline">Light</span>
               </>
             ) : (
               <>
                 <Moon className="w-3 h-3 text-[#FF6B00]" />
-                <span>Dark</span>
+                <span className="hidden sm:inline">Dark</span>
               </>
             )}
           </button>
 
-          {/* Low-data toggle */}
+          {/* Low-data toggle (desktop/tablet) */}
           <button
             onClick={toggleLowDataMode}
-            className={`flex items-center gap-1 px-2 py-0.5 rounded text-[11px] transition-colors ${
+            className={`hidden sm:flex items-center gap-1 px-2 py-0.5 rounded text-[11px] transition-colors ${
               lowDataMode
                 ? 'bg-[#18181B] text-[#9FE870] border border-[#3F3F46] font-bold'
                 : 'text-[#71717A] hover:text-[#A1A1AA]'

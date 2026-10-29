@@ -73,25 +73,25 @@ export const Header: React.FC = () => {
   };
 
   return (
-    <header className="sticky top-0 z-40 bg-white dark:bg-[#0D0E12] border-b border-[#E4E4E7] dark:border-[#27272A] transition-colors duration-200">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-4">
-        {/* Zone 1: Official Logo + Brand Name (Clean "Shop It") */}
-        <div className="flex items-center gap-3 shrink-0">
+    <header className="sticky top-0 z-40 bg-white dark:bg-[#0D0E12] border-b border-[#E4E4E7] dark:border-[#27272A] transition-colors duration-200 w-full max-w-full overflow-hidden">
+      <div className="max-w-7xl mx-auto px-3 sm:px-6 h-14 sm:h-16 flex items-center justify-between gap-2 sm:gap-4 min-w-0">
+        {/* Zone 1: Official Logo + Brand Name */}
+        <div className="flex items-center gap-2 sm:gap-3 min-w-0 shrink">
           <button
             onClick={() => setActiveView('catalog')}
-            className="flex items-center gap-2.5 text-left group"
+            className="flex items-center gap-2 sm:gap-2.5 text-left group min-w-0"
           >
             {/* The Official Shop It Logo */}
             <img
               src="/shopit-logo.png"
               alt="Shop It"
-              className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl object-contain shadow-xs transition-transform group-hover:scale-105"
+              className="w-8 h-8 sm:w-10 sm:h-10 rounded-xl object-contain shadow-xs transition-transform group-hover:scale-105 shrink-0"
             />
-            <div>
-              <span className="text-xl font-black tracking-tight text-[#111111] dark:text-white group-hover:text-[#FF6B00] transition-colors leading-none block">
+            <div className="min-w-0">
+              <span className="text-lg sm:text-xl font-black tracking-tight text-[#111111] dark:text-white group-hover:text-[#FF6B00] transition-colors leading-none block">
                 Shop It
               </span>
-              <span className="text-[11px] font-semibold text-[#71717A] dark:text-[#A1A1AA] tracking-tight block mt-0.5">
+              <span className="text-[10px] sm:text-[11px] font-semibold text-[#71717A] dark:text-[#A1A1AA] tracking-tight mt-0.5 truncate hidden sm:block">
                 Teens & Youth Marketplace
               </span>
             </div>
@@ -111,7 +111,7 @@ export const Header: React.FC = () => {
           </button>
         </div>
 
-        {/* Zone 2: Navigation Links */}
+        {/* Zone 2: Navigation Links (Desktop) */}
         <nav className="hidden lg:flex items-center gap-6 text-sm font-bold text-[#52525B] dark:text-[#A1A1AA]">
           <button
             onClick={() => setActiveView('catalog')}
@@ -147,13 +147,13 @@ export const Header: React.FC = () => {
           </button>
         </nav>
 
-        {/* Zone 3: Actions (Sell, Theme, Wishlist, Cart, Profile) */}
-        <div className="flex items-center gap-2 sm:gap-3 shrink-0">
-          {/* Quick List Button (Only for registered sellers) or Buy Items Button for Shoppers */}
+        {/* Zone 3: Actions (Responsive for mobile & desktop) */}
+        <div className="flex items-center gap-1.5 sm:gap-3 shrink-0">
+          {/* Quick List Button (Only for registered sellers) or Buy Items Button for Shoppers (Tablet & Desktop) */}
           {currentUser?.role === 'seller' ? (
             <button
               onClick={openQuickListModal}
-              className="flex items-center gap-1.5 px-3.5 py-2 bg-[#FF6B00] hover:bg-[#FF7A1A] text-[#111111] border-2 border-[#111111] dark:border-stone-800 text-xs sm:text-sm font-black rounded-xl shadow-[0_2.5px_0_#111111] dark:shadow-none transition-all active:translate-y-0.5"
+              className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 sm:px-3.5 sm:py-2 bg-[#FF6B00] hover:bg-[#FF7A1A] text-[#111111] border-2 border-[#111111] dark:border-stone-800 text-xs sm:text-sm font-black rounded-xl shadow-[0_2.5px_0_#111111] dark:shadow-none transition-all active:translate-y-0.5"
               title="List an item in 60 seconds"
             >
               <span className="w-4 h-4 rounded-full bg-[#9FE870] text-[#111111] flex items-center justify-center text-xs font-black">
@@ -167,7 +167,7 @@ export const Header: React.FC = () => {
                 setActiveView('catalog');
                 window.scrollTo({ top: 0, behavior: 'smooth' });
               }}
-              className="flex items-center gap-1.5 px-3.5 py-2 bg-[#9FE870] hover:bg-[#AEF083] text-[#111111] border-2 border-[#111111] dark:border-stone-800 text-xs sm:text-sm font-black rounded-xl shadow-[0_2.5px_0_#111111] dark:shadow-none transition-all active:translate-y-0.5"
+              className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 sm:px-3.5 sm:py-2 bg-[#9FE870] hover:bg-[#AEF083] text-[#111111] border-2 border-[#111111] dark:border-stone-800 text-xs sm:text-sm font-black rounded-xl shadow-[0_2.5px_0_#111111] dark:shadow-none transition-all active:translate-y-0.5"
               title="Browse and buy crafts"
             >
               <ShoppingBag className="w-4 h-4 text-[#111111]" />
@@ -175,12 +175,12 @@ export const Header: React.FC = () => {
             </button>
           )}
 
-          {/* Theme Switcher Toggle Button */}
+          {/* Theme Switcher Toggle Button (Tablet & Desktop, mobile has it in top bar) */}
           <button
             onClick={toggleTheme}
             aria-label={`Switch to ${theme === 'dark' ? 'Light' : 'Dark'} mode`}
             title={`Switch to ${theme === 'dark' ? 'Light' : 'Night'} Mode`}
-            className="p-2 text-[#111111] dark:text-[#A1A1AA] hover:text-[#FF6B00] dark:hover:text-[#9FE870] rounded-xl hover:bg-[#FFF4EC] dark:hover:bg-[#1E2028] border border-[#E4E4E7] dark:border-[#27272A] bg-white dark:bg-[#15161C] transition-colors"
+            className="hidden sm:flex p-2 text-[#111111] dark:text-[#A1A1AA] hover:text-[#FF6B00] dark:hover:text-[#9FE870] rounded-xl hover:bg-[#FFF4EC] dark:hover:bg-[#1E2028] border border-[#E4E4E7] dark:border-[#27272A] bg-white dark:bg-[#15161C] transition-colors"
           >
             {theme === 'dark' ? (
               <Sun className="w-4 h-4 sm:w-5 sm:h-5 text-[#9FE870]" />
@@ -193,7 +193,7 @@ export const Header: React.FC = () => {
           <button
             onClick={() => setActiveView('wishlist')}
             aria-label="Wishlist"
-            className="relative p-2 text-[#111111] dark:text-white hover:text-[#FF6B00] rounded-xl hover:bg-[#FFF4EC] dark:hover:bg-[#1E2028] border border-[#E4E4E7] dark:border-[#27272A] bg-white dark:bg-[#15161C] transition-colors"
+            className="relative p-1.5 sm:p-2 text-[#111111] dark:text-white hover:text-[#FF6B00] rounded-xl hover:bg-[#FFF4EC] dark:hover:bg-[#1E2028] border border-[#E4E4E7] dark:border-[#27272A] bg-white dark:bg-[#15161C] transition-colors"
           >
             <Heart className="w-4 h-4 sm:w-5 sm:h-5 text-[#111111] dark:text-[#F4F4F5]" />
             {wishlist.length > 0 && (
@@ -207,7 +207,7 @@ export const Header: React.FC = () => {
           <button
             onClick={() => setActiveView('cart')}
             aria-label="Cart"
-            className="relative p-2 text-[#111111] dark:text-white hover:text-[#FF6B00] rounded-xl hover:bg-[#FFF4EC] dark:hover:bg-[#1E2028] border border-[#E4E4E7] dark:border-[#27272A] bg-white dark:bg-[#15161C] transition-colors"
+            className="relative p-1.5 sm:p-2 text-[#111111] dark:text-white hover:text-[#FF6B00] rounded-xl hover:bg-[#FFF4EC] dark:hover:bg-[#1E2028] border border-[#E4E4E7] dark:border-[#27272A] bg-white dark:bg-[#15161C] transition-colors"
           >
             <ShoppingBag className="w-4 h-4 sm:w-5 sm:h-5 text-[#111111] dark:text-[#F4F4F5]" />
             {cartCount > 0 && (
@@ -222,15 +222,16 @@ export const Header: React.FC = () => {
             currentUser.role === 'admin' ? (
               <button
                 onClick={() => setActiveView('admin')}
-                className="px-3.5 py-2 text-xs font-black text-[#9FE870] bg-[#111111] border-2 border-[#FF6B00] hover:bg-[#18181B] rounded-xl transition-colors shadow-xs flex items-center gap-1.5"
+                className="px-2.5 py-1.5 sm:px-3.5 sm:py-2 text-[11px] sm:text-xs font-black text-[#9FE870] bg-[#111111] border-2 border-[#FF6B00] hover:bg-[#18181B] rounded-xl transition-colors shadow-xs flex items-center gap-1.5"
               >
                 <span className="w-2 h-2 rounded-full bg-[#9FE870] animate-pulse" />
-                <span>Moderator Panel</span>
+                <span className="hidden xs:inline">Moderator</span>
+                <span className="xs:hidden">Admin</span>
               </button>
             ) : currentUser.role === 'seller' ? (
               <button
                 onClick={() => setActiveView('seller_dashboard')}
-                className="px-3.5 py-2 text-xs font-black text-[#111111] bg-[#9FE870] border-2 border-[#111111] dark:border-stone-800 rounded-xl hover:bg-[#AEF083] transition-colors flex items-center gap-1.5 shadow-[0_2px_0_#111111] dark:shadow-none"
+                className="px-2.5 py-1.5 sm:px-3.5 sm:py-2 text-[11px] sm:text-xs font-black text-[#111111] bg-[#9FE870] border-2 border-[#111111] dark:border-stone-800 rounded-xl hover:bg-[#AEF083] transition-colors flex items-center gap-1.5 shadow-[0_2px_0_#111111] dark:shadow-none"
               >
                 <Store className="w-3.5 h-3.5 text-[#FF6B00]" />
                 <span className="hidden sm:inline">My Shop</span>
@@ -238,7 +239,7 @@ export const Header: React.FC = () => {
             ) : (
               <button
                 onClick={() => openAuthModal('seller_register')}
-                className="px-3.5 py-2 text-xs font-black text-[#111111] bg-[#9FE870] hover:bg-[#AEF083] border-2 border-[#111111] dark:border-stone-800 shadow-[0_2px_0_#111111] dark:shadow-none rounded-xl transition-all hidden sm:block"
+                className="px-2.5 py-1.5 sm:px-3.5 sm:py-2 text-[11px] sm:text-xs font-black text-[#111111] bg-[#9FE870] hover:bg-[#AEF083] border-2 border-[#111111] dark:border-stone-800 shadow-[0_2px_0_#111111] dark:shadow-none rounded-xl transition-all hidden sm:block"
               >
                 Open Shop
               </button>
@@ -246,7 +247,7 @@ export const Header: React.FC = () => {
           ) : (
             <button
               onClick={() => openAuthModal('login')}
-              className="px-4 py-2 text-xs sm:text-sm font-bold text-[#111111] dark:text-white bg-white dark:bg-[#15161C] border-2 border-[#111111] dark:border-[#27272A] hover:border-[#FF6B00] dark:hover:border-[#FF6B00] hover:bg-[#FFF4EC] dark:hover:bg-[#1E2028] rounded-xl transition-all shadow-xs"
+              className="px-3 py-1.5 sm:px-4 sm:py-2 text-xs sm:text-sm font-bold text-[#111111] dark:text-white bg-white dark:bg-[#15161C] border-2 border-[#111111] dark:border-[#27272A] hover:border-[#FF6B00] dark:hover:border-[#FF6B00] hover:bg-[#FFF4EC] dark:hover:bg-[#1E2028] rounded-xl transition-all shadow-xs shrink-0"
             >
               Sign In
             </button>

@@ -80,7 +80,7 @@ const MarketplaceContent: React.FC = () => {
   }
 
   return (
-    <div className="min-h-screen flex flex-col bg-[#f9fafb] dark:bg-[#0D0E12] text-neutral-900 dark:text-[#F4F4F5] pb-20 md:pb-0 transition-colors duration-200">
+    <div className="min-h-screen w-full max-w-full overflow-x-hidden flex flex-col bg-[#f9fafb] dark:bg-[#0D0E12] text-neutral-900 dark:text-[#F4F4F5] pb-20 md:pb-0 transition-colors duration-200">
       {/* Role Switcher Toolbar */}
       <RoleSwitcherBar />
 

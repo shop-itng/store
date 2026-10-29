@@ -19,7 +19,7 @@ In the Vercel project deployment screen, open **Environment Variables** and add 
 | `PAYSTACK_PUBLIC_KEY` | Public key used for checkout (no `VITE_` prefix required) | `pk_live_cc9a7381a83f3279812dfceaef5475977441cd94` |
 | `PAYSTACK_SECRET_KEY` | Server-only secret key for verification | `sk_live_...` (from your Paystack Dashboard) |
 | `PAYSTACK_WEBHOOK_SECRET` | Secret key used to verify webhook HMAC SHA-512 | `sk_live_...` (same as secret key) |
-| `APP_URL` | Your live Vercel URL | `https://shop-itng.vercel.app` |
+| `APP_URL` | Your live Vercel URL | `https://shop-itng-pied.vercel.app` |
 
 Click **Deploy**.
 
@@ -32,7 +32,7 @@ In your [Paystack Dashboard](https://dashboard.paystack.com/):
 1. Go to **Settings** → **API Keys & Webhooks**.
 2. Under **Live Webhook URL**, paste your exact endpoint:
    ```text
-   https://shop-itng.vercel.app/api/paystack/webhook
+   https://shop-itng-pied.vercel.app/api/paystack/webhook
    ```
 3. Click **Save Changes** (and click **Test** to send a test event).
 

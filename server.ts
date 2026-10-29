@@ -16,7 +16,7 @@ const PORT = Number(process.env.PORT) || 3000;
 const APP_URL =
   process.env.APP_URL ||
   (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : '') ||
-  'https://shop-itng.vercel.app';
+  'https://shop-itng-pied.vercel.app';
 
 // Security headers middleware
 app.use((_req, res, next) => {
