@@ -56,8 +56,8 @@ export const EscrowReceiptModal: React.FC<EscrowReceiptModalProps> = ({
   const isHeldInEscrow = order.status === 'paid' || order.status === 'packed' || order.status === 'shipped' || order.status === 'delivered';
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-xs overflow-y-auto print:p-0 print:bg-white">
-      <div className="relative max-w-lg w-full bg-white rounded-3xl overflow-hidden shadow-2xl border-2 border-[#111111] my-8 animate-in fade-in zoom-in-95 duration-150 print:border-none print:shadow-none print:m-0 print:max-w-none">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-xs overflow-y-auto print:p-0 print:bg-white animate-backdrop">
+      <div className="relative max-w-lg w-full bg-white rounded-3xl overflow-hidden shadow-2xl border-2 border-[#111111] my-8 animate-modal-enter print:border-none print:shadow-none print:m-0 print:max-w-none">
         {/* Top Decorative Escrow Banner */}
         <div className="bg-[#111111] text-white p-5 sm:p-6 border-b-2 border-[#111111] relative overflow-hidden">
           <div className="absolute -right-6 -bottom-6 w-32 h-32 rounded-full bg-[#9FE870]/10 pointer-events-none" />

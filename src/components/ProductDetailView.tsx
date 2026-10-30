@@ -27,6 +27,7 @@ interface ProductDetailViewProps {
 }
 
 export const ProductDetailView: React.FC<ProductDetailViewProps> = ({ product, onBack }) => {
+  const [imageLoaded, setImageLoaded] = useState(false);
   const {
     getSellerById,
     openSellerShop,
@@ -174,6 +175,10 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({ product, o
         {/* Left Column: Photo Gallery */}
         <div className="lg:col-span-7 space-y-4">
           <div className="relative aspect-4/3 w-full bg-slate-100 rounded-2xl overflow-hidden border border-slate-200">
+            {!lowDataMode && !imageLoaded && (
+              <div className="absolute inset-0 skeleton-shimmer z-0" />
+            )}
+
             {lowDataMode ? (
               <div className="w-full h-full flex flex-col items-center justify-center p-6 bg-slate-100 text-center">
                 <span className="text-4xl mb-2">✨</span>
@@ -187,7 +192,10 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({ product, o
                 src={product.images[selectedPhotoIndex] || product.images[0]}
                 alt={product.title}
                 referrerPolicy="no-referrer"
-                className="w-full h-full object-cover"
+                onLoad={() => setImageLoaded(true)}
+                className={`w-full h-full object-cover transition-opacity duration-300 ${
+                  imageLoaded ? 'opacity-100' : 'opacity-0'
+                }`}
               />
             )}
 
@@ -591,8 +599,8 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({ product, o
 
       {/* Report Modal */}
       {showReportModal && (
-        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl max-w-md w-full p-6 space-y-4">
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4 animate-backdrop">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 space-y-4 animate-modal-enter">
             <h3 className="text-base font-bold text-slate-900">Report this Listing</h3>
             <p className="text-xs text-slate-600">
               Help keep Shop It safe. Reports go directly to our Trust & Safety team.
