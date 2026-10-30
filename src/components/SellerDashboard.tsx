@@ -27,6 +27,7 @@ import {
   Wallet,
 } from 'lucide-react';
 import { SellerWalletView } from './SellerWalletView';
+import { SellerVerificationModal } from './SellerVerificationModal';
 
 export const SellerDashboard: React.FC = () => {
   const {
@@ -42,6 +43,9 @@ export const SellerDashboard: React.FC = () => {
     wallets,
     verificationRequests,
     submitVerificationRequest,
+    isVerificationModalOpen,
+    openVerificationModal,
+    closeVerificationModal,
     updateOrderStatus,
     notify,
   } = useApp();
@@ -110,9 +114,14 @@ export const SellerDashboard: React.FC = () => {
   const availableEarnings = sellerWallet?.availableBalance ?? 0;
 
   // Verification request state
+  // Real Verification request state
   const existingVerifReq = verificationRequests.find(r => r.sellerId === currentSeller.id);
-  const isVerified = currentSeller.isVerifiedSeller || currentSeller.verificationStatus === 'approved';
-  const isVerifPending = !isVerified && (currentSeller.verificationStatus === 'pending_approval' || existingVerifReq?.status === 'pending');
+  const rawStatus = currentSeller.verificationStatus || 'not_started';
+  const isVerified = currentSeller.isVerifiedSeller && (rawStatus === 'verified' || rawStatus === 'approved');
+  const isVerifPending = !isVerified && (rawStatus === 'pending' || rawStatus === 'pending_approval' || existingVerifReq?.status === 'pending');
+  const isVerifRejected = rawStatus === 'rejected' || existingVerifReq?.status === 'rejected';
+  const isVerifNeedsResubmit = rawStatus === 'needs_resubmission' || existingVerifReq?.status === 'needs_resubmission';
+  const rejectionReason = currentSeller.verificationRejectionReason || existingVerifReq?.rejectionReason || existingVerifReq?.adminNotes;
 
   const pricingBreakdown = getPricingBreakdown(formSellerPrice);
 
@@ -313,6 +322,11 @@ export const SellerDashboard: React.FC = () => {
           {/* Add Product Button */}
           <button
             onClick={() => {
+              if (!isVerified) {
+                notify('Identity Verification Required: Sellers must complete NIN & live selfie verification before listing crafts.', 'error');
+                setIsVerifModalOpen(true);
+                return;
+              }
               resetForm();
               setIsAddModalOpen(true);
             }}
@@ -326,13 +340,17 @@ export const SellerDashboard: React.FC = () => {
         </div>
       </div>
 
-      {/* 'Get Verified' Badge & Trust Component with NIMC NIN Slip */}
+      {/* 'Get Verified' Badge & Trust Component with Real Identity Check */}
       <div
         className={`p-5 rounded-2xl border-2 transition-all ${
           isVerified
-            ? 'bg-emerald-50/80 dark:bg-[#15161C] border-emerald-300 dark:border-emerald-600/50 text-emerald-950 dark:text-emerald-100 shadow-xs'
+            ? 'bg-emerald-50/80 dark:bg-[#15161C] border-emerald-400 dark:border-emerald-600/50 text-emerald-950 dark:text-emerald-100 shadow-xs'
             : isVerifPending
             ? 'bg-amber-50/80 dark:bg-[#15161C] border-amber-300 dark:border-amber-600/50 text-amber-950 dark:text-amber-100 shadow-xs'
+            : isVerifRejected
+            ? 'bg-red-50/80 dark:bg-[#15161C] border-red-300 dark:border-red-600/50 text-red-950 dark:text-red-100 shadow-xs'
+            : isVerifNeedsResubmit
+            ? 'bg-orange-50/80 dark:bg-[#15161C] border-orange-300 dark:border-orange-600/50 text-orange-950 dark:text-orange-100 shadow-xs'
             : 'bg-white dark:bg-[#15161C] border-[#111111] dark:border-[#27272A] shadow-[0_3px_0_#111111] dark:shadow-none'
         }`}
       >
@@ -344,6 +362,10 @@ export const SellerDashboard: React.FC = () => {
                   ? 'bg-emerald-500 text-white border-emerald-600'
                   : isVerifPending
                   ? 'bg-amber-500 text-white border-amber-600'
+                  : isVerifRejected
+                  ? 'bg-red-500 text-white border-red-600'
+                  : isVerifNeedsResubmit
+                  ? 'bg-orange-500 text-white border-orange-600'
                   : 'bg-[#9FE870] text-[#111111] border-[#111111]'
               }`}
             >
@@ -351,6 +373,10 @@ export const SellerDashboard: React.FC = () => {
                 <ShieldCheck className="w-6 h-6" />
               ) : isVerifPending ? (
                 <Clock className="w-6 h-6" />
+              ) : isVerifRejected ? (
+                <AlertTriangle className="w-6 h-6 text-white" />
+              ) : isVerifNeedsResubmit ? (
+                <Camera className="w-6 h-6 text-white" />
               ) : (
                 <ShieldCheck className="w-6 h-6 text-[#111111]" />
               )}
@@ -360,10 +386,14 @@ export const SellerDashboard: React.FC = () => {
               <div className="flex items-center gap-2 flex-wrap">
                 <h3 className="text-base font-black text-[#111111] dark:text-white">
                   {isVerified
-                    ? 'Verified Artisan Store (NIN Slip on File)'
+                    ? 'Verified Artisan Store (NIMC Identity Verified)'
                     : isVerifPending
-                    ? 'NIN Slip Verification Under Review'
-                    : 'Get Verified with Your NIN Slip'}
+                    ? 'NIN & Live Selfie Verification Under Review'
+                    : isVerifRejected
+                    ? 'Identity Verification Rejected'
+                    : isVerifNeedsResubmit
+                    ? 'Action Required: Resubmit ID or Selfie'
+                    : 'Verify Your Seller Identity (NIN & Live Selfie)'}
                 </h3>
                 <span
                   className={`px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider border ${
@@ -371,19 +401,35 @@ export const SellerDashboard: React.FC = () => {
                       ? 'bg-emerald-100 dark:bg-emerald-950 text-emerald-900 dark:text-emerald-300 border-emerald-300 dark:border-emerald-700'
                       : isVerifPending
                       ? 'bg-amber-100 dark:bg-amber-950 text-amber-900 dark:text-amber-300 border-amber-300 dark:border-amber-700 animate-pulse'
+                      : isVerifRejected
+                      ? 'bg-red-100 dark:bg-red-950 text-red-900 dark:text-red-300 border-red-300 dark:border-red-700'
+                      : isVerifNeedsResubmit
+                      ? 'bg-orange-100 dark:bg-orange-950 text-orange-900 dark:text-orange-300 border-orange-300 dark:border-orange-700'
                       : 'bg-[#FF6B00] text-[#111111] border-[#111111]'
                   }`}
                 >
-                  {isVerified ? 'NIN VERIFIED' : isVerifPending ? 'NIN IN REVIEW' : 'UNVERIFIED'}
+                  {isVerified
+                    ? 'NIN VERIFIED'
+                    : isVerifPending
+                    ? 'IN REVIEW'
+                    : isVerifRejected
+                    ? 'REJECTED'
+                    : isVerifNeedsResubmit
+                    ? 'RESUBMIT'
+                    : 'UNVERIFIED'}
                 </span>
               </div>
 
               <p className="text-xs text-slate-600 dark:text-[#A1A1AA] max-w-2xl leading-relaxed">
                 {isVerified
-                  ? 'Your store is officially verified with your NIMC National Identification Number (NIN) Slip. The verified maker badge is displayed on your listings and storefront to give buyers and parents complete confidence.'
+                  ? `Your store is verified under NIMC records (${currentSeller.verifiedLegalName || 'Legal Name'}). The official Verified Maker badge is displayed on your listings and profile.`
                   : isVerifPending
-                  ? 'Your 11-digit NIN Slip was submitted for manual review. Our moderator verifies NIN slips within 24 hours.'
-                  : 'Upload your National Identification Number (NIN) Slip for manual review by our team. Verified shops unlock the trust badge on listings, rank higher in search, and build buyer confidence.'}
+                  ? 'Your 11-digit NIN, document photo, and live camera selfie are currently being verified by our compliance team. Expected turnaround is within 24 hours.'
+                  : isVerifRejected
+                  ? `Your verification was rejected: ${rejectionReason || 'Document or selfie did not match official identity requirements.'} Please review the issues and resubmit.`
+                  : isVerifNeedsResubmit
+                  ? `Resubmission requested: ${rejectionReason || 'Please upload a clearer document photo or retake the live camera selfie.'}`
+                  : 'In compliance with NDPA 2023 regulations and to prevent counterfeit goods, sellers must complete NIN and live selfie verification before listing crafts or withdrawing funds.'}
               </p>
             </div>
           </div>
@@ -392,21 +438,30 @@ export const SellerDashboard: React.FC = () => {
             {isVerified ? (
               <div className="flex items-center gap-1.5 px-3.5 py-2 bg-emerald-100 dark:bg-emerald-950 text-emerald-900 dark:text-emerald-300 rounded-xl text-xs font-black border border-emerald-300 dark:border-emerald-700">
                 <CheckCircle2 className="w-4 h-4 text-emerald-700 dark:text-emerald-400" />
-                <span>Verified NIN on File</span>
+                <span>Verified Seller</span>
               </div>
             ) : isVerifPending ? (
               <div className="flex items-center gap-1.5 px-3.5 py-2 bg-amber-100 dark:bg-amber-950 text-amber-900 dark:text-amber-300 rounded-xl text-xs font-bold border border-amber-300 dark:border-amber-700">
                 <Clock className="w-4 h-4 text-amber-700 dark:text-amber-400" />
                 <span>Pending Review (24h)</span>
               </div>
+            ) : isVerifRejected || isVerifNeedsResubmit ? (
+              <button
+                type="button"
+                onClick={() => setIsVerifModalOpen(true)}
+                className="px-4 py-2.5 bg-red-600 hover:bg-red-700 text-white rounded-xl text-xs sm:text-sm font-black border-2 border-[#111111] dark:border-stone-800 shadow-[0_2.5px_0_#111111] dark:shadow-none active:translate-y-0.5 transition-all flex items-center gap-2 cursor-pointer"
+              >
+                <Camera className="w-4 h-4" />
+                <span>Resubmit Verification</span>
+              </button>
             ) : (
               <button
                 type="button"
                 onClick={() => setIsVerifModalOpen(true)}
-                className="px-4 py-2.5 bg-[#FF6B00] hover:bg-[#FF7A1A] text-[#111111] rounded-xl text-xs sm:text-sm font-black border-2 border-[#111111] dark:border-stone-800 shadow-[0_2.5px_0_#111111] dark:shadow-none active:translate-y-0.5 transition-all flex items-center gap-2"
+                className="px-4 py-2.5 bg-[#FF6B00] hover:bg-[#FF7A1A] text-[#111111] rounded-xl text-xs sm:text-sm font-black border-2 border-[#111111] dark:border-stone-800 shadow-[0_2.5px_0_#111111] dark:shadow-none active:translate-y-0.5 transition-all flex items-center gap-2 cursor-pointer"
               >
-                <Upload className="w-4 h-4 text-[#111111]" />
-                <span>Upload NIN Slip</span>
+                <ShieldCheck className="w-4 h-4 text-[#111111]" />
+                <span>Verify with NIN &amp; Selfie</span>
               </button>
             )}
           </div>
@@ -1018,180 +1073,14 @@ export const SellerDashboard: React.FC = () => {
         </div>
       )}
 
-      {/* Get Verified - ID Upload Modal */}
-      {isVerifModalOpen && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
-          <div className="bg-white rounded-3xl max-w-lg w-full p-6 sm:p-7 my-8 space-y-5 shadow-2xl border-2 border-[#111111]">
-            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-              <div className="flex items-center gap-2.5">
-                <div className="w-10 h-10 rounded-xl bg-[#9FE870] border border-[#111111] flex items-center justify-center text-[#111111]">
-                  <ShieldCheck className="w-6 h-6 stroke-[2.5]" />
-                </div>
-                <div>
-                  <h3 className="text-base sm:text-lg font-black text-slate-900">
-                    Verify Your Store with NIN Slip
-                  </h3>
-                  <p className="text-xs text-slate-500">
-                    NIMC National Identification Number (NIN) manual verification
-                  </p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setIsVerifModalOpen(false)}
-                className="text-slate-400 hover:text-slate-600 p-1 min-h-[38px] min-w-[38px] flex items-center justify-center"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <form onSubmit={handleVerificationSubmit} className="space-y-4 text-xs">
-              <div>
-                <label className="font-bold text-slate-800 block mb-1">
-                  Full Legal Name (as printed on your NIN Slip) *
-                </label>
-                <input
-                  type="text"
-                  required
-                  value={verifOwnerName}
-                  onChange={e => setVerifOwnerName(e.target.value)}
-                  placeholder="e.g. Amaka Chioma Okafor"
-                  className="w-full h-10 px-3 rounded-xl border border-slate-200 text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#FF6B00]"
-                />
-              </div>
-
-              <div>
-                <div className="flex items-center justify-between mb-1">
-                  <label className="font-bold text-slate-800">
-                    11-Digit National Identification Number (NIN) *
-                  </label>
-                  <span className={`text-[10px] font-mono font-bold ${
-                    verifIdNumber.length === 11 ? 'text-emerald-700' : 'text-slate-400'
-                  }`}>
-                    {verifIdNumber.length}/11 digits
-                  </span>
-                </div>
-                <input
-                  type="text"
-                  required
-                  maxLength={11}
-                  value={verifIdNumber}
-                  onChange={e => setVerifIdNumber(e.target.value.replace(/\D/g, '').slice(0, 11))}
-                  placeholder="e.g. 12345678901"
-                  className="w-full h-10 px-3 rounded-xl border border-slate-200 text-xs text-slate-900 font-mono tracking-wider focus:outline-none focus:ring-2 focus:ring-[#FF6B00]"
-                />
-                <span className="text-[10px] text-slate-500 mt-1 block">
-                  Enter your official 11-digit NIN printed on your NIMC slip.
-                </span>
-              </div>
-
-              {/* NIN Slip Photo Upload */}
-              <div className="space-y-1.5">
-                <label className="font-bold text-slate-800 block">
-                  Photo / Scan of NIMC NIN Slip *
-                </label>
-                <div className="border-2 border-dashed border-slate-300 rounded-2xl p-4 text-center hover:border-[#FF6B00] transition-colors bg-slate-50/50">
-                  {verifIdPhoto ? (
-                    <div className="space-y-2">
-                      <div className="w-full h-36 rounded-xl overflow-hidden border border-slate-200 bg-white flex items-center justify-center">
-                        <img src={verifIdPhoto} alt="NIN Slip Preview" className="w-full h-full object-contain" />
-                      </div>
-                      <label className="inline-flex items-center gap-1.5 text-xs text-[#FF6B00] font-bold cursor-pointer hover:underline">
-                        <span>Replace NIN Slip Photo</span>
-                        <input
-                          type="file"
-                          accept="image/*"
-                          onChange={handleIdPhotoUpload}
-                          className="hidden"
-                        />
-                      </label>
-                    </div>
-                  ) : (
-                    <label className="cursor-pointer block py-3">
-                      <Upload className="w-8 h-8 text-slate-400 mx-auto mb-2" />
-                      <span className="text-xs font-bold text-slate-700 block">
-                        {isUploadingIdPhoto ? 'Processing photo...' : 'Click to Upload Your NIN Slip'}
-                      </span>
-                      <span className="text-[11px] text-slate-500 mt-0.5 block">
-                        Ensure your 11-digit NIN, full name, and photograph on the slip are clear and readable
-                      </span>
-                      <input
-                        type="file"
-                        accept="image/*"
-                        onChange={handleIdPhotoUpload}
-                        className="hidden"
-                      />
-                    </label>
-                  )}
-                </div>
-              </div>
-
-              {/* Under-18 Guardian Consent Section */}
-              <div className="p-3.5 bg-slate-50 rounded-2xl border border-slate-200 space-y-3">
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={verifUnder18}
-                    onChange={e => setVerifUnder18(e.target.checked)}
-                    className="rounded text-[#FF6B00] w-4 h-4"
-                  />
-                  <span className="font-bold text-slate-800 text-xs">
-                    I am under 18 years old (requires Parent/Guardian info)
-                  </span>
-                </label>
-
-                {verifUnder18 && (
-                  <div className="grid grid-cols-2 gap-3 pt-1 border-t border-slate-200">
-                    <div>
-                      <label className="text-[11px] font-semibold text-slate-700 block mb-1">
-                        Parent/Guardian Full Name *
-                      </label>
-                      <input
-                        type="text"
-                        required={verifUnder18}
-                        value={verifGuardianName}
-                        onChange={e => setVerifGuardianName(e.target.value)}
-                        placeholder="e.g. Mrs. Funke Okafor"
-                        className="w-full h-9 px-2.5 rounded-lg border border-slate-200 text-xs bg-white"
-                      />
-                    </div>
-                    <div>
-                      <label className="text-[11px] font-semibold text-slate-700 block mb-1">
-                        Guardian Phone Number *
-                      </label>
-                      <input
-                        type="tel"
-                        required={verifUnder18}
-                        value={verifGuardianPhone}
-                        onChange={e => setVerifGuardianPhone(e.target.value)}
-                        placeholder="e.g. 08012345678"
-                        className="w-full h-9 px-2.5 rounded-lg border border-slate-200 text-xs bg-white font-mono-numbers"
-                      />
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              <div className="pt-3 border-t border-slate-100 flex items-center justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setIsVerifModalOpen(false)}
-                  className="px-4 py-2.5 rounded-xl text-slate-600 hover:text-slate-900 font-bold"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-6 py-2.5 bg-[#FF6B00] hover:bg-[#FF7A1A] text-[#111111] font-black border-2 border-[#111111] shadow-[0_3px_0_#111111] active:translate-y-0.5 rounded-xl transition-all flex items-center gap-2"
-                >
-                  <ShieldCheck className="w-4 h-4 text-[#111111]" />
-                  <span>Submit for Review</span>
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      {/* Real Seller Identity Verification Modal (NIMC NIN + Live Camera Selfie + NDPA 2023) */}
+      <SellerVerificationModal
+        isOpen={isVerifModalOpen || isVerificationModalOpen}
+        onClose={() => {
+          setIsVerifModalOpen(false);
+          closeVerificationModal();
+        }}
+      />
     </div>
   );
 };

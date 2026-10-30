@@ -86,10 +86,10 @@ export const SellerShopView: React.FC<SellerShopViewProps> = ({ sellerId, onBack
               <div>
                 <div className="flex items-center gap-2">
                   <h1 className="text-xl sm:text-2xl font-black text-slate-900">{seller.shopName}</h1>
-                  {seller.isVerifiedSeller && (
-                    <span className="text-[11px] font-semibold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 flex items-center gap-1">
-                      <ShieldCheck className="w-3 h-3 text-emerald-600" />
-                      <span>ID Verified</span>
+                  {seller.isVerifiedSeller && (seller.verificationStatus === 'verified' || seller.verificationStatus === 'approved') && (
+                    <span className="text-[11px] font-bold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-300 flex items-center gap-1 shadow-2xs">
+                      <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+                      <span>NIMC Verified Artisan</span>
                     </span>
                   )}
                 </div>

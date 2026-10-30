@@ -262,8 +262,16 @@ interface AppContextType {
   adminSubRole: AdminSubRole;
   setAdminSubRole: (subRole: AdminSubRole) => void;
   verificationRequests: SellerVerificationRequest[];
-  updateVerificationRequest: (id: string, status: 'approved' | 'rejected', notes?: string) => void;
+  updateVerificationRequest: (
+    id: string,
+    status: 'approved' | 'rejected' | 'needs_resubmission' | 'verified',
+    notes?: string,
+    adminName?: string
+  ) => void;
   submitVerificationRequest: (req: Omit<SellerVerificationRequest, 'id' | 'submittedAt' | 'status'>) => void;
+  isVerificationModalOpen: boolean;
+  openVerificationModal: () => void;
+  closeVerificationModal: () => void;
   disputes: DisputeTicket[];
   resolveDispute: (disputeId: string, resolution: 'refund_full' | 'release_seller' | 'partial', amount?: number, notes?: string) => void;
   antiBypassFlags: AntiBypassFlag[];
@@ -594,6 +602,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   });
   const [activeAmbassadorCode, setActiveAmbassadorCode] = useState<string | null>(null);
   const [isQuickListModalOpen, setIsQuickListModalOpen] = useState<boolean>(false);
+  const [isVerificationModalOpen, setIsVerificationModalOpen] = useState<boolean>(false);
+  const openVerificationModal = () => setIsVerificationModalOpen(true);
+  const closeVerificationModal = () => setIsVerificationModalOpen(false);
 
   // Phase 3: Locked Chat States
   const [conversations, setConversations] = useState<Conversation[]>(() => {
@@ -998,13 +1009,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       campus: sellerData.campus || 'UNILAG (Akoka)',
       location: sellerData.location,
       locationArea: resolvedArea,
-      isVerifiedSeller: true,
-      verificationStatus: 'approved',
+      isVerifiedSeller: false,
+      verificationStatus: 'not_started',
       under18: sellerData.under18,
       guardianConsent: sellerData.under18,
       guardianName: sellerData.guardianName,
       guardianPhone: sellerData.guardianPhone,
-      badges: ['verified'],
+      badges: [],
       level: 1,
       rating: 5.0,
       reviewCount: 0,
@@ -1068,11 +1079,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     > &
       Partial<Pick<Product, 'serviceFee' | 'displayPrice' | 'isSoldOut' | 'isNewArrival'>>
   ) => {
+    // Rule: Unverified sellers cannot list products
+    if (currentSeller && currentSeller.verificationStatus !== 'verified' && currentSeller.verificationStatus !== 'approved') {
+      notify('Identity Verification Required: Sellers must complete NIN & live selfie verification before listing crafts.', 'error');
+      setIsVerificationModalOpen(true);
+      return;
+    }
+
     const id = `prod_${Date.now()}`;
     const pricing = getPricingBreakdown(newProd.sellerPrice);
+    const isSellerVerified = currentSeller ? (currentSeller.isVerifiedSeller && (currentSeller.verificationStatus === 'verified' || currentSeller.verificationStatus === 'approved')) : false;
+    const sanitizedBadges = (newProd.sellerBadges || []).filter(b => b !== 'verified');
+    if (isSellerVerified) {
+      sanitizedBadges.push('verified');
+    }
+
     const product: Product = {
       ...newProd,
       id,
+      sellerBadges: sanitizedBadges,
       location: newProd.location || userLocation,
       locationArea: newProd.locationArea || newProd.location?.area || userLocation.area,
       serviceFee: pricing.serviceFee,
@@ -1545,6 +1570,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const requestWithdrawal = (amount: number, payoutAccountId: string, otpCode: string): boolean => {
     if (!currentSeller) return false;
 
+    // Rule: Unverified sellers cannot withdraw
+    if (currentSeller.verificationStatus !== 'verified' && currentSeller.verificationStatus !== 'approved') {
+      notify('Withdrawals Locked: Central Bank of Nigeria & NDPA regulations require sellers to complete NIN & biometric verification before withdrawing funds.', 'error');
+      setIsVerificationModalOpen(true);
+      return false;
+    }
+
     // Rule 5: Derived balances from append-only ledger
     const sellerLedger = ledgerEntries.filter(e => e.walletId === currentSeller.id);
     const balances = calculateBalancesFromLedger(sellerLedger);
@@ -1586,10 +1618,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     // Rule 4: The account name must match the seller's verified ID name
-    const verifiedName = currentUser?.name || currentSeller.shopName;
+    const verifiedName = currentSeller.verifiedLegalName || currentSeller.guardianName || currentUser?.name || currentSeller.shopName;
     const nameMatch = validateAccountNameMatch(payoutAccount.accountName, verifiedName);
     if (!nameMatch.isMatch) {
-      notify(nameMatch.reason || 'Account name does not match verified seller identity.', 'error');
+      notify(nameMatch.reason || `Account name must match verified seller identity (${verifiedName}).`, 'error');
       return false;
     }
 
@@ -1642,16 +1674,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   ): boolean => {
     if (!currentSeller) return false;
 
+    // Rule: Unverified sellers cannot link payout accounts
+    if (currentSeller.verificationStatus !== 'verified' && currentSeller.verificationStatus !== 'approved') {
+      notify('Identity Verification Required: Please complete NIN and live selfie verification before linking a bank payout account.', 'error');
+      setIsVerificationModalOpen(true);
+      return false;
+    }
+
     if (accountNumber.trim().length !== 10) {
       notify('Nigerian bank/Opay account numbers must be exactly 10 digits.', 'error');
       return false;
     }
 
     // Rule 4: Account name must match verified ID name
-    const verifiedName = currentUser?.name || currentSeller.shopName;
+    const verifiedName = currentSeller.verifiedLegalName || currentSeller.guardianName || currentUser?.name || currentSeller.shopName;
     const nameMatch = validateAccountNameMatch(accountName, verifiedName);
     if (!nameMatch.isMatch) {
-      notify(nameMatch.reason || 'Account name must match your verified seller identity.', 'error');
+      notify(nameMatch.reason || `Account name must match your verified seller identity (${verifiedName}).`, 'error');
       return false;
     }
 
@@ -1932,34 +1971,115 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   // Phase 3: Admin & Moderation Handlers
-  const updateVerificationRequest = (id: string, status: 'approved' | 'rejected', notes?: string) => {
+  const updateVerificationRequest = async (
+    id: string,
+    status: 'approved' | 'rejected' | 'needs_resubmission' | 'verified',
+    notes?: string,
+    adminName?: string
+  ) => {
+    const canonicalStatus: 'verified' | 'rejected' | 'needs_resubmission' =
+      status === 'approved' ? 'verified' : status;
+    const reviewer = adminName || currentUser?.name || 'Adeyinka Joseph (Moderator)';
+
+    try {
+      fetch('/api/verification/admin/review', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          requestId: id,
+          decision: canonicalStatus,
+          rejectionReason: notes,
+          adminName: reviewer,
+          adminRole: 'moderator',
+        }),
+      }).catch(err => console.warn('Server review call warning:', err.message));
+    } catch {}
+
     setVerificationRequests(prev =>
       prev.map(req => {
         if (req.id === id) {
-          return { ...req, status, notes: notes || req.notes };
+          return {
+            ...req,
+            status: canonicalStatus,
+            reviewedAt: new Date().toISOString(),
+            reviewedBy: reviewer,
+            rejectionReason: canonicalStatus !== 'verified' ? notes : undefined,
+            adminNotes: notes || req.adminNotes,
+          };
         }
         return req;
       })
     );
 
     const targetReq = verificationRequests.find(r => r.id === id);
-    if (targetReq && status === 'approved') {
+    if (!targetReq) return;
+
+    if (canonicalStatus === 'verified') {
       setSellers(prev =>
         prev.map(s => {
           if (s.id === targetReq.sellerId) {
             return {
               ...s,
               isVerifiedSeller: true,
-              verificationStatus: 'approved',
+              verificationStatus: 'verified',
+              verifiedLegalName: targetReq.ownerName,
+              verifiedNinLast4: targetReq.fullNinLast4,
+              verifiedAt: new Date().toISOString(),
+              verificationRejectionReason: undefined,
               badges: Array.from(new Set([...s.badges, 'verified'])),
             };
           }
           return s;
         })
       );
-      notify(`Seller "${targetReq.shopName}" approved! Verified badge granted.`, 'success');
-    } else {
-      notify(`Verification request marked as ${status}.`, 'info');
+      addAdminAuditLog(
+        'SELLER_IDENTITY_VERIFIED',
+        `Approved NIN & live selfie verification for seller "${targetReq.shopName}" (${targetReq.ownerName}). NIN last 4: ${targetReq.fullNinLast4}. Real Verified Badge issued.`,
+        targetReq.sellerId
+      );
+      notify(`Seller "${targetReq.shopName}" verified! Verified badge granted.`, 'success');
+    } else if (canonicalStatus === 'rejected') {
+      setSellers(prev =>
+        prev.map(s => {
+          if (s.id === targetReq.sellerId) {
+            return {
+              ...s,
+              isVerifiedSeller: false,
+              verificationStatus: 'rejected',
+              verificationRejectionReason: notes || 'Document or selfie did not match identity verification criteria.',
+              badges: s.badges.filter(b => b !== 'verified'),
+            };
+          }
+          return s;
+        })
+      );
+      addAdminAuditLog(
+        'SELLER_IDENTITY_REJECTED',
+        `Rejected identity verification for "${targetReq.shopName}". Reason: ${notes || 'Verification failed'}`,
+        targetReq.sellerId
+      );
+      notify(`Verification for "${targetReq.shopName}" rejected. Reason: ${notes || 'Failed criteria'}`, 'error');
+    } else if (canonicalStatus === 'needs_resubmission') {
+      setSellers(prev =>
+        prev.map(s => {
+          if (s.id === targetReq.sellerId) {
+            return {
+              ...s,
+              isVerifiedSeller: false,
+              verificationStatus: 'needs_resubmission',
+              verificationRejectionReason: notes || 'Please resubmit a clearer photo of your ID or selfie.',
+              badges: s.badges.filter(b => b !== 'verified'),
+            };
+          }
+          return s;
+        })
+      );
+      addAdminAuditLog(
+        'SELLER_IDENTITY_RESUBMISSION_REQUESTED',
+        `Requested re-submission of documents for "${targetReq.shopName}". Reason: ${notes || 'Clearer document needed'}`,
+        targetReq.sellerId
+      );
+      notify(`Requested resubmission for "${targetReq.shopName}". Seller prompted to upload clearer ID.`, 'info');
     }
   };
 
@@ -1972,21 +2092,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       status: 'pending',
     };
 
-    setVerificationRequests(prev => [newReq, ...prev]);
+    setVerificationRequests(prev => [newReq, ...prev.filter(r => r.sellerId !== data.sellerId)]);
 
     setSellers(prev =>
       prev.map(s => {
         if (s.id === data.sellerId) {
           return {
             ...s,
-            verificationStatus: 'pending_approval',
+            verificationStatus: 'pending',
+            isVerifiedSeller: false,
+            badges: s.badges.filter(b => b !== 'verified'),
+            verifiedLegalName: data.ownerName,
+            under18: data.under18,
+            guardianName: data.guardianName,
+            guardianPhone: data.guardianPhone,
+            guardianConsent: !!data.guardianConsentSigned,
           };
         }
         return s;
       })
     );
 
-    notify('ID submitted for review! Our moderator will review it within 24 hours.', 'success');
+    notify('ID & selfie submitted for review! Our moderator will review it within 24 hours.', 'success');
   };
 
   const resolveDispute = (
@@ -2860,6 +2987,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         verificationRequests,
         updateVerificationRequest,
         submitVerificationRequest,
+        isVerificationModalOpen,
+        openVerificationModal,
+        closeVerificationModal,
         disputes,
         resolveDispute,
         antiBypassFlags,

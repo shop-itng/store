@@ -35,7 +35,11 @@ export interface SellerProfile {
     tiktok?: string;
   };
   isVerifiedSeller: boolean;
-  verificationStatus: 'pending_approval' | 'approved' | 'rejected';
+  verificationStatus: 'not_started' | 'pending' | 'verified' | 'rejected' | 'needs_resubmission' | 'approved'; // 'approved' retained for backward-compat
+  verificationRejectionReason?: string;
+  verifiedAt?: string;
+  verifiedNinLast4?: string;
+  verifiedLegalName?: string;
   under18: boolean;
   guardianConsent: boolean;
   guardianName?: string;
@@ -376,21 +380,61 @@ export interface DisputeTicket {
   resolvedAt?: string;
 }
 
+export type VerificationStatus =
+  | 'not_started'
+  | 'pending'
+  | 'verified'
+  | 'rejected'
+  | 'needs_resubmission';
+
+export type IdDocumentType =
+  | 'nin_slip'
+  | 'nin_card'
+  | 'drivers_license'
+  | 'voters_card'
+  | 'international_passport';
+
 export interface SellerVerificationRequest {
   id: string;
   sellerId: string;
   shopName: string;
-  ownerName: string;
+  ownerName: string; // Legal full name
+  dateOfBirth?: string;
   campus: Campus;
-  idType: 'student_id' | 'nin' | 'voters_card';
-  idNumber: string;
-  idCardPhotoUrl: string;
+  idType: IdDocumentType;
+  idNumber: string; // Masked on client (e.g. "***-***-8901")
+  fullNinLast4: string; // Last 4 digits only
+  idCardPhotoUrl: string; // Uploaded ID document photo
+  selfiePhotoUrl?: string; // Captured live in app (no gallery upload)
+  livenessVerified?: boolean;
+  livenessScore?: number; // 0-100
   under18: boolean;
   guardianName?: string;
   guardianPhone?: string;
+  guardianNinLast4?: string;
+  guardianIdCardPhotoUrl?: string;
+  guardianConsentSigned?: boolean;
   guardianConsentLetterUrl?: string;
+  ndpaConsentSigned: boolean;
+  ndpaConsentTimestamp: string;
   submittedAt: string;
-  status: 'pending' | 'approved' | 'rejected';
+  reviewedAt?: string;
+  reviewedBy?: string;
+  status: VerificationStatus;
+  rejectionReason?: string;
+  adminNotes?: string;
+  attemptsCount: number;
+  lockedUntil?: string;
+  apiCheckResult?: {
+    provider: string;
+    status: 'match' | 'mismatch' | 'manual_review_required';
+    nameMatchScore: number;
+    dobMatch: boolean;
+    nimcRegisteredName?: string;
+    verifiedAt: string;
+  };
+  deviceFingerprint?: string;
+  isFlaggedDuplicate?: boolean;
   notes?: string;
 }
 

@@ -98,9 +98,12 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product, index = 0 }) 
                 e.stopPropagation();
                 openSellerShop(product.sellerId);
               }}
-              className="font-semibold text-[#52525B] dark:text-[#A1A1AA] hover:text-[#FF6B00] truncate text-[11px]"
+              className="font-semibold text-[#52525B] dark:text-[#A1A1AA] hover:text-[#FF6B00] truncate text-[11px] inline-flex items-center gap-1"
             >
-              {product.sellerShopName}
+              <span>{product.sellerShopName}</span>
+              {product.sellerBadges?.includes('verified') && (
+                <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0 inline" title="NIMC Verified Seller" />
+              )}
             </span>
             <span className="flex items-center gap-1 text-[11px] font-black text-[#111111] shrink-0 bg-[#9FE870] border border-[#111111] dark:border-stone-800 px-2 py-0.5 rounded-lg shadow-2xs">
               <MapPin className="w-3 h-3 text-[#FF6B00]" />
