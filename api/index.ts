@@ -332,7 +332,19 @@ router.post('/paystack/initialize', async (req, res) => {
   }
 });
 
-// 4. POST /paystack/webhook - Cryptographic HMAC SHA-512 verification & Paystack Confirmation
+// 4a. GET /paystack/webhook - Friendly health check when visited via browser
+router.get('/paystack/webhook', (_req, res) => {
+  res.status(200).json({
+    status: true,
+    service: 'Shop It Paystack Webhook Endpoint',
+    endpoint: '/api/paystack/webhook',
+    expectedMethod: 'POST',
+    isLive: true,
+    message: 'Webhook listener is active, healthy, and ready to receive POST events from Paystack.',
+  });
+});
+
+// 4b. POST /paystack/webhook - Cryptographic HMAC SHA-512 verification & Paystack Confirmation
 router.post('/paystack/webhook', async (req: any, res) => {
   try {
     const signature = req.headers['x-paystack-signature'] as string;
