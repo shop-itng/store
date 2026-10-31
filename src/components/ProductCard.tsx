@@ -102,7 +102,9 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product, index = 0 }) 
             >
               <span>{product.sellerShopName}</span>
               {product.sellerBadges?.includes('verified') && (
-                <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0 inline" title="NIMC Verified Seller" />
+                <span title="NIMC Verified Seller" className="inline-flex">
+                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0 inline" />
+                </span>
               )}
             </span>
             <span className="flex items-center gap-1 text-[11px] font-black text-[#111111] shrink-0 bg-[#9FE870] border border-[#111111] dark:border-stone-800 px-2 py-0.5 rounded-lg shadow-2xs">

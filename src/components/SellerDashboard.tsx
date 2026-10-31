@@ -54,16 +54,8 @@ export const SellerDashboard: React.FC = () => {
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [editingProductId, setEditingProductId] = useState<string | null>(null);
 
-  // Verification modal states
+  // Verification modal state
   const [isVerifModalOpen, setIsVerifModalOpen] = useState(false);
-  const [verifOwnerName, setVerifOwnerName] = useState(currentSeller?.ownerName || currentSeller?.shopName || '');
-  const [verifIdType] = useState<'nin'>('nin');
-  const [verifIdNumber, setVerifIdNumber] = useState('');
-  const [verifIdPhoto, setVerifIdPhoto] = useState('');
-  const [verifUnder18, setVerifUnder18] = useState(currentSeller?.under18 || false);
-  const [verifGuardianName, setVerifGuardianName] = useState(currentSeller?.guardianName || '');
-  const [verifGuardianPhone, setVerifGuardianPhone] = useState(currentSeller?.guardianPhone || '');
-  const [isUploadingIdPhoto, setIsUploadingIdPhoto] = useState(false);
 
   // Packing proof modal
   const [packingOrder, setPackingOrder] = useState<Order | null>(null);
@@ -118,7 +110,7 @@ export const SellerDashboard: React.FC = () => {
   const existingVerifReq = verificationRequests.find(r => r.sellerId === currentSeller.id);
   const rawStatus = currentSeller.verificationStatus || 'not_started';
   const isVerified = currentSeller.isVerifiedSeller && (rawStatus === 'verified' || rawStatus === 'approved');
-  const isVerifPending = !isVerified && (rawStatus === 'pending' || rawStatus === 'pending_approval' || existingVerifReq?.status === 'pending');
+  const isVerifPending = !isVerified && (rawStatus === 'pending' || (rawStatus as string) === 'pending_approval' || existingVerifReq?.status === 'pending');
   const isVerifRejected = rawStatus === 'rejected' || existingVerifReq?.status === 'rejected';
   const isVerifNeedsResubmit = rawStatus === 'needs_resubmission' || existingVerifReq?.status === 'needs_resubmission';
   const rejectionReason = currentSeller.verificationRejectionReason || existingVerifReq?.rejectionReason || existingVerifReq?.adminNotes;
@@ -230,56 +222,7 @@ export const SellerDashboard: React.FC = () => {
     resetForm();
   };
 
-  const handleIdPhotoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      setIsUploadingIdPhoto(true);
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        setIsUploadingIdPhoto(false);
-        setVerifIdPhoto(event.target?.result as string || '');
-        notify('ID document photo uploaded successfully.', 'success');
-      };
-      reader.onerror = () => {
-        setIsUploadingIdPhoto(false);
-        notify('Failed to load image. Please try another file.', 'error');
-      };
-      reader.readAsDataURL(file);
-    }
-  };
 
-  const handleVerificationSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    const cleanNin = verifIdNumber.replace(/\D/g, '');
-    if (cleanNin.length !== 11) {
-      notify('Please enter a valid 11-digit National Identification Number (NIN).', 'error');
-      return;
-    }
-    if (!verifIdPhoto) {
-      notify('Please upload a clear photo or scan of your NIMC NIN Slip.', 'error');
-      return;
-    }
-    if (verifUnder18 && (!verifGuardianName.trim() || !verifGuardianPhone.trim())) {
-      notify('Under-18 sellers must provide Guardian Name and Phone.', 'error');
-      return;
-    }
-
-    submitVerificationRequest({
-      sellerId: currentSeller.id,
-      shopName: currentSeller.shopName,
-      ownerName: verifOwnerName.trim() || currentSeller.ownerName || currentSeller.shopName,
-      campus: currentSeller.campus || 'UNILAG (Akoka)',
-      idType: 'nin',
-      idNumber: cleanNin,
-      idCardPhotoUrl: verifIdPhoto,
-      under18: verifUnder18,
-      guardianName: verifUnder18 ? verifGuardianName.trim() : undefined,
-      guardianPhone: verifUnder18 ? verifGuardianPhone.trim() : undefined,
-    });
-
-    notify('NIN Slip submitted successfully! Our moderator will review it within 24 hours.', 'success');
-    setIsVerifModalOpen(false);
-  };
 
   const handlePackPhotoSubmit = (e: React.FormEvent) => {
     e.preventDefault();

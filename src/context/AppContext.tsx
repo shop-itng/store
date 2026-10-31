@@ -1089,7 +1089,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const id = `prod_${Date.now()}`;
     const pricing = getPricingBreakdown(newProd.sellerPrice);
     const isSellerVerified = currentSeller ? (currentSeller.isVerifiedSeller && (currentSeller.verificationStatus === 'verified' || currentSeller.verificationStatus === 'approved')) : false;
-    const sanitizedBadges = (newProd.sellerBadges || []).filter(b => b !== 'verified');
+    const sanitizedBadges: Product['sellerBadges'] = (newProd.sellerBadges || []).filter(b => b !== 'verified');
     if (isSellerVerified) {
       sanitizedBadges.push('verified');
     }
@@ -2361,7 +2361,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           return {
             ...s,
             isVerifiedSeller: isVerified,
-            verificationStatus: isVerified ? 'approved' : 'pending_approval',
+            verificationStatus: isVerified ? 'verified' : 'pending',
             badges: newBadges as any,
           };
         }

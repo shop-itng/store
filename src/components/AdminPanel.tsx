@@ -16,6 +16,7 @@ import {
   ArrowRight,
   Sparkles,
   FileText,
+  Camera,
   Phone,
   Calendar,
   AlertCircle,
@@ -294,7 +295,7 @@ export const AdminPanel: React.FC = () => {
                   {verificationRequests.filter(r => r.status === 'pending').length} In Review
                 </span>
                 <span className="px-2.5 py-1 rounded-md bg-emerald-50 text-emerald-800 border border-emerald-200 text-xs font-semibold">
-                  {verificationRequests.filter(r => r.status === 'verified' || r.status === 'approved').length} Verified
+                  {verificationRequests.filter(r => r.status === 'verified').length} Verified
                 </span>
               </div>
             </div>
@@ -308,7 +309,7 @@ export const AdminPanel: React.FC = () => {
                 verificationRequests.map(req => {
                   const isMinor = req.under18;
                   const maskedNin = req.fullNinLast4 ? `***-***-${req.fullNinLast4}` : req.idNumber;
-                  const isReqVerified = req.status === 'verified' || req.status === 'approved';
+                  const isReqVerified = req.status === 'verified';
 
                   return (
                     <div key={req.id} className="p-4 sm:p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4 hover:bg-stone-50/40 transition-colors">

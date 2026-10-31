@@ -82,7 +82,9 @@ export const SellerVerificationModal: React.FC<SellerVerificationModalProps> = (
         .catch(() => {
           // fallback to seller object
           if (currentSeller.verificationStatus) {
-            setServerStatus(currentSeller.verificationStatus);
+            const rawStatus = currentSeller.verificationStatus;
+            const normStatus: VerificationStatus = rawStatus === 'approved' ? 'verified' : rawStatus;
+            setServerStatus(normStatus);
           }
         });
     }

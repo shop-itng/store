@@ -5,6 +5,10 @@
   "outputDirectory": "dist",
   "rewrites": [
     {
+      "source": "/api/paystack/webhook",
+      "destination": "/api/paystack/webhook"
+    },
+    {
       "source": "/api/(.*)",
       "destination": "/api"
     },

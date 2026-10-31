@@ -264,9 +264,12 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({ product, o
                 >
                   <span>{product.sellerShopName}</span>
                 </button>
-                <span className="text-[11px] font-bold text-[#111111] bg-[#9FE870] px-2 py-0.5 rounded-md">
-                  Verified
-                </span>
+                {((seller?.isVerifiedSeller && (seller?.verificationStatus === 'verified' || seller?.verificationStatus === 'approved')) || product.sellerBadges?.includes('verified')) && (
+                  <span className="text-[11px] font-black text-[#111111] bg-[#9FE870] px-2 py-0.5 rounded-md flex items-center gap-1 shadow-2xs">
+                    <ShieldCheck className="w-3.5 h-3.5 text-[#111111]" />
+                    <span>NIMC Verified</span>
+                  </span>
+                )}
               </div>
               <div className="flex items-center gap-2 text-xs text-[#71717A] mt-1.5">
                 <span className="inline-flex items-center gap-1 font-bold text-[#111111] bg-[#9FE870] px-2.5 py-0.5 rounded-md text-[11px]">
