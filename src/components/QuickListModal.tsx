@@ -290,7 +290,7 @@ export const QuickListModal: React.FC = () => {
               >
                 <Upload className="w-8 h-8 text-[#FF6B00] mx-auto mb-2" />
                 <span className="text-xs font-bold text-[#111111] block">
-                  {isCompressing ? 'Loading photo...' : 'Tap to Upload Product Photo from Phone/PC'}
+                  {isCompressing ? 'Loading photo...' : 'Tap to Upload Product Photo from Device / PC'}
                 </span>
                 <span className="text-[11px] text-[#71717A] mt-1 block">
                   PNG, JPG, or WEBP · Clear photo of your real item

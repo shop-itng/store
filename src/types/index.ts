@@ -57,13 +57,11 @@ export interface SellerProfile {
 export interface User {
   id: string;
   email: string;
-  phone: string;
   name: string;
   password?: string;
   role: UserRole;
   adminSubRole?: AdminSubRole;
   isVerifiedEmail: boolean;
-  isVerifiedPhone: boolean;
   isBanned?: boolean;
   avatarUrl?: string;
   sellerProfile?: SellerProfile;

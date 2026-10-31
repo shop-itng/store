@@ -17,7 +17,6 @@ import {
   Sparkles,
   FileText,
   Camera,
-  Phone,
   Calendar,
   AlertCircle,
   Check,
@@ -751,7 +750,6 @@ export const AdminPanel: React.FC = () => {
 
                             <div className="flex items-center gap-3 text-xs text-stone-500 flex-wrap">
                               <span>ID: <code className="text-stone-700 font-mono">{user.id}</code></span>
-                              {user.phone && <span>· Phone: <strong className="text-stone-700">{user.phone}</strong></span>}
                               {user.locationArea && <span>· Area: <strong className="text-stone-700">{user.locationArea}</strong></span>}
                               {user.role === 'seller' && (
                                 <span className="text-[#FF6B00] font-semibold">

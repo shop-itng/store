@@ -12,7 +12,6 @@ import {
   CheckCircle2,
   Lock,
   Building2,
-  Smartphone,
   Info,
   ShieldAlert,
   ArrowDownLeft,
@@ -32,6 +31,7 @@ export const SellerWalletView: React.FC = () => {
     requestWithdrawal,
     addPayoutAccount,
     sendWithdrawalOtp,
+    sendPayoutAccountOtp,
     activeWithdrawalOtp,
     securityProfile,
     toggleTwoFactor,
@@ -49,6 +49,7 @@ export const SellerWalletView: React.FC = () => {
   const [withdrawalOtp, setWithdrawalOtp] = useState('');
   const [isWithdrawing, setIsWithdrawing] = useState(false);
   const [otpSent, setOtpSent] = useState(false);
+  const [withdrawCooldown, setWithdrawCooldown] = useState(0);
 
   // Ledger Filter
   const [ledgerFilter, setLedgerFilter] = useState<'all' | LedgerEntryType>('all');
@@ -58,6 +59,18 @@ export const SellerWalletView: React.FC = () => {
   const [selectedBankCode, setSelectedBankCode] = useState('999992'); // OPay default
   const [accountNumber, setAccountNumber] = useState('');
   const [accountName, setAccountName] = useState(verifiedIdName.toUpperCase());
+  const [accountOtp, setAccountOtp] = useState('');
+  const [accountCooldown, setAccountCooldown] = useState(0);
+  const [accountOtpSent, setAccountOtpSent] = useState(false);
+
+  // 1-second interval for cooldown timers
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setWithdrawCooldown(prev => (prev > 0 ? prev - 1 : 0));
+      setAccountCooldown(prev => (prev > 0 ? prev - 1 : 0));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   // Auto-select first account when available
   useEffect(() => {
@@ -90,10 +103,25 @@ export const SellerWalletView: React.FC = () => {
   };
 
   const handleSendOtpClick = () => {
-    const code = sendWithdrawalOtp(withdrawAmount);
+    if (withdrawCooldown > 0) return;
+    const res = sendWithdrawalOtp(withdrawAmount);
     setOtpSent(true);
-    // Prefill for convenience in test mode while notifying user
-    setWithdrawalOtp(code);
+    setWithdrawCooldown(60);
+    if (typeof res === 'string') {
+      setWithdrawalOtp(res);
+    } else if (res.code) {
+      setWithdrawalOtp(res.code);
+    }
+  };
+
+  const handleSendAccountOtpClick = () => {
+    if (accountCooldown > 0) return;
+    const res = sendPayoutAccountOtp();
+    if (res.success && res.code) {
+      setAccountOtpSent(true);
+      setAccountCooldown(60);
+      setAccountOtp(res.code);
+    }
   };
 
   const handleWithdrawSubmit = (e: React.FormEvent) => {
@@ -109,7 +137,7 @@ export const SellerWalletView: React.FC = () => {
     }
 
     if (!withdrawalOtp.trim()) {
-      notify('Please request and enter the 4-digit SMS OTP code sent to your phone.', 'error');
+      notify('Please request and enter the 4-digit Email OTP sent to your registered email address.', 'error');
       return;
     }
 
@@ -144,10 +172,17 @@ export const SellerWalletView: React.FC = () => {
       return;
     }
 
-    const success = addPayoutAccount(bank.code, bank.name, accountNumber, accountName);
+    if (!accountOtp.trim() || accountOtp.trim().length !== 4) {
+      notify('Please request and enter the 4-digit Email OTP sent to your inbox to link this payout account.', 'error');
+      return;
+    }
+
+    const success = addPayoutAccount(bank.code, bank.name, accountNumber, accountName, accountOtp);
     if (success) {
       setIsAddAccountModalOpen(false);
       setAccountNumber('');
+      setAccountOtp('');
+      setAccountOtpSent(false);
     }
   };
 
@@ -541,19 +576,26 @@ export const SellerWalletView: React.FC = () => {
                 </div>
               )}
 
-              {/* Rule 4: Send an OTP before every withdrawal */}
+              {/* Rule 4: Send an Email OTP before every withdrawal */}
               <div className="p-3 bg-slate-50 rounded-xl border-2 border-slate-200 space-y-2">
                 <div className="flex items-center justify-between">
                   <span className="font-bold text-slate-900 flex items-center gap-1.5">
                     <KeyRound className="w-3.5 h-3.5 text-[#FF6B00]" />
-                    <span>Security SMS OTP *</span>
+                    <span>Security Email OTP *</span>
                   </span>
                   <button
                     type="button"
+                    disabled={withdrawCooldown > 0}
                     onClick={handleSendOtpClick}
-                    className="text-[11px] font-black text-[#FF6B00] hover:underline"
+                    className={`text-[11px] font-black ${
+                      withdrawCooldown > 0 ? 'text-slate-400 cursor-not-allowed' : 'text-[#FF6B00] hover:underline'
+                    }`}
                   >
-                    {otpSent ? 'Resend SMS OTP' : 'Send SMS OTP'}
+                    {withdrawCooldown > 0
+                      ? `Resend in ${withdrawCooldown}s`
+                      : otpSent
+                      ? 'Resend Email OTP'
+                      : 'Send Email OTP'}
                   </button>
                 </div>
 
@@ -578,7 +620,7 @@ export const SellerWalletView: React.FC = () => {
                   )}
                 </div>
                 <span className="text-[10px] text-slate-500 block text-center">
-                  Rule 4: Paystack security OTP sent to your registered phone number.
+                  Rule 4: Security OTP sent to your registered email ({currentUser?.email || 'artisan@campus.ng'}). Valid for 10 mins (3 attempts max).
                 </span>
               </div>
 
@@ -691,6 +733,54 @@ export const SellerWalletView: React.FC = () => {
                 />
                 <span className="text-[11px] text-slate-600 mt-1 block">
                   Rule 4: Must match your verified seller identity: <strong>{verifiedIdName.toUpperCase()}</strong>.
+                </span>
+              </div>
+
+              {/* Security Rule: Email Authorization OTP to add/change payout account */}
+              <div className="p-3 bg-slate-50 rounded-xl border-2 border-slate-200 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-slate-900 flex items-center gap-1.5">
+                    <KeyRound className="w-3.5 h-3.5 text-[#FF6B00]" />
+                    <span>Email Authorization Code *</span>
+                  </span>
+                  <button
+                    type="button"
+                    disabled={accountCooldown > 0}
+                    onClick={handleSendAccountOtpClick}
+                    className={`text-[11px] font-black ${
+                      accountCooldown > 0 ? 'text-slate-400 cursor-not-allowed' : 'text-[#FF6B00] hover:underline'
+                    }`}
+                  >
+                    {accountCooldown > 0
+                      ? `Resend in ${accountCooldown}s`
+                      : accountOtpSent
+                      ? 'Resend Code'
+                      : 'Send Email Code'}
+                  </button>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    maxLength={4}
+                    required
+                    value={accountOtp}
+                    onChange={e => setAccountOtp(e.target.value)}
+                    placeholder="Enter 4-digit code"
+                    className="flex-1 h-10 px-3 tracking-widest text-center text-base font-black font-mono-numbers rounded-lg border-2 border-slate-300 bg-white text-slate-900 focus:outline-none focus:border-[#FF6B00]"
+                  />
+                  {!accountOtpSent && (
+                    <button
+                      type="button"
+                      onClick={handleSendAccountOtpClick}
+                      className="px-3 h-10 bg-[#111111] text-[#9FE870] font-black rounded-lg text-xs border border-[#111111]"
+                    >
+                      Send Code
+                    </button>
+                  )}
+                </div>
+                <span className="text-[10px] text-slate-500 block text-center">
+                  Paystack security code sent to your registered email ({currentUser?.email || 'artisan@campus.ng'}). Valid for 10 mins (3 attempts max).
                 </span>
               </div>
 

@@ -75,6 +75,14 @@ import {
   validateAccountNameMatch,
   executePaystackTransfer,
 } from '../utils/paystackService';
+import {
+  generateEmailOtp,
+  verifyEmailOtp,
+  getResendCooldownSeconds,
+  isKnownDevice,
+  recordKnownDevice,
+  getDeviceId,
+} from '../utils/emailOtpManager';
 
 interface NotificationItem {
   id: string;
@@ -307,10 +315,12 @@ interface AppContextType {
   currentWallet: SellerWallet | null;
   ledgerEntries: LedgerEntry[];
   paystackWebhooks: PaystackWebhookEvent[];
-  activeWithdrawalOtp: { code: string; phone: string; expiresAt: number; amount: number } | null;
-  sendWithdrawalOtp: (amount: number) => string;
+  activeWithdrawalOtp: { code: string; email: string; expiresAt: number; amount: number } | null;
+  sendWithdrawalOtp: (amount: number) => { success: boolean; code?: string; error?: string; waitSeconds?: number } | string;
   requestWithdrawal: (amount: number, payoutAccountId: string, otpCode: string) => boolean;
-  addPayoutAccount: (bankCode: string, bankName: string, accountNumber: string, accountName: string) => boolean;
+  addPayoutAccount: (bankCode: string, bankName: string, accountNumber: string, accountName: string, otpCode?: string) => boolean;
+  sendPayoutAccountOtp: () => { success: boolean; code?: string; error?: string; waitSeconds?: number };
+  resendSignupOtp: () => { success: boolean; code?: string; error?: string; waitSeconds?: number };
   toggleWalletFreeze: (sellerId: string, freeze: boolean, reason?: string) => void;
   processPaystackWebhook: (eventData: {
     event: 'charge.success';
@@ -473,10 +483,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return saved ? JSON.parse(saved) : [];
   });
 
-  // Rule 4: Send an OTP before every withdrawal
+  // Rule 4: Send an Email OTP before every withdrawal
   const [activeWithdrawalOtp, setActiveWithdrawalOtp] = useState<{
     code: string;
-    phone: string;
+    email: string;
     expiresAt: number;
     amount: number;
   } | null>(null);
@@ -920,10 +930,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       id: userData.id || `user_${Date.now()}`,
       name: userData.name || 'Shopper',
       email: userData.email || 'customer@shopit.ng',
-      phone: userData.phone || '+2348000000000',
       role: userData.role || 'buyer',
       isVerifiedEmail: true,
-      isVerifiedPhone: true,
       savedDeliveryArea: userData.savedDeliveryArea || userLocation.area || 'Yaba',
       sellerProfile: userData.sellerProfile,
     };
@@ -966,28 +974,46 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const verifyOtp = (code: string) => {
-    if (code.trim().length === 4) {
-      if (pendingAuthData) {
-        if (pendingAuthData.role === 'seller') {
-          setAuthTab('seller_register');
-          notify('Phone verified! Complete your shop profile.', 'success');
-          return true;
-        } else {
-          login({
-            id: pendingAuthData.id,
-            name: pendingAuthData.name,
-            email: pendingAuthData.email,
-            phone: pendingAuthData.phone,
-            role: 'buyer',
-            password: pendingAuthData.password,
-          } as any);
-          closeAuthModal();
-          return true;
-        }
-      }
+    if (!pendingAuthData?.email) {
+      notify('No pending verification found. Please sign up again.', 'error');
+      return false;
     }
-    notify('Please enter the 4-digit code (1234)', 'error');
-    return false;
+
+    const verification = verifyEmailOtp(pendingAuthData.email, 'signup', code);
+    if (!verification.success) {
+      notify(verification.error || 'Invalid or expired verification code.', 'error');
+      return false;
+    }
+
+    if (pendingAuthData.role === 'seller') {
+      setAuthTab('seller_register');
+      notify('Email verified! Complete your shop profile.', 'success');
+      return true;
+    } else {
+      login({
+        id: pendingAuthData.id,
+        name: pendingAuthData.name,
+        email: pendingAuthData.email,
+        role: 'buyer',
+        password: pendingAuthData.password,
+      } as any);
+      closeAuthModal();
+      return true;
+    }
+  };
+
+  const resendSignupOtp = (): { success: boolean; code?: string; error?: string; waitSeconds?: number } => {
+    if (!pendingAuthData?.email) {
+      notify('No pending registration found.', 'error');
+      return { success: false, error: 'No email found' };
+    }
+    const result = generateEmailOtp(pendingAuthData.email, 'signup');
+    if (!result.success) {
+      notify(result.error || 'Please wait before requesting a new code.', 'error');
+      return result;
+    }
+    notify(`[Email Verification] A new 4-digit code was sent to ${pendingAuthData.email}! (Code: ${result.code}). Valid for 10 mins.`, 'info');
+    return result;
   };
 
   const submitSellerRegistration = (sellerData: {
@@ -1044,10 +1070,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       id: newSellerId,
       name: pendingAuthData?.name || sellerData.shopName,
       email: pendingAuthData?.email || 'artisan@campus.ng',
-      phone: pendingAuthData?.phone || '+2348000000000',
       role: 'seller',
       isVerifiedEmail: true,
-      isVerifiedPhone: true,
       sellerProfile: newSeller,
       savedDeliveryArea: resolvedArea,
       location: sellerData.location,
@@ -1555,15 +1579,30 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     notify('Thank you for rating your campus artisan!', 'success');
   };
 
-  // Rule 4: Send an OTP before every withdrawal
-  const sendWithdrawalOtp = (amount: number): string => {
-    const phone = currentUser?.phone || '+2348000000000';
-    const code = Math.floor(1000 + Math.random() * 9000).toString();
-    const expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes
+  // Rule 4: Send an Email OTP before every withdrawal
+  const sendWithdrawalOtp = (amount: number): { success: boolean; code?: string; error?: string; waitSeconds?: number } | string => {
+    const email = currentUser?.email || 'artisan@campus.ng';
+    const result = generateEmailOtp(email, 'withdrawal', { amount });
+    if (!result.success) {
+      notify(result.error || 'Could not generate withdrawal OTP.', 'error');
+      return result;
+    }
 
-    setActiveWithdrawalOtp({ code, phone, expiresAt, amount });
-    notify(`[Paystack OTP SMS] Your withdrawal authorization code is ${code}. Transacting ₦${amount.toLocaleString()} to payout account. Valid for 10 mins.`, 'info');
-    return code;
+    const expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes
+    setActiveWithdrawalOtp({ code: result.code!, email, expiresAt, amount });
+    notify(`[Email Authorization] Your withdrawal authorization code is ${result.code}. Transacting ₦${amount.toLocaleString()} to payout account. Valid for 10 mins.`, 'info');
+    return result.code!;
+  };
+
+  const sendPayoutAccountOtp = (): { success: boolean; code?: string; error?: string; waitSeconds?: number } => {
+    const email = currentUser?.email || 'artisan@campus.ng';
+    const result = generateEmailOtp(email, 'payout_account');
+    if (!result.success) {
+      notify(result.error || 'Could not generate authorization code.', 'error');
+      return result;
+    }
+    notify(`[Email Security] Payout account authorization code sent to ${email}: ${result.code}. Valid for 10 mins.`, 'info');
+    return result;
   };
 
   // Rule 4 & Rule 5: Seller withdrawals go to Opay or a Nigerian bank through Paystack Transfers API
@@ -1594,13 +1633,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return false;
     }
 
-    // Rule 4: Send an OTP before every withdrawal
-    if (!activeWithdrawalOtp || activeWithdrawalOtp.code !== otpCode.trim()) {
-      notify('Invalid or expired withdrawal OTP. Please request a new code.', 'error');
-      return false;
-    }
-    if (Date.now() > activeWithdrawalOtp.expiresAt) {
-      notify('Withdrawal OTP has expired. Please request a new code.', 'error');
+    // Rule 4: Verify Email OTP with 10-minute expiry and max 3 wrong attempts
+    const email = currentUser?.email || 'artisan@campus.ng';
+    const otpVerification = verifyEmailOtp(email, 'withdrawal', otpCode);
+    if (!otpVerification.success) {
+      notify(otpVerification.error || 'Invalid or expired withdrawal OTP. Please request a new code.', 'error');
       return false;
     }
 
@@ -1665,12 +1702,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return true;
   };
 
-  // Rule 4: Add Payout Account (Opay or Nigerian bank)
+  // Rule 4: Add Payout Account (Opay or Nigerian bank with Email Authorization OTP)
   const addPayoutAccount = (
     bankCode: string,
     bankName: string,
     accountNumber: string,
-    accountName: string
+    accountName: string,
+    otpCode?: string
   ): boolean => {
     if (!currentSeller) return false;
 
@@ -1684,6 +1722,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (accountNumber.trim().length !== 10) {
       notify('Nigerian bank/Opay account numbers must be exactly 10 digits.', 'error');
       return false;
+    }
+
+    // Email OTP Authorization verification (if code supplied)
+    if (otpCode !== undefined) {
+      const email = currentUser?.email || 'artisan@campus.ng';
+      const otpVerify = verifyEmailOtp(email, 'payout_account', otpCode);
+      if (!otpVerify.success) {
+        notify(otpVerify.error || 'Invalid or expired authorization code. Please request a new code.', 'error');
+        return false;
+      }
     }
 
     // Rule 4: Account name must match verified ID name
@@ -1763,7 +1811,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setSecurityProfiles(prev => {
       const p = prev[currentUser.id] || prev['user_tobi_buyer'];
       const nextVal = !p.twoFactorEnabled;
-      notify(nextVal ? 'Two-Factor Authentication (2FA via SMS) enabled!' : 'Two-Factor Authentication disabled.', 'info');
+      notify(nextVal ? 'Two-Factor Authentication (2FA via Email) enabled!' : 'Two-Factor Authentication disabled.', 'info');
       return {
         ...prev,
         [currentUser.id]: {
@@ -3053,6 +3101,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         sendWithdrawalOtp,
         requestWithdrawal,
         addPayoutAccount,
+        sendPayoutAccountOtp,
+        resendSignupOtp,
         toggleWalletFreeze,
         processPaystackWebhook,
         securityProfile: currentSecurityProfile,

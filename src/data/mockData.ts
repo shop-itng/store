@@ -59,11 +59,9 @@ export const ROOT_MODERATOR_USER: User = {
   id: 'admin_adeyinka_joseph',
   name: 'Adeyinka Joseph',
   email: 'joeadeyinka12@gmail.com',
-  phone: '+2348000000000',
   role: 'admin',
   adminSubRole: 'moderator',
   isVerifiedEmail: true,
-  isVerifiedPhone: true,
   password: 'shopitislit',
   savedDeliveryArea: 'Yaba',
 };

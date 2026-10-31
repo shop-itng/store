@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
 import { UserRole } from '../types';
 import { ADMIN_CREDENTIALS } from '../data/mockData';
@@ -16,7 +16,16 @@ import {
   KeyRound,
   Mail,
   CheckCircle2,
+  AlertCircle,
+  RefreshCw,
 } from 'lucide-react';
+import {
+  generateEmailOtp,
+  verifyEmailOtp,
+  isKnownDevice,
+  recordKnownDevice,
+  getDeviceId,
+} from '../utils/emailOtpManager';
 
 export const AuthModal: React.FC = () => {
   const {
@@ -37,26 +46,33 @@ export const AuthModal: React.FC = () => {
   const [loginEmail, setLoginEmail] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
 
-  // Signup form state
+  // Signup form state (Email only - no phone number)
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
-  const [phone, setPhone] = useState('');
   const [password, setPassword] = useState('');
   const [role, setRole] = useState<UserRole>('buyer');
 
   // OTP state
-  const [otpCode, setOtpCode] = useState('1234');
+  const [otpCode, setOtpCode] = useState('');
+
+  // Cooldown countdown timers (60 seconds)
+  const [signupCooldown, setSignupCooldown] = useState(0);
+  const [resetCooldown, setResetCooldown] = useState(0);
+  const [newDeviceCooldown, setNewDeviceCooldown] = useState(0);
+
+  // New Device Verification State
+  const [pendingNewDeviceUser, setPendingNewDeviceUser] = useState<any>(null);
+  const [deviceOtpInput, setDeviceOtpInput] = useState('');
 
   // Forgot Password state
   const [forgotEmail, setForgotEmail] = useState('');
   const [forgotStep, setForgotStep] = useState<'email' | 'otp_and_reset'>('email');
-  const [forgotOtpSent, setForgotOtpSent] = useState('');
   const [forgotOtpInput, setForgotOtpInput] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [isSendingResetEmail, setIsSendingResetEmail] = useState(false);
 
-  // Seller registration specifics
+  // Seller registration specifics (youth seller)
   const [shopName, setShopName] = useState('');
   const [stateName, setStateName] = useState('Lagos');
   const [cityName, setCityName] = useState('Lagos Mainland');
@@ -64,42 +80,60 @@ export const AuthModal: React.FC = () => {
   const [bio, setBio] = useState('');
   const [under18, setUnder18] = useState(false);
   const [guardianName, setGuardianName] = useState('');
-  const [guardianPhone, setGuardianPhone] = useState('');
+
+  // Tick 1-second countdown for all active OTP resend cooldowns
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setSignupCooldown(prev => (prev > 0 ? prev - 1 : 0));
+      setResetCooldown(prev => (prev > 0 ? prev - 1 : 0));
+      setNewDeviceCooldown(prev => (prev > 0 ? prev - 1 : 0));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   if (!isAuthModalOpen) return null;
 
+  // 1. Password Reset Flow (Email OTP, 10-min expiry, 3 attempts, 60s cooldown)
   const handleSendResetOtp = (e: React.FormEvent) => {
     e.preventDefault();
     const cleanEmail = forgotEmail.trim().toLowerCase();
-    if (!cleanEmail) {
-      notify('Please enter your email address.', 'error');
+    if (!cleanEmail || !cleanEmail.includes('@') || !cleanEmail.includes('.')) {
+      notify('Please enter a valid email address.', 'error');
       return;
     }
 
     setIsSendingResetEmail(true);
+    const otpResult = generateEmailOtp(cleanEmail, 'password_reset');
+    setIsSendingResetEmail(false);
 
-    setTimeout(() => {
-      setIsSendingResetEmail(false);
-      // Generate real 4-digit numeric OTP
-      const code = Math.floor(1000 + Math.random() * 9000).toString();
-      setForgotOtpSent(code);
-      setForgotStep('otp_and_reset');
-      notify(`Verification code sent to ${cleanEmail}! (Your reset OTP: ${code})`, 'success');
-    }, 400);
+    if (!otpResult.success) {
+      notify(otpResult.error || 'Failed to dispatch reset code.', 'error');
+      return;
+    }
+
+    setForgotStep('otp_and_reset');
+    setResetCooldown(60);
+    notify(`[Password Reset] 4-digit code sent to ${cleanEmail}! (Code: ${otpResult.code}). Valid for 10 mins.`, 'success');
   };
 
   const handleResendResetOtp = () => {
-    const code = Math.floor(1000 + Math.random() * 9000).toString();
-    setForgotOtpSent(code);
-    notify(`New reset code sent to ${forgotEmail}! (Your OTP: ${code})`, 'info');
+    const cleanEmail = forgotEmail.trim().toLowerCase();
+    const otpResult = generateEmailOtp(cleanEmail, 'password_reset');
+    if (!otpResult.success) {
+      notify(otpResult.error || 'Please wait before requesting a new code.', 'error');
+      return;
+    }
+    setResetCooldown(60);
+    notify(`[Password Reset] New code sent to ${cleanEmail}! (Code: ${otpResult.code}). Valid for 10 mins.`, 'info');
   };
 
   const handleResetPasswordSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const cleanEmail = forgotEmail.trim().toLowerCase();
 
-    if (forgotOtpInput.trim() !== forgotOtpSent) {
-      notify('Invalid 4-digit reset code. Please check your email or request a new code.', 'error');
+    const verifyResult = verifyEmailOtp(cleanEmail, 'password_reset', forgotOtpInput);
+    if (!verifyResult.success) {
+      notify(verifyResult.error || 'Invalid or expired reset code. Please request a new code.', 'error');
       return;
     }
 
@@ -125,9 +159,9 @@ export const AuthModal: React.FC = () => {
         id: `user_${Date.now()}`,
         name: cleanEmail.split('@')[0],
         email: cleanEmail,
-        phone: '+2348000000000',
         password: newPassword,
         role: 'buyer',
+        isVerifiedEmail: true,
       });
     }
 
@@ -140,59 +174,115 @@ export const AuthModal: React.FC = () => {
     setAuthTab('login');
   };
 
+  // 2. Login Flow (Email & Password + New Device Challenge)
   const handleLoginFormSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const cleanEmail = loginEmail.trim().toLowerCase();
     const cleanPass = loginPassword.trim();
+    const currentDeviceId = getDeviceId();
+
+    let matchedUser: any = null;
 
     // Check if logging in as Admin Moderator (Adeyinka Joseph)
     if (
       cleanEmail === ADMIN_CREDENTIALS.email.toLowerCase() &&
       cleanPass === ADMIN_CREDENTIALS.password
     ) {
-      localStorage.setItem('shopit_admin_session_active', 'true');
-      login({
+      matchedUser = {
         id: 'admin_adeyinka_joseph',
         name: ADMIN_CREDENTIALS.name,
         email: ADMIN_CREDENTIALS.email,
-        phone: '+2348000000000',
         role: 'admin',
         adminSubRole: 'moderator',
         isVerifiedEmail: true,
-        isVerifiedPhone: true,
-      });
-      closeAuthModal();
-      notify(`Welcome back, ${ADMIN_CREDENTIALS.name}! (Moderator access active)`, 'success');
-      return;
-    }
-
-    // Check localStorage registered users
-    localStorage.removeItem('shopit_admin_session_active');
-    const registeredUsersStr = localStorage.getItem('shopit_registered_users');
-    const registeredUsers: any[] = registeredUsersStr ? JSON.parse(registeredUsersStr) : [];
-    const foundUser = registeredUsers.find(
-      u => u.email.toLowerCase() === cleanEmail && u.password === cleanPass
-    );
-
-    if (foundUser) {
-      if (foundUser.role === 'admin' || foundUser.email?.toLowerCase() === ADMIN_CREDENTIALS.email.toLowerCase()) {
-        localStorage.setItem('shopit_admin_session_active', 'true');
+      };
+    } else {
+      // Check localStorage registered users
+      const registeredUsersStr = localStorage.getItem('shopit_registered_users');
+      const registeredUsers: any[] = registeredUsersStr ? JSON.parse(registeredUsersStr) : [];
+      const foundUser = registeredUsers.find(
+        u => u.email.toLowerCase() === cleanEmail && u.password === cleanPass
+      );
+      if (foundUser) {
+        matchedUser = foundUser;
       }
-      login(foundUser);
-      closeAuthModal();
-      notify(`Welcome back, ${foundUser.name}!`, 'success');
+    }
+
+    if (!matchedUser) {
+      notify('Invalid login credentials. Please check your email and password.', 'error');
       return;
     }
 
-    // If no match found
-    notify('Invalid login credentials. Please check your email and password.', 'error');
+    // New Device Security Check (Rule 3)
+    const isDeviceKnown = isKnownDevice(cleanEmail, currentDeviceId);
+    if (!isDeviceKnown) {
+      const otpResult = generateEmailOtp(cleanEmail, 'new_device_login');
+      if (!otpResult.success) {
+        notify(otpResult.error || 'Could not dispatch device verification code.', 'error');
+        return;
+      }
+
+      setPendingNewDeviceUser(matchedUser);
+      setNewDeviceCooldown(60);
+      setDeviceOtpInput(otpResult.code!);
+      setAuthTab('new_device_otp' as any);
+      notify(`[Security Alert] New device detected! Authorization code sent to ${cleanEmail}. (Code: ${otpResult.code}). Valid for 10 mins.`, 'info');
+      return;
+    }
+
+    // Known device - complete login
+    if (matchedUser.role === 'admin' || matchedUser.email?.toLowerCase() === ADMIN_CREDENTIALS.email.toLowerCase()) {
+      localStorage.setItem('shopit_admin_session_active', 'true');
+    } else {
+      localStorage.removeItem('shopit_admin_session_active');
+    }
+    login(matchedUser);
+    closeAuthModal();
+    notify(`Welcome back, ${matchedUser.name}!`, 'success');
   };
 
+  const handleNewDeviceOtpSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!pendingNewDeviceUser) return;
+    const cleanEmail = pendingNewDeviceUser.email.toLowerCase();
+    const result = verifyEmailOtp(cleanEmail, 'new_device_login', deviceOtpInput);
+    if (!result.success) {
+      notify(result.error || 'Invalid or expired authorization code. Please request a new code.', 'error');
+      return;
+    }
+
+    recordKnownDevice(cleanEmail, getDeviceId());
+    if (pendingNewDeviceUser.role === 'admin' || pendingNewDeviceUser.email?.toLowerCase() === ADMIN_CREDENTIALS.email.toLowerCase()) {
+      localStorage.setItem('shopit_admin_session_active', 'true');
+    } else {
+      localStorage.removeItem('shopit_admin_session_active');
+    }
+    login(pendingNewDeviceUser);
+    closeAuthModal();
+    setPendingNewDeviceUser(null);
+    notify(`New device authorized! Welcome back, ${pendingNewDeviceUser.name}.`, 'success');
+  };
+
+  const handleResendNewDeviceOtp = () => {
+    if (!pendingNewDeviceUser) return;
+    const cleanEmail = pendingNewDeviceUser.email.toLowerCase();
+    const otpResult = generateEmailOtp(cleanEmail, 'new_device_login');
+    if (!otpResult.success) {
+      notify(otpResult.error || 'Please wait before requesting a new code.', 'error');
+      return;
+    }
+    setNewDeviceCooldown(60);
+    setDeviceOtpInput(otpResult.code!);
+    notify(`[Security Alert] New code sent to ${cleanEmail}: ${otpResult.code}. Valid for 10 mins.`, 'info');
+  };
+
+  // 3. Initial Signup Flow (Email only - no phone number required)
   const handleInitialSignup = (e: React.FormEvent) => {
     e.preventDefault();
+    const cleanEmail = email.trim().toLowerCase();
 
-    if (!phone.startsWith('+234') && !phone.startsWith('0')) {
-      notify('Please enter a valid Nigerian phone number (e.g., 08123456789 or +234...)', 'error');
+    if (!cleanEmail || !cleanEmail.includes('@') || !cleanEmail.includes('.')) {
+      notify('Please enter a valid email address.', 'error');
       return;
     }
 
@@ -201,17 +291,36 @@ export const AuthModal: React.FC = () => {
       return;
     }
 
+    const otpResult = generateEmailOtp(cleanEmail, 'signup');
+    if (!otpResult.success) {
+      notify(otpResult.error || 'Could not send verification code.', 'error');
+      return;
+    }
+
     const authData = {
       id: `user_${Date.now()}`,
       name: name.trim(),
-      email: email.trim().toLowerCase(),
-      phone: phone.trim(),
+      email: cleanEmail,
       password,
       role,
     };
     setPendingAuthData(authData);
+    setSignupCooldown(60);
+    setOtpCode(otpResult.code!);
     setAuthTab('otp');
-    notify(`SMS verification OTP sent to ${phone}`, 'info');
+    notify(`[Email Verification] A 4-digit code was sent to ${cleanEmail}! (Code: ${otpResult.code}). Valid for 10 mins.`, 'info');
+  };
+
+  const handleResendSignupCode = () => {
+    if (!pendingAuthData?.email) return;
+    const otpResult = generateEmailOtp(pendingAuthData.email, 'signup');
+    if (!otpResult.success) {
+      notify(otpResult.error || 'Please wait before requesting a new code.', 'error');
+      return;
+    }
+    setSignupCooldown(60);
+    setOtpCode(otpResult.code!);
+    notify(`[Email Verification] A new 4-digit code was sent to ${pendingAuthData.email}! (Code: ${otpResult.code}). Valid for 10 mins.`, 'info');
   };
 
   const handleOtpSubmit = (e: React.FormEvent) => {
@@ -219,6 +328,7 @@ export const AuthModal: React.FC = () => {
     verifyOtp(otpCode);
   };
 
+  // Location Selector
   const activeStateObj = NIGERIAN_STATES.find(s => s.state === stateName) || NIGERIAN_STATES[0];
   const activeCityObj = activeStateObj.cities.find(c => c.city === cityName) || activeStateObj.cities[0];
 
@@ -236,10 +346,11 @@ export const AuthModal: React.FC = () => {
     setAreaName(foundCity?.areas[0] || '');
   };
 
+  // 4. Seller Registration Step (Under-18 Guardian Name, no phone number field)
   const handleSellerFormSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (under18 && (!guardianName || !guardianPhone)) {
-      notify('Youth sellers under 18 require a verified guardian name and phone number for payouts.', 'error');
+    if (under18 && !guardianName.trim()) {
+      notify('Youth sellers under 18 require a verified guardian name for payouts.', 'error');
       return;
     }
 
@@ -253,260 +364,297 @@ export const AuthModal: React.FC = () => {
       locationArea: areaName,
       bio,
       under18,
-      guardianName: under18 ? guardianName : undefined,
-      guardianPhone: under18 ? guardianPhone : undefined,
+      guardianName: under18 ? guardianName.trim() : undefined,
     });
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto animate-backdrop">
-      <div className="bg-white dark:bg-[#15161C] rounded-3xl max-w-md w-full p-6 sm:p-8 space-y-6 shadow-2xl relative border border-neutral-200 dark:border-[#27272A] animate-modal-enter">
+    <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
+      <div className="bg-white rounded-3xl max-w-md w-full p-6 sm:p-8 space-y-6 shadow-2xl relative my-8 border-2 border-[#111111]">
         {/* Close Button */}
         <button
           onClick={closeAuthModal}
-          className="absolute top-5 right-5 text-slate-400 hover:text-slate-700 dark:hover:text-white min-h-[38px] min-w-[38px] flex items-center justify-center rounded-full hover:bg-slate-100 dark:hover:bg-[#1E2028] transition-colors"
+          className="absolute right-5 top-5 text-slate-400 hover:text-slate-700 p-1"
+          aria-label="Close authentication modal"
         >
           <X className="w-5 h-5" />
         </button>
 
-        {/* Header Tabs */}
-        {authTab !== 'otp' && authTab !== 'seller_register' && authTab !== 'forgot_password' && (
-          <div className="flex border-b border-[#E4E4E7] dark:border-[#27272A] pb-2">
+        {/* Tab Header: Sign In vs Sign Up */}
+        {authTab !== 'seller_register' && authTab !== 'otp' && (authTab as any) !== 'new_device_otp' && (
+          <div className="flex border-b border-slate-100 pb-3 gap-6">
             <button
+              type="button"
               onClick={() => setAuthTab('login')}
-              className={`flex-1 text-center py-2 text-sm font-bold border-b-2 transition-all ${
-                authTab === 'login'
-                  ? 'border-[#FF6B00] text-[#111111] dark:text-white'
-                  : 'border-transparent text-[#71717A] dark:text-[#A1A1AA] hover:text-[#111111] dark:hover:text-white'
+              className={`text-sm sm:text-base font-bold pb-1 transition-colors relative ${
+                authTab === 'login' || authTab === 'forgot_password'
+                  ? 'text-[#111111] font-black'
+                  : 'text-slate-400 hover:text-slate-600'
               }`}
             >
               Sign In
+              {(authTab === 'login' || authTab === 'forgot_password') && (
+                <span className="absolute bottom-[-13px] left-0 w-full h-0.5 bg-[#FF6B00]" />
+              )}
             </button>
             <button
+              type="button"
               onClick={() => setAuthTab('signup')}
-              className={`flex-1 text-center py-2 text-sm font-bold border-b-2 transition-all ${
+              className={`text-sm sm:text-base font-bold pb-1 transition-colors relative ${
                 authTab === 'signup'
-                  ? 'border-[#FF6B00] text-[#111111] dark:text-white'
-                  : 'border-transparent text-[#71717A] dark:text-[#A1A1AA] hover:text-[#111111] dark:hover:text-white'
+                  ? 'text-[#111111] font-black'
+                  : 'text-slate-400 hover:text-slate-600'
               }`}
             >
               Create Account
+              {authTab === 'signup' && (
+                <span className="absolute bottom-[-13px] left-0 w-full h-0.5 bg-[#FF6B00]" />
+              )}
             </button>
           </div>
         )}
 
-        {/* Tab 1: SIGN IN (Real authentication - moderator and customer accounts) */}
+        {/* Tab 1: SIGN IN (Email & Password) */}
         {authTab === 'login' && (
-          <div className="space-y-4">
+          <form onSubmit={handleLoginFormSubmit} className="space-y-4">
             <div>
-              <h2 className="text-xl font-black text-[#111111] dark:text-white">Sign In to Shop It</h2>
-              <p className="text-xs text-[#71717A] dark:text-[#A1A1AA] mt-1">
-                Enter your email and password to access your account.
+              <h2 className="text-xl font-black text-[#111111]">Welcome Back</h2>
+              <p className="text-xs text-[#71717A] mt-1">
+                Enter your email address and password to sign in.
               </p>
             </div>
 
-            <form onSubmit={handleLoginFormSubmit} className="space-y-3.5">
-              <div>
-                <label className="text-xs font-semibold text-slate-700 dark:text-slate-300 block mb-1">
-                  Email Address
-                </label>
-                <input
-                  type="email"
-                  required
-                  placeholder="e.g. yourname@gmail.com"
-                  value={loginEmail}
-                  onChange={e => setLoginEmail(e.target.value)}
-                  className="w-full h-11 px-3.5 rounded-xl border border-slate-200 dark:border-[#27272A] bg-white dark:bg-[#1E2028] text-xs sm:text-sm text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-[#FF6B00]"
-                />
-              </div>
+            <div>
+              <label className="text-xs font-semibold text-slate-700 block mb-1">Email Address</label>
+              <input
+                type="email"
+                required
+                value={loginEmail}
+                onChange={e => setLoginEmail(e.target.value)}
+                placeholder="name@gmail.com"
+                className="w-full h-11 px-3.5 rounded-xl border border-slate-200 text-xs sm:text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#FF6B00]"
+              />
+            </div>
 
-              <div>
-                <div className="flex items-center justify-between mb-1">
-                  <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">
-                    Password
-                  </label>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setForgotEmail(loginEmail);
-                      setForgotStep('email');
-                      setAuthTab('forgot_password');
-                    }}
-                    className="text-xs font-bold text-[#FF6B00] hover:underline"
-                  >
-                    Forgot Password?
-                  </button>
-                </div>
-                <input
-                  type="password"
-                  required
-                  placeholder="••••••••"
-                  value={loginPassword}
-                  onChange={e => setLoginPassword(e.target.value)}
-                  className="w-full h-11 px-3.5 rounded-xl border border-slate-200 dark:border-[#27272A] bg-white dark:bg-[#1E2028] text-xs sm:text-sm text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-[#FF6B00]"
-                />
-              </div>
-
-              <button
-                type="submit"
-                className="w-full h-12 bg-[#111111] hover:bg-[#18181B] text-[#9FE870] border-2 border-[#FF6B00] font-black rounded-xl text-xs sm:text-sm transition-all shadow-[0_3px_0_#111111] flex items-center justify-center gap-2 active:translate-y-0.5"
-              >
-                <Lock className="w-4 h-4 text-[#FF6B00]" />
-                <span>Sign In Securely</span>
-              </button>
-            </form>
-
-            <div className="pt-3 border-t border-slate-100 dark:border-[#27272A] text-center">
-              <p className="text-xs text-[#71717A] dark:text-[#A1A1AA]">
-                Don't have an account?{' '}
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-xs font-semibold text-slate-700">Password</label>
                 <button
                   type="button"
-                  onClick={() => setAuthTab('signup')}
-                  className="text-[#FF6B00] font-bold hover:underline"
+                  onClick={() => {
+                    setForgotEmail(loginEmail);
+                    setForgotStep('email');
+                    setAuthTab('forgot_password');
+                  }}
+                  className="text-[11px] font-semibold text-[#FF6B00] hover:underline"
                 >
-                  Create one now
+                  Forgot password?
                 </button>
-              </p>
+              </div>
+              <input
+                type="password"
+                required
+                value={loginPassword}
+                onChange={e => setLoginPassword(e.target.value)}
+                placeholder="••••••••"
+                className="w-full h-11 px-3.5 rounded-xl border border-slate-200 text-xs sm:text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#FF6B00]"
+              />
             </div>
-          </div>
-        )}
 
-        {/* Tab 1.5: FORGOT PASSWORD & OTP RESET */}
-        {authTab === 'forgot_password' && (
-          <div className="space-y-4">
-            <div className="flex items-center gap-2">
+            <button
+              type="submit"
+              className="w-full h-12 bg-[#FF6B00] hover:bg-[#FF7A1A] text-[#111111] border-2 border-[#111111] font-black rounded-xl text-xs sm:text-sm transition-all flex items-center justify-center gap-2 shadow-[0_3px_0_#111111] active:translate-y-0.5"
+            >
+              <span>Sign In</span>
+              <ArrowRight className="w-4 h-4" />
+            </button>
+
+            <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 text-xs text-slate-600 flex items-center justify-between">
+              <span className="font-semibold text-slate-700">Test Moderator:</span>
               <button
                 type="button"
                 onClick={() => {
-                  setForgotStep('email');
-                  setAuthTab('login');
+                  setLoginEmail(ADMIN_CREDENTIALS.email);
+                  setLoginPassword(ADMIN_CREDENTIALS.password);
                 }}
-                className="p-1.5 text-slate-500 hover:text-slate-900 rounded-lg hover:bg-slate-100 transition-colors"
-                title="Back to Sign In"
+                className="text-[11px] font-black text-[#FF6B00] bg-orange-50 px-2.5 py-1 rounded-lg border border-orange-200 hover:bg-orange-100"
               >
-                <ArrowLeft className="w-5 h-5" />
+                Autofill Credentials
               </button>
-              <div>
-                <h2 className="text-xl font-black text-[#111111]">
-                  {forgotStep === 'email' ? 'Forgot Password' : 'Reset Your Password'}
-                </h2>
-                <p className="text-xs text-[#71717A] mt-0.5">
-                  {forgotStep === 'email'
-                    ? 'Enter your registered email to receive a 4-digit verification code.'
-                    : `Verification code dispatched to ${forgotEmail}. Enter it below.`}
-                </p>
+            </div>
+          </form>
+        )}
+
+        {/* Tab 1b: NEW DEVICE LOGIN OTP CHALLENGE (Rule 3) */}
+        {(authTab as any) === 'new_device_otp' && (
+          <form onSubmit={handleNewDeviceOtpSubmit} className="space-y-4">
+            <div className="text-center space-y-1">
+              <div className="w-12 h-12 rounded-full bg-amber-50 text-amber-600 border-2 border-[#111111] flex items-center justify-center mx-auto shadow-xs">
+                <Lock className="w-6 h-6 text-amber-600" />
               </div>
+              <h2 className="text-xl font-black text-slate-900">New Device Verification</h2>
+              <p className="text-xs text-slate-500">
+                A 4-digit authorization code was sent to <strong className="text-slate-800">{pendingNewDeviceUser?.email}</strong>
+              </p>
+            </div>
+
+            <div className="py-2">
+              <input
+                type="text"
+                maxLength={4}
+                autoFocus
+                required
+                value={deviceOtpInput}
+                onChange={e => setDeviceOtpInput(e.target.value)}
+                placeholder="••••"
+                className="w-36 h-12 mx-auto tracking-widest text-center text-2xl font-black rounded-xl border-2 border-[#111111] text-slate-900 block focus:outline-none focus:ring-2 focus:ring-[#FF6B00] font-mono-numbers"
+              />
+              <span className="text-[11px] text-slate-500 text-center block mt-2">
+                ⏱ Code expires in 10 minutes · 3 attempts allowed
+              </span>
+            </div>
+
+            <button
+              type="submit"
+              className="w-full h-12 bg-[#9FE870] hover:bg-[#AEF083] text-[#111111] border-2 border-[#111111] font-black rounded-xl text-xs sm:text-sm transition-all shadow-[0_3px_0_#111111] active:translate-y-0.5"
+            >
+              Authorize &amp; Sign In
+            </button>
+
+            <div className="flex items-center justify-between text-xs pt-1">
+              <button
+                type="button"
+                onClick={() => setAuthTab('login')}
+                className="text-slate-500 hover:text-slate-800 underline"
+              >
+                Back to Login
+              </button>
+              <button
+                type="button"
+                disabled={newDeviceCooldown > 0}
+                onClick={handleResendNewDeviceOtp}
+                className={`font-bold ${
+                  newDeviceCooldown > 0 ? 'text-slate-400 cursor-not-allowed' : 'text-[#FF6B00] hover:underline'
+                }`}
+              >
+                {newDeviceCooldown > 0 ? `Resend code in ${newDeviceCooldown}s` : 'Resend Email Code'}
+              </button>
+            </div>
+          </form>
+        )}
+
+        {/* Tab 1c: FORGOT PASSWORD FLOW (Email OTP Only) */}
+        {authTab === 'forgot_password' && (
+          <div className="space-y-4">
+            <div>
+              <button
+                type="button"
+                onClick={() => setAuthTab('login')}
+                className="inline-flex items-center gap-1 text-xs text-slate-500 hover:text-slate-800 mb-2 font-medium"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" />
+                <span>Back to sign in</span>
+              </button>
+              <h2 className="text-xl font-black text-[#111111]">Reset Password</h2>
+              <p className="text-xs text-[#71717A] mt-1">
+                {forgotStep === 'email'
+                  ? 'Enter your registered email address to receive a 4-digit reset code.'
+                  : `Enter the code sent to ${forgotEmail} and choose a new password.`}
+              </p>
             </div>
 
             {forgotStep === 'email' ? (
               <form onSubmit={handleSendResetOtp} className="space-y-4">
                 <div>
-                  <label className="text-xs font-semibold text-slate-700 block mb-1">
-                    Your Registered Email
-                  </label>
-                  <div className="relative">
-                    <Mail className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-                    <input
-                      type="email"
-                      required
-                      placeholder="e.g. yourname@gmail.com"
-                      value={forgotEmail}
-                      onChange={e => setForgotEmail(e.target.value)}
-                      className="w-full h-11 pl-10 pr-3.5 rounded-xl border border-slate-200 text-xs sm:text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#FF6B00]"
-                    />
-                  </div>
+                  <label className="text-xs font-semibold text-slate-700 block mb-1">Email Address</label>
+                  <input
+                    type="email"
+                    required
+                    value={forgotEmail}
+                    onChange={e => setForgotEmail(e.target.value)}
+                    placeholder="name@gmail.com"
+                    className="w-full h-11 px-3.5 rounded-xl border border-slate-200 text-xs sm:text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#FF6B00]"
+                  />
                 </div>
 
                 <button
                   type="submit"
                   disabled={isSendingResetEmail}
-                  className="w-full h-12 bg-[#FF6B00] hover:bg-[#FF7A1A] text-[#111111] border-2 border-[#111111] font-black rounded-xl text-xs sm:text-sm transition-all shadow-[0_3px_0_#111111] flex items-center justify-center gap-2 active:translate-y-0.5 disabled:opacity-50"
+                  className="w-full h-12 bg-[#FF6B00] hover:bg-[#FF7A1A] text-[#111111] border-2 border-[#111111] font-black rounded-xl text-xs sm:text-sm transition-all flex items-center justify-center gap-2 shadow-[0_3px_0_#111111] active:translate-y-0.5 disabled:opacity-70"
                 >
                   <Mail className="w-4 h-4 text-[#111111]" />
-                  <span>{isSendingResetEmail ? 'Sending Reset Code...' : 'Send Reset Code'}</span>
+                  <span>{isSendingResetEmail ? 'Sending Code...' : 'Send Reset Code to Email'}</span>
                 </button>
-
-                <div className="text-center pt-2">
-                  <button
-                    type="button"
-                    onClick={() => setAuthTab('login')}
-                    className="text-xs font-bold text-slate-600 hover:text-slate-900"
-                  >
-                    Remember your password? Sign In
-                  </button>
-                </div>
               </form>
             ) : (
               <form onSubmit={handleResetPasswordSubmit} className="space-y-3.5">
-                {/* OTP Input */}
                 <div>
-                  <label className="text-xs font-semibold text-slate-700 block mb-1">
-                    4-Digit Verification Code (OTP) *
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    maxLength={4}
-                    value={forgotOtpInput}
-                    onChange={e => setForgotOtpInput(e.target.value.replace(/\D/g, ''))}
-                    placeholder="e.g. 4921"
-                    className="w-full h-12 text-center text-xl font-bold tracking-widest rounded-xl border-2 border-[#111111] text-slate-900 font-mono focus:outline-none focus:ring-2 focus:ring-[#FF6B00]"
-                  />
-                  <div className="flex items-center justify-between mt-1 text-[11px] text-slate-500">
-                    <span>Check your email inbox/notifications</span>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-xs font-semibold text-slate-700">4-Digit Email Code *</label>
                     <button
                       type="button"
+                      disabled={resetCooldown > 0}
                       onClick={handleResendResetOtp}
-                      className="text-[#FF6B00] font-bold hover:underline"
+                      className={`text-[11px] font-bold ${
+                        resetCooldown > 0 ? 'text-slate-400' : 'text-[#FF6B00] hover:underline'
+                      }`}
                     >
-                      Resend Code
+                      {resetCooldown > 0 ? `Resend in ${resetCooldown}s` : 'Resend Code'}
                     </button>
                   </div>
+                  <input
+                    type="text"
+                    maxLength={4}
+                    required
+                    value={forgotOtpInput}
+                    onChange={e => setForgotOtpInput(e.target.value)}
+                    placeholder="••••"
+                    className="w-full h-11 px-3.5 tracking-widest text-center text-lg font-black font-mono-numbers rounded-xl border border-slate-200 text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#FF6B00]"
+                  />
+                  <span className="text-[10px] text-slate-500 block mt-1">
+                    ⏱ Valid for 10 minutes · 3 wrong attempts max
+                  </span>
                 </div>
 
-                {/* New Password */}
                 <div>
-                  <label className="text-xs font-semibold text-slate-700 block mb-1">
-                    New Password (at least 6 characters) *
-                  </label>
+                  <label className="text-xs font-semibold text-slate-700 block mb-1">New Password (Min 6 chars)</label>
                   <input
                     type="password"
                     required
+                    minLength={6}
                     value={newPassword}
                     onChange={e => setNewPassword(e.target.value)}
-                    placeholder="••••••••"
+                    placeholder="At least 6 characters"
                     className="w-full h-11 px-3.5 rounded-xl border border-slate-200 text-xs sm:text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#FF6B00]"
                   />
                 </div>
 
-                {/* Confirm New Password */}
                 <div>
-                  <label className="text-xs font-semibold text-slate-700 block mb-1">
-                    Confirm New Password *
-                  </label>
+                  <label className="text-xs font-semibold text-slate-700 block mb-1">Confirm New Password</label>
                   <input
                     type="password"
                     required
+                    minLength={6}
                     value={confirmPassword}
                     onChange={e => setConfirmPassword(e.target.value)}
-                    placeholder="••••••••"
+                    placeholder="Repeat new password"
                     className="w-full h-11 px-3.5 rounded-xl border border-slate-200 text-xs sm:text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#FF6B00]"
                   />
                 </div>
 
                 <button
                   type="submit"
-                  className="w-full h-12 bg-[#9FE870] hover:bg-[#AEF083] text-[#111111] border-2 border-[#111111] font-black rounded-xl text-xs sm:text-sm transition-all shadow-[0_3px_0_#111111] flex items-center justify-center gap-2 active:translate-y-0.5"
+                  className="w-full h-12 bg-[#9FE870] hover:bg-[#AEF083] text-[#111111] border-2 border-[#111111] font-black rounded-xl text-xs sm:text-sm transition-all flex items-center justify-center gap-2 shadow-[0_3px_0_#111111] active:translate-y-0.5"
                 >
                   <CheckCircle2 className="w-4 h-4 text-[#111111]" />
-                  <span>Update Password & Sign In</span>
+                  <span>Update Password &amp; Sign In</span>
                 </button>
               </form>
             )}
           </div>
         )}
 
-        {/* Tab 2: SIGN UP (For new buyers and sellers) */}
+        {/* Tab 2: SIGN UP (Email only - no phone number field) */}
         {authTab === 'signup' && (
           <form onSubmit={handleInitialSignup} className="space-y-4">
             <div>
@@ -584,25 +732,6 @@ export const AuthModal: React.FC = () => {
 
             <div>
               <label className="text-xs font-semibold text-slate-700 block mb-1">
-                Nigerian Phone Number (+234)
-              </label>
-              <div className="relative">
-                <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-xs font-bold text-slate-500">
-                  🇳🇬
-                </span>
-                <input
-                  type="tel"
-                  required
-                  value={phone}
-                  onChange={e => setPhone(e.target.value)}
-                  placeholder="080 1234 5678"
-                  className="w-full h-11 pl-10 pr-3.5 rounded-xl border border-slate-200 text-xs sm:text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#FF6B00] font-mono-numbers"
-                />
-              </div>
-            </div>
-
-            <div>
-              <label className="text-xs font-semibold text-slate-700 block mb-1">
                 Create Password
               </label>
               <input
@@ -622,21 +751,21 @@ export const AuthModal: React.FC = () => {
               <span className="w-5 h-5 rounded-full bg-[#9FE870] text-[#111111] flex items-center justify-center font-black">
                 →
               </span>
-              <span>Continue with Phone OTP</span>
+              <span>Continue with Email OTP</span>
             </button>
           </form>
         )}
 
-        {/* Tab 3: OTP VERIFICATION */}
+        {/* Tab 3: EMAIL OTP VERIFICATION (Rule 2 & 3) */}
         {authTab === 'otp' && (
           <form onSubmit={handleOtpSubmit} className="space-y-4">
             <div className="text-center space-y-1">
               <div className="w-12 h-12 rounded-full bg-[#F0FDF4] text-[#16A34A] border-2 border-[#111111] flex items-center justify-center mx-auto shadow-xs">
-                <ShieldCheck className="w-6 h-6 text-[#16A34A]" />
+                <Mail className="w-6 h-6 text-[#16A34A]" />
               </div>
-              <h2 className="text-xl font-black text-slate-900">Verify Phone Number</h2>
+              <h2 className="text-xl font-black text-slate-900">Verify Your Email Address</h2>
               <p className="text-xs text-slate-500">
-                Enter the 4-digit code sent to <strong className="text-slate-800">{pendingAuthData?.phone || phone}</strong>
+                Enter the 4-digit code sent to your inbox at <strong className="text-slate-800">{pendingAuthData?.email || email}</strong>
               </p>
             </div>
 
@@ -648,11 +777,11 @@ export const AuthModal: React.FC = () => {
                 required
                 value={otpCode}
                 onChange={e => setOtpCode(e.target.value)}
-                placeholder="1234"
+                placeholder="••••"
                 className="w-36 h-12 mx-auto tracking-widest text-center text-2xl font-black rounded-xl border-2 border-[#111111] text-slate-900 block focus:outline-none focus:ring-2 focus:ring-[#FF6B00] font-mono-numbers"
               />
-              <span className="text-[11px] text-slate-400 text-center block mt-2">
-                Verification code is <strong>1234</strong>
+              <span className="text-[11px] text-slate-500 text-center block mt-2">
+                ⏱ Code expires in 10 minutes · 3 attempts allowed
               </span>
             </div>
 
@@ -660,16 +789,26 @@ export const AuthModal: React.FC = () => {
               type="submit"
               className="w-full h-12 bg-[#9FE870] hover:bg-[#AEF083] text-[#111111] border-2 border-[#111111] font-black rounded-xl text-xs sm:text-sm transition-all shadow-[0_3px_0_#111111] active:translate-y-0.5"
             >
-              Verify & Complete Registration
+              Verify &amp; Complete Registration
             </button>
 
-            <div className="text-center">
+            <div className="flex items-center justify-between text-xs pt-1">
               <button
                 type="button"
                 onClick={() => setAuthTab('signup')}
-                className="text-xs text-slate-500 hover:text-slate-800 underline"
+                className="text-slate-500 hover:text-slate-800 underline"
               >
-                Change Phone Number
+                Change Email Address
+              </button>
+              <button
+                type="button"
+                disabled={signupCooldown > 0}
+                onClick={handleResendSignupCode}
+                className={`font-bold ${
+                  signupCooldown > 0 ? 'text-slate-400 cursor-not-allowed' : 'text-[#FF6B00] hover:underline'
+                }`}
+              >
+                {signupCooldown > 0 ? `Resend in ${signupCooldown}s` : 'Resend Email Code'}
               </button>
             </div>
           </form>
@@ -679,142 +818,123 @@ export const AuthModal: React.FC = () => {
         {authTab === 'seller_register' && (
           <form onSubmit={handleSellerFormSubmit} className="space-y-4 max-h-[75vh] overflow-y-auto pr-1">
             <div>
-              <div className="flex items-center gap-1.5 text-[#FF6B00] text-xs font-black uppercase tracking-wider">
-                <Sparkles className="w-3.5 h-3.5" />
-                <span>Youth Seller Onboarding</span>
+              <div className="flex items-center gap-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-[#FF6B00]" />
+                <h2 className="text-xl font-black text-[#111111]">Artisan Shop Setup</h2>
               </div>
-              <h2 className="text-xl font-black text-[#111111]">Set Up Your Shop</h2>
               <p className="text-xs text-[#71717A] mt-1">
-                Handmade marketplace for Nigerian teens and youth.
+                Tell buyers about your handmade crafts, beads, or fashion brand.
               </p>
             </div>
 
             <div>
-              <label className="text-xs font-semibold text-[#111111] block mb-1">
-                Shop Brand Name *
+              <label className="text-xs font-semibold text-slate-700 block mb-1">
+                Shop / Brand Name *
               </label>
               <input
                 type="text"
                 required
                 value={shopName}
                 onChange={e => setShopName(e.target.value)}
-                placeholder="e.g. Sparkle Crafts & Beads"
-                className="w-full h-10 px-3 rounded-xl border border-[#E4E4E7] text-xs sm:text-sm text-[#111111] focus:outline-none focus:ring-2 focus:ring-[#FF6B00]"
+                placeholder="e.g. Beads By Tiwa"
+                className="w-full h-11 px-3.5 rounded-xl border border-slate-200 text-xs sm:text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#FF6B00]"
               />
             </div>
 
-            {/* Location Selector: State > City > Area (All 36 States + FCT) */}
-            <div className="space-y-2">
-              <label className="text-xs font-bold text-[#111111] block flex items-center gap-1">
-                <MapPin className="w-3.5 h-3.5 text-[#FF6B00]" />
-                <span>Your Location (State &gt; City &gt; Area) *</span>
-              </label>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                <div>
-                  <label className="text-[11px] text-[#71717A] block mb-0.5">State</label>
-                  <select
-                    value={stateName}
-                    onChange={e => handleStateChange(e.target.value)}
-                    className="w-full h-9 px-2 rounded-xl border border-[#E4E4E7] text-xs bg-white text-[#111111] font-medium"
-                  >
-                    {NIGERIAN_STATES.map(s => (
-                      <option key={s.state} value={s.state}>
-                        {s.state}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="text-[11px] text-[#71717A] block mb-0.5">City</label>
-                  <select
-                    value={cityName}
-                    onChange={e => handleCityChange(e.target.value)}
-                    className="w-full h-9 px-2 rounded-xl border border-[#E4E4E7] text-xs bg-white text-[#111111] font-medium"
-                  >
-                    {activeStateObj.cities.map(c => (
-                      <option key={c.city} value={c.city}>
-                        {c.city}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="text-[11px] text-[#71717A] block mb-0.5">Area (Public)</label>
-                  <select
-                    value={areaName}
-                    onChange={e => setAreaName(e.target.value)}
-                    className="w-full h-9 px-2 rounded-xl border border-[#E4E4E7] text-xs bg-white font-bold text-[#FF6B00]"
-                  >
-                    {activeCityObj.areas.map(a => (
-                      <option key={a} value={a}>
-                        {a}
-                      </option>
-                    ))}
-                  </select>
-                </div>
+            {/* Location Selector */}
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="text-xs font-semibold text-slate-700 block mb-1">State</label>
+                <select
+                  value={stateName}
+                  onChange={e => handleStateChange(e.target.value)}
+                  className="w-full h-11 px-2.5 rounded-xl border border-slate-200 text-xs text-slate-900 bg-white"
+                >
+                  {NIGERIAN_STATES.map(s => (
+                    <option key={s.state} value={s.state}>
+                      {s.state}
+                    </option>
+                  ))}
+                </select>
               </div>
-              <p className="text-[11px] text-[#71717A]">
-                Buyers will only see your Area (<strong>📍 {areaName}</strong>) publicly for safe delivery.
-              </p>
+
+              <div>
+                <label className="text-xs font-semibold text-slate-700 block mb-1">City / L.G.A</label>
+                <select
+                  value={cityName}
+                  onChange={e => handleCityChange(e.target.value)}
+                  className="w-full h-11 px-2.5 rounded-xl border border-slate-200 text-xs text-slate-900 bg-white"
+                >
+                  {activeStateObj.cities.map(c => (
+                    <option key={c.city} value={c.city}>
+                      {c.city}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
 
             <div>
               <label className="text-xs font-semibold text-slate-700 block mb-1">
-                Shop Bio / Speciality
+                Neighborhood / Campus Area *
+              </label>
+              <div className="relative">
+                <MapPin className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  required
+                  value={areaName}
+                  onChange={e => setAreaName(e.target.value)}
+                  placeholder="e.g. Akoka / UNILAG / Yaba"
+                  className="w-full h-11 pl-9 pr-3.5 rounded-xl border border-slate-200 text-xs sm:text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#FF6B00]"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="text-xs font-semibold text-slate-700 block mb-1">
+                Artisan Bio &amp; Craft Specialty *
               </label>
               <textarea
+                required
                 rows={2}
                 value={bio}
                 onChange={e => setBio(e.target.value)}
-                placeholder="Describe your handmade products (e.g. customized crystal beads, scent oils, crochet pieces)..."
-                className="w-full p-2.5 rounded-lg border border-slate-200 text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-900"
+                placeholder="What handmade products do you make? (crochet, beaded bags, fragrance oils, etc.)"
+                className="w-full p-3 rounded-xl border border-slate-200 text-xs sm:text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#FF6B00]"
               />
             </div>
 
-            {/* Under-18 Guardian Consent Module */}
-            <div className="p-3.5 bg-amber-50/80 border border-amber-200 rounded-xl space-y-3">
+            {/* Youth Protection: Under 18 Checkbox */}
+            <div className="p-3 bg-amber-50/70 rounded-xl border border-amber-200 space-y-2">
               <label className="flex items-start gap-2 cursor-pointer">
                 <input
                   type="checkbox"
                   checked={under18}
                   onChange={e => setUnder18(e.target.checked)}
-                  className="mt-0.5 rounded text-amber-700"
+                  className="mt-0.5 rounded text-[#FF6B00] focus:ring-[#FF6B00]"
                 />
-                <span className="text-xs text-amber-950 font-medium">
-                  <strong>I am a teenager under 18 years old.</strong> (Requires parent or legal guardian consent. Payouts are made directly to a verified guardian bank/Opay account).
+                <span className="text-xs font-bold text-amber-950">
+                  I am a youth maker under 18 years old
                 </span>
               </label>
 
               {under18 && (
-                <div className="space-y-2 pt-2 border-t border-amber-200/80">
-                  <div>
-                    <label className="text-[11px] font-semibold text-amber-950 block mb-0.5">
-                      Parent / Guardian Full Legal Name *
-                    </label>
-                    <input
-                      type="text"
-                      required={under18}
-                      value={guardianName}
-                      onChange={e => setGuardianName(e.target.value)}
-                      placeholder="e.g. Mrs. Folashade Adeyemi"
-                      className="w-full h-9 px-2.5 rounded-md border border-amber-300 bg-white text-xs text-slate-900"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-[11px] font-semibold text-amber-950 block mb-0.5">
-                      Guardian Phone / BVN Linked Phone *
-                    </label>
-                    <input
-                      type="tel"
-                      required={under18}
-                      value={guardianPhone}
-                      onChange={e => setGuardianPhone(e.target.value)}
-                      placeholder="+2348033001122"
-                      className="w-full h-9 px-2.5 rounded-md border border-amber-300 bg-white text-xs text-slate-900 font-mono-numbers"
-                    />
-                  </div>
+                <div className="pt-2 border-t border-amber-200/60">
+                  <label className="text-[11px] font-semibold text-amber-950 block mb-0.5">
+                    Parent / Legal Guardian Full Name *
+                  </label>
+                  <input
+                    type="text"
+                    required={under18}
+                    value={guardianName}
+                    onChange={e => setGuardianName(e.target.value)}
+                    placeholder="e.g. Mrs. Folashade Adeyemi"
+                    className="w-full h-9 px-2.5 rounded-md border border-amber-300 bg-white text-xs text-slate-900"
+                  />
+                  <p className="text-[10px] text-amber-800 mt-1">
+                    Under the Nigeria Data Protection Act, teen artisans under 18 operate with parent/guardian consent.
+                  </p>
                 </div>
               )}
             </div>
@@ -828,12 +948,9 @@ export const AuthModal: React.FC = () => {
 
             <button
               type="submit"
-              className="w-full h-12 bg-[#FF6B00] hover:bg-[#FF7A1A] text-[#111111] border-2 border-[#111111] font-black rounded-xl text-xs sm:text-sm transition-all shadow-[0_3px_0_#111111] flex items-center justify-center gap-2 active:translate-y-0.5"
+              className="w-full h-12 bg-[#FF6B00] hover:bg-[#FF7A1A] text-[#111111] border-2 border-[#111111] font-black rounded-xl text-xs sm:text-sm transition-all shadow-[0_3px_0_#111111] active:translate-y-0.5"
             >
-              <span className="w-5 h-5 rounded-full bg-[#9FE870] text-[#111111] flex items-center justify-center font-black">
-                ✓
-              </span>
-              <span>Launch My Shop</span>
+              Launch My Shop On Campus
             </button>
           </form>
         )}
