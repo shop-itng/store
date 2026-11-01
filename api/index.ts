@@ -1,6 +1,18 @@
 import express from 'express';
 import crypto from 'crypto';
 import paystackWebhookHandler from './paystack/webhook';
+import { renderTransactionalEmail, EmailTemplateKey } from '../src/utils/transactionalEmails';
+import {
+  checkRateLimit as checkOtpRateLimit,
+  recordRateLimit as recordOtpRateLimit,
+  checkResendCooldown as checkOtpResendCooldown,
+  saveHashedOtp,
+  getOtpRecord,
+  updateOtpRecord,
+  deleteOtpRecord,
+  hashOtp,
+  verifyOtpHash,
+} from './db/otpStore';
 
 const app = express();
 
@@ -336,6 +348,247 @@ router.post('/paystack/initialize', async (req, res) => {
 // 4. Paystack Webhook - Delegated directly to the Vercel serverless function handler
 router.all('/paystack/webhook', async (req: any, res: any) => {
   return paystackWebhookHandler(req, res);
+});
+
+// Production Transactional Email Dispatcher (Brevo API only)
+async function sendBrevoEmail(
+  to: string,
+  subject: string,
+  text: string,
+  html: string,
+  toName?: string
+): Promise<{ success: boolean; messageId?: string }> {
+  const apiKey = (process.env.BREVO_API_KEY || '').trim().replace(/^["']|["']$/g, '');
+  if (!apiKey) {
+    console.error('[Brevo Error] BREVO_API_KEY is not configured in process.env');
+    throw new Error('Email service is not configured. Missing BREVO_API_KEY.');
+  }
+
+  const emailFrom = (process.env.EMAIL_FROM || 'shopitverified@gmail.com').trim().replace(/^["']|["']$/g, '');
+  const emailFromName = (process.env.EMAIL_FROM_NAME || 'Shop It').trim().replace(/^["']|["']$/g, '');
+
+  const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+    method: 'POST',
+    headers: {
+      'api-key': apiKey,
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: JSON.stringify({
+      sender: {
+        name: emailFromName,
+        email: emailFrom,
+      },
+      to: [
+        {
+          email: to,
+          name: toName || to.split('@')[0],
+        },
+      ],
+      subject,
+      textContent: text,
+      htmlContent: html,
+    }),
+  });
+
+  if (!response.ok) {
+    let errBody: any = {};
+    try {
+      errBody = await response.json();
+    } catch {
+      errBody = { message: response.statusText };
+    }
+    // Write error to server log without exposing secrets
+    console.error('[Brevo Error] Status:', response.status, 'Error:', errBody?.message || response.statusText);
+    throw new Error(errBody?.message || `Brevo API returned status ${response.status}`);
+  }
+
+  const data: any = await response.json().catch(() => ({}));
+  return { success: true, messageId: data?.messageId };
+}
+
+// 4c. POST /email/send - Handles all 15 platform transactional emails via Brevo
+router.post('/email/send', async (req, res) => {
+  try {
+    const { to, template, data, subject: customSubject, text: customText, html: customHtml, toName } = req.body;
+    if (!to) {
+      return res.status(400).json({ status: false, message: 'Recipient "to" is required' });
+    }
+
+    const cleanEmail = String(to).trim().toLowerCase();
+    const rendered = template
+      ? renderTransactionalEmail(template as EmailTemplateKey, data || {})
+      : { subject: customSubject || 'Shop It Notification', text: customText || '', html: customHtml || '' };
+
+    try {
+      const result = await sendBrevoEmail(cleanEmail, rendered.subject, rendered.text, rendered.html, toName || data?.name);
+      return res.json({
+        status: true,
+        messageId: result.messageId,
+        subject: rendered.subject,
+      });
+    } catch (brevoErr: any) {
+      return res.status(502).json({
+        status: false,
+        message: `Failed to deliver email via Brevo: ${brevoErr.message}`,
+      });
+    }
+  } catch (err: any) {
+    console.error('[Server Error in /api/email/send]', err.message);
+    return res.status(500).json({ status: false, message: 'Internal server error dispatching email' });
+  }
+});
+
+// 4d. POST /auth/send-otp - Server-generated 6-digit OTP, stored hashed in DB, 10-min expiry, 3 tries
+router.post('/auth/send-otp', async (req, res) => {
+  try {
+    const { email, purpose, deviceId, metadata } = req.body;
+    if (!email || !purpose) {
+      return res.status(400).json({ status: false, message: 'email and purpose are required' });
+    }
+
+    const cleanEmail = String(email).trim().toLowerCase();
+    const cleanPurpose = String(purpose).trim();
+
+    // 1. Check 60-second resend cooldown in database
+    const cooldownCheck = await checkOtpResendCooldown(cleanEmail, cleanPurpose);
+    if (!cooldownCheck.allowed) {
+      return res.status(429).json({
+        status: false,
+        message: `Please wait ${cooldownCheck.waitSeconds}s before requesting a new code.`,
+        waitSeconds: cooldownCheck.waitSeconds,
+      });
+    }
+
+    // 2. Check rate limit in database: 5 requests per email, 10 per device per 15 minutes
+    const rateCheck = await checkOtpRateLimit(cleanEmail, deviceId);
+    if (!rateCheck.allowed) {
+      return res.status(429).json({
+        status: false,
+        message: rateCheck.reason,
+      });
+    }
+
+    // 3. Codes are 6 digits, generated on the server
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const codeHash = hashOtp(code);
+
+    // 4. Save hashed OTP to database with 10-minute expiry and 3 attempts
+    await saveHashedOtp(cleanEmail, cleanPurpose, codeHash, metadata);
+    await recordOtpRateLimit(cleanEmail, deviceId);
+
+    // 5. Render email
+    const templateMap: Record<string, EmailTemplateKey> = {
+      signup: 'signup_code',
+      new_device_login: 'new_device_login',
+      password_reset: 'password_reset',
+      withdrawal: 'withdrawal_code',
+      payout_account: 'new_payout_account_code',
+    };
+
+    const templateKey: EmailTemplateKey = templateMap[cleanPurpose] || 'signup_code';
+    const appUrl = (process.env.APP_URL || 'https://shop-itng-pied.vercel.app').replace(/\/$/, '');
+    const resetLink = `${appUrl}/reset-password?code=${code}&email=${encodeURIComponent(cleanEmail)}`;
+
+    const rendered = renderTransactionalEmail(templateKey, {
+      code,
+      reset_link: resetLink,
+      email: cleanEmail,
+      amount: metadata?.amount,
+      bank_name: metadata?.bank_name,
+      last4: metadata?.last4,
+      ...metadata,
+    });
+
+    // 6. Send email strictly using the Brevo API
+    try {
+      await sendBrevoEmail(cleanEmail, rendered.subject, rendered.text, rendered.html, metadata?.name);
+    } catch (brevoErr: any) {
+      // Brevo failed: show user a clear message, write error without secrets to log, never pretend it sent
+      await deleteOtpRecord(cleanEmail, cleanPurpose);
+      return res.status(502).json({
+        status: false,
+        message: `Failed to deliver verification email: ${brevoErr.message}`,
+      });
+    }
+
+    return res.json({
+      status: true,
+      message: 'A 6-digit verification code has been sent to your email.',
+    });
+  } catch (err: any) {
+    console.error('[Server Error in /api/auth/send-otp]', err.message);
+    return res.status(500).json({ status: false, message: 'Internal server error dispatching OTP' });
+  }
+});
+
+// 4e. POST /auth/verify-otp - Verifies entered 6-digit code against database-hashed OTP
+router.post('/auth/verify-otp', async (req, res) => {
+  try {
+    const { email, purpose, code } = req.body;
+    if (!email || !purpose || !code) {
+      return res.status(400).json({ status: false, message: 'email, purpose, and code are required' });
+    }
+
+    const cleanEmail = String(email).trim().toLowerCase();
+    const cleanPurpose = String(purpose).trim();
+    const inputCode = String(code).trim();
+
+    const record = await getOtpRecord(cleanEmail, cleanPurpose);
+    if (!record) {
+      return res.status(400).json({
+        status: false,
+        message: 'No active verification code found or it has expired. Please request a new code.',
+      });
+    }
+
+    const now = Date.now();
+    if (now > record.expiresAt) {
+      await deleteOtpRecord(cleanEmail, cleanPurpose);
+      return res.status(400).json({
+        status: false,
+        message: 'This code has expired (10-minute limit). Please request a new code.',
+      });
+    }
+
+    if (record.attemptsRemaining <= 0) {
+      await deleteOtpRecord(cleanEmail, cleanPurpose);
+      return res.status(400).json({
+        status: false,
+        message: 'This code has been cancelled due to 3 wrong tries. Please request a new code.',
+      });
+    }
+
+    // Verify hash securely
+    const isValid = verifyOtpHash(inputCode, record.codeHash);
+    if (!isValid) {
+      record.attemptsRemaining -= 1;
+      if (record.attemptsRemaining <= 0) {
+        await deleteOtpRecord(cleanEmail, cleanPurpose);
+        return res.status(400).json({
+          status: false,
+          message: 'Incorrect code. 3 wrong tries exceeded. Code has been cancelled.',
+          attemptsRemaining: 0,
+        });
+      }
+      await updateOtpRecord(record);
+      return res.status(400).json({
+        status: false,
+        message: `Incorrect code. ${record.attemptsRemaining} try(ies) remaining.`,
+        attemptsRemaining: record.attemptsRemaining,
+      });
+    }
+
+    // Verified! Delete record so it cannot be used again
+    await deleteOtpRecord(cleanEmail, cleanPurpose);
+    return res.json({
+      status: true,
+      message: 'Verification successful.',
+    });
+  } catch (err: any) {
+    console.error('[Server Error in /api/auth/verify-otp]', err.message);
+    return res.status(500).json({ status: false, message: 'Internal server error verifying OTP' });
+  }
 });
 
 // 5. GET /paystack/verify/:reference

@@ -83,6 +83,7 @@ import {
   recordKnownDevice,
   getDeviceId,
 } from '../utils/emailOtpManager';
+import { sendTransactionalEmail } from '../utils/transactionalEmails';
 
 interface NotificationItem {
   id: string;
@@ -102,7 +103,7 @@ interface AppContextType {
   setAuthTab: (tab: 'login' | 'signup' | 'otp' | 'seller_register' | 'forgot_password') => void;
   pendingAuthData: any;
   setPendingAuthData: (data: any) => void;
-  verifyOtp: (code: string) => boolean;
+  verifyOtp: (code: string) => Promise<boolean>;
   submitSellerRegistration: (sellerData: {
     shopName: string;
     campus?: Campus;
@@ -316,11 +317,11 @@ interface AppContextType {
   ledgerEntries: LedgerEntry[];
   paystackWebhooks: PaystackWebhookEvent[];
   activeWithdrawalOtp: { code: string; email: string; expiresAt: number; amount: number } | null;
-  sendWithdrawalOtp: (amount: number) => { success: boolean; code?: string; error?: string; waitSeconds?: number } | string;
-  requestWithdrawal: (amount: number, payoutAccountId: string, otpCode: string) => boolean;
-  addPayoutAccount: (bankCode: string, bankName: string, accountNumber: string, accountName: string, otpCode?: string) => boolean;
-  sendPayoutAccountOtp: () => { success: boolean; code?: string; error?: string; waitSeconds?: number };
-  resendSignupOtp: () => { success: boolean; code?: string; error?: string; waitSeconds?: number };
+  sendWithdrawalOtp: (amount: number, accountInfo?: { bank_name?: string; last4?: string }) => Promise<{ success: boolean; error?: string; waitSeconds?: number }>;
+  requestWithdrawal: (amount: number, payoutAccountId: string, otpCode: string) => Promise<boolean>;
+  addPayoutAccount: (bankCode: string, bankName: string, accountNumber: string, accountName: string, otpCode?: string) => Promise<boolean>;
+  sendPayoutAccountOtp: (accountInfo?: { bank_name?: string; last4?: string }) => Promise<{ success: boolean; error?: string; waitSeconds?: number }>;
+  resendSignupOtp: () => Promise<{ success: boolean; error?: string; waitSeconds?: number }>;
   toggleWalletFreeze: (sellerId: string, freeze: boolean, reason?: string) => void;
   processPaystackWebhook: (eventData: {
     event: 'charge.success';
@@ -873,6 +874,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, [referralRewards]);
 
   // Rule 2: 5-day auto-release check (releases escrow funds to Available if no open dispute)
+  // and dispatches 48h auto-release reminder to buyer (Template 10)
+  const sentAutoReleaseRemindersRef = React.useRef<Set<string>>(new Set());
   useEffect(() => {
     const checkAutoRelease = () => {
       const now = Date.now();
@@ -883,6 +886,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         ) {
           confirmItemReceived(order.id);
           notify(`[Auto-Release] 5-day inspection period passed for Order #${order.id}. Escrow released to Available Balance.`, 'info');
+        } else if (
+          (order.status === 'delivered' || order.status === 'shipped' || order.status === 'paid') &&
+          new Date(order.autoReleaseAt).getTime() - now <= 2 * 24 * 60 * 60 * 1000 &&
+          !sentAutoReleaseRemindersRef.current.has(order.id)
+        ) {
+          sentAutoReleaseRemindersRef.current.add(order.id);
+          const buyerEmail = order.buyerEmail || currentUser?.email || 'customer@shopit.ng';
+          const buyerName = order.buyerName || 'there';
+          sendTransactionalEmail(buyerEmail, 'auto_release_reminder', {
+            name: buyerName,
+            order_id: order.id,
+          });
         }
       });
     };
@@ -973,13 +988,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setPendingAuthData(null);
   };
 
-  const verifyOtp = (code: string) => {
+  const verifyOtp = async (code: string): Promise<boolean> => {
     if (!pendingAuthData?.email) {
       notify('No pending verification found. Please sign up again.', 'error');
       return false;
     }
 
-    const verification = verifyEmailOtp(pendingAuthData.email, 'signup', code);
+    const verification = await verifyEmailOtp(pendingAuthData.email, 'signup', code);
     if (!verification.success) {
       notify(verification.error || 'Invalid or expired verification code.', 'error');
       return false;
@@ -997,22 +1012,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         role: 'buyer',
         password: pendingAuthData.password,
       } as any);
+      // 15. WELCOME EMAIL (buyer)
+      sendTransactionalEmail(pendingAuthData.email, 'welcome', {
+        name: pendingAuthData.name || pendingAuthData.email.split('@')[0],
+      });
       closeAuthModal();
       return true;
     }
   };
 
-  const resendSignupOtp = (): { success: boolean; code?: string; error?: string; waitSeconds?: number } => {
+  const resendSignupOtp = async (): Promise<{ success: boolean; error?: string; waitSeconds?: number }> => {
     if (!pendingAuthData?.email) {
       notify('No pending registration found.', 'error');
       return { success: false, error: 'No email found' };
     }
-    const result = generateEmailOtp(pendingAuthData.email, 'signup');
+    const result = await generateEmailOtp(pendingAuthData.email, 'signup', {
+      name: pendingAuthData.name || pendingAuthData.email.split('@')[0],
+    });
     if (!result.success) {
       notify(result.error || 'Please wait before requesting a new code.', 'error');
       return result;
     }
-    notify(`[Email Verification] A new 4-digit code was sent to ${pendingAuthData.email}! (Code: ${result.code}). Valid for 10 mins.`, 'info');
+    notify(`[Email Verification] A new 6-digit code was sent to ${pendingAuthData.email}! Valid for 10 minutes.`, 'info');
     return result;
   };
 
@@ -1031,6 +1052,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const newSeller: SellerProfile = {
       id: newSellerId,
       shopName: sellerData.shopName,
+      ownerName: pendingAuthData?.name || sellerData.shopName,
+      email: pendingAuthData?.email || 'artisan@campus.ng',
       bio: sellerData.bio,
       campus: sellerData.campus || 'UNILAG (Akoka)',
       location: sellerData.location,
@@ -1088,6 +1111,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const updated = [userWithPass, ...prev.filter(u => u.id !== sellerUser.id && u.email.toLowerCase() !== sellerUser.email.toLowerCase())];
       localStorage.setItem('shopit_registered_users', JSON.stringify(updated));
       return updated;
+    });
+
+    // 15. WELCOME EMAIL (seller)
+    sendTransactionalEmail(sellerUser.email, 'welcome', {
+      name: sellerUser.name || sellerData.shopName,
     });
 
     setCurrentUser(sellerUser);
@@ -1365,10 +1393,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const handshakeCode = Math.floor(1000 + Math.random() * 9000).toString();
     const paystackRef = `pstk_test_${Date.now()}_${Math.floor(10000 + Math.random() * 90000)}`;
+    const buyerEmail = currentUser?.email || 'customer@shopit.ng';
+    const buyerName = currentUser?.name || 'Customer';
 
     const newOrder: Order = {
       ...orderData,
       id: orderId,
+      buyerEmail,
       createdAt: now.toISOString(),
       autoReleaseAt: autoRelease.toISOString(),
       hasReview: false,
@@ -1391,7 +1422,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       processedAt: now.toISOString(),
       reference: paystackRef,
       amount: newOrder.grandTotal,
-      customerEmail: currentUser?.email || 'customer@shopit.ng',
+      customerEmail: buyerEmail,
       orderId: orderId,
       channel: newOrder.paymentMethod === 'paystack_transfer' ? 'bank_transfer' : 'card',
     };
@@ -1414,6 +1445,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }));
 
     setLedgerEntries(prev => [...newLedgerEntries, ...prev]);
+
+    // 6. ORDER PLACED (buyer)
+    sendTransactionalEmail(buyerEmail, 'order_placed_buyer', {
+      name: buyerName,
+      order_id: orderId,
+      total: newOrder.grandTotal,
+    });
+
+    // 7. NEW ORDER (seller) - notify each seller
+    const notifiedSellers = new Set<string>();
+    newOrder.items.forEach(item => {
+      if (!notifiedSellers.has(item.sellerId)) {
+        notifiedSellers.add(item.sellerId);
+        const sellerProfile = sellers.find(s => s.id === item.sellerId);
+        const sellerEmail = sellerProfile?.email || (sellerProfile?.ownerName
+          ? `${sellerProfile.ownerName.toLowerCase().replace(/[^a-z0-9]/g, '')}@campus.ng`
+          : 'artisan@campus.ng');
+        const sellerName = sellerProfile?.shopName || sellerProfile?.ownerName || item.sellerShopName || 'Artisan';
+        sendTransactionalEmail(sellerEmail, 'new_order_seller', {
+          name: sellerName,
+          order_id: orderId,
+          item: item.title,
+        });
+      }
+    });
 
     clearCart();
     setAppliedCoupon(null);
@@ -1453,6 +1509,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       notify('Order marked as Packed with photo verification!', 'success');
     } else if (status === 'shipped') {
       notify('Order dispatched/shipped to campus drop point!', 'info');
+      // 8. ORDER SHIPPED (buyer)
+      const targetOrd = orders.find(o => o.id === orderId);
+      if (targetOrd) {
+        const bEmail = targetOrd.buyerEmail || currentUser?.email || 'customer@shopit.ng';
+        const bName = targetOrd.buyerName || 'there';
+        sendTransactionalEmail(bEmail, 'order_shipped_buyer', {
+          name: bName,
+          order_id: targetOrd.id,
+        });
+      }
     } else if (status === 'delivered') {
       notify('Order delivered! Buyer notified to inspect.', 'info');
     }
@@ -1488,6 +1554,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setLedgerEntries(prev => [...releaseEntries, ...prev]);
     notify(`Item received confirmed! Escrow funds released to Available Balance for withdrawal.`, 'success');
+
+    // 9. ITEM RECEIVED (seller) - notify each seller
+    const notifiedSellers = new Set<string>();
+    ord.items.forEach(item => {
+      if (!notifiedSellers.has(item.sellerId)) {
+        notifiedSellers.add(item.sellerId);
+        const sellerProfile = sellers.find(s => s.id === item.sellerId);
+        const sellerEmail = sellerProfile?.email || (sellerProfile?.ownerName
+          ? `${sellerProfile.ownerName.toLowerCase().replace(/[^a-z0-9]/g, '')}@campus.ng`
+          : 'artisan@campus.ng');
+        const sellerName = sellerProfile?.shopName || sellerProfile?.ownerName || item.sellerShopName || 'Artisan';
+        const itemAmount = item.sellerPrice * item.quantity;
+        sendTransactionalEmail(sellerEmail, 'item_received_seller', {
+          name: sellerName,
+          order_id: ord.id,
+          amount: itemAmount,
+        });
+      }
+    });
   };
 
   // Rule 1: No buyer wallet. Refunds go back to original payment method through Paystack.
@@ -1540,6 +1625,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         createdAt: 'Just now',
       };
       setDisputes(prev => [newDispute, ...prev]);
+
+      // 11. DISPUTE OPENED (buyer)
+      const buyerEmail = ord.buyerEmail || currentUser?.email || 'customer@shopit.ng';
+      const buyerName = ord.buyerName || currentUser?.name || 'there';
+      sendTransactionalEmail(buyerEmail, 'dispute_opened', {
+        name: buyerName,
+        order_id: ord.id,
+      });
     }
     notify('Dispute opened. Escrow release is frozen while moderation reviews.', 'error');
   };
@@ -1580,33 +1673,44 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   // Rule 4: Send an Email OTP before every withdrawal
-  const sendWithdrawalOtp = (amount: number): { success: boolean; code?: string; error?: string; waitSeconds?: number } | string => {
+  const sendWithdrawalOtp = async (
+    amount: number,
+    accountInfo?: { bank_name?: string; last4?: string }
+  ): Promise<{ success: boolean; error?: string; waitSeconds?: number }> => {
     const email = currentUser?.email || 'artisan@campus.ng';
-    const result = generateEmailOtp(email, 'withdrawal', { amount });
+    const name = currentUser?.name || currentSeller?.shopName || 'Artisan';
+    const bank_name = accountInfo?.bank_name || 'OPay / Bank';
+    const last4 = accountInfo?.last4 || '••••';
+    const result = await generateEmailOtp(email, 'withdrawal', { name, amount, bank_name, last4 });
     if (!result.success) {
       notify(result.error || 'Could not generate withdrawal OTP.', 'error');
       return result;
     }
 
     const expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes
-    setActiveWithdrawalOtp({ code: result.code!, email, expiresAt, amount });
-    notify(`[Email Authorization] Your withdrawal authorization code is ${result.code}. Transacting ₦${amount.toLocaleString()} to payout account. Valid for 10 mins.`, 'info');
-    return result.code!;
+    setActiveWithdrawalOtp({ code: 'HASHED_ON_SERVER', email, expiresAt, amount });
+    notify(`[Email Authorization] A 6-digit withdrawal code was sent to ${email}. Valid for 10 minutes.`, 'info');
+    return result;
   };
 
-  const sendPayoutAccountOtp = (): { success: boolean; code?: string; error?: string; waitSeconds?: number } => {
+  const sendPayoutAccountOtp = async (
+    accountInfo?: { bank_name?: string; last4?: string }
+  ): Promise<{ success: boolean; error?: string; waitSeconds?: number }> => {
     const email = currentUser?.email || 'artisan@campus.ng';
-    const result = generateEmailOtp(email, 'payout_account');
+    const name = currentUser?.name || currentSeller?.shopName || 'Artisan';
+    const bank_name = accountInfo?.bank_name || 'OPay / Bank';
+    const last4 = accountInfo?.last4 || '••••';
+    const result = await generateEmailOtp(email, 'payout_account', { name, bank_name, last4 });
     if (!result.success) {
       notify(result.error || 'Could not generate authorization code.', 'error');
       return result;
     }
-    notify(`[Email Security] Payout account authorization code sent to ${email}: ${result.code}. Valid for 10 mins.`, 'info');
+    notify(`[Email Security] A 6-digit payout account authorization code was sent to ${email}. Valid for 10 minutes.`, 'info');
     return result;
   };
 
   // Rule 4 & Rule 5: Seller withdrawals go to Opay or a Nigerian bank through Paystack Transfers API
-  const requestWithdrawal = (amount: number, payoutAccountId: string, otpCode: string): boolean => {
+  const requestWithdrawal = async (amount: number, payoutAccountId: string, otpCode: string): Promise<boolean> => {
     if (!currentSeller) return false;
 
     // Rule: Unverified sellers cannot withdraw
@@ -1635,7 +1739,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     // Rule 4: Verify Email OTP with 10-minute expiry and max 3 wrong attempts
     const email = currentUser?.email || 'artisan@campus.ng';
-    const otpVerification = verifyEmailOtp(email, 'withdrawal', otpCode);
+    const otpVerification = await verifyEmailOtp(email, 'withdrawal', otpCode);
     if (!otpVerification.success) {
       notify(otpVerification.error || 'Invalid or expired withdrawal OTP. Please request a new code.', 'error');
       return false;
@@ -1703,13 +1807,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   // Rule 4: Add Payout Account (Opay or Nigerian bank with Email Authorization OTP)
-  const addPayoutAccount = (
+  const addPayoutAccount = async (
     bankCode: string,
     bankName: string,
     accountNumber: string,
     accountName: string,
     otpCode?: string
-  ): boolean => {
+  ): Promise<boolean> => {
     if (!currentSeller) return false;
 
     // Rule: Unverified sellers cannot link payout accounts
@@ -1727,7 +1831,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // Email OTP Authorization verification (if code supplied)
     if (otpCode !== undefined) {
       const email = currentUser?.email || 'artisan@campus.ng';
-      const otpVerify = verifyEmailOtp(email, 'payout_account', otpCode);
+      const otpVerify = await verifyEmailOtp(email, 'payout_account', otpCode);
       if (!otpVerify.success) {
         notify(otpVerify.error || 'Invalid or expired authorization code. Please request a new code.', 'error');
         return false;
@@ -2062,7 +2166,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const targetReq = verificationRequests.find(r => r.id === id);
     if (!targetReq) return;
 
+    const targetSeller = sellers.find(s => s.id === targetReq.sellerId);
+    const sellerEmail = targetSeller?.email || (targetSeller?.ownerName
+      ? `${targetSeller.ownerName.toLowerCase().replace(/[^a-z0-9]/g, '')}@campus.ng`
+      : 'artisan@campus.ng');
+    const sellerName = targetReq.ownerName || targetReq.shopName;
+
     if (canonicalStatus === 'verified') {
+      // 13. SELLER VERIFIED
+      sendTransactionalEmail(sellerEmail, 'seller_verified', {
+        name: sellerName,
+      });
+
       setSellers(prev =>
         prev.map(s => {
           if (s.id === targetReq.sellerId) {
@@ -2087,6 +2202,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       );
       notify(`Seller "${targetReq.shopName}" verified! Verified badge granted.`, 'success');
     } else if (canonicalStatus === 'rejected') {
+      // 14. VERIFICATION NOT APPROVED
+      sendTransactionalEmail(sellerEmail, 'verification_not_approved', {
+        name: sellerName,
+        reason: notes || 'Document or selfie did not match identity verification criteria.',
+      });
+
       setSellers(prev =>
         prev.map(s => {
           if (s.id === targetReq.sellerId) {
@@ -2108,6 +2229,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       );
       notify(`Verification for "${targetReq.shopName}" rejected. Reason: ${notes || 'Failed criteria'}`, 'error');
     } else if (canonicalStatus === 'needs_resubmission') {
+      // 14. VERIFICATION NOT APPROVED
+      sendTransactionalEmail(sellerEmail, 'verification_not_approved', {
+        name: sellerName,
+        reason: notes || 'Please upload a clearer ID and selfie and try again.',
+      });
+
       setSellers(prev =>
         prev.map(s => {
           if (s.id === targetReq.sellerId) {
@@ -2279,6 +2406,39 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       );
       notify(`Partial resolution: ₦${refundVal.toLocaleString()} refunded to buyer, ₦${sellerVal.toLocaleString()} released to seller.`, 'success');
     }
+
+    // 12. DISPUTE RESOLVED (notify both buyer & seller)
+    let decisionText = 'Dispute reviewed and resolved';
+    if (resolution === 'release_seller') {
+      decisionText = 'Funds released to seller after review';
+    } else if (resolution === 'refund_full') {
+      decisionText = `Full refund of ₦${disp.amountHeldInEscrow.toLocaleString()} returned to buyer`;
+    } else if (resolution === 'partial') {
+      const refundVal = amount || Math.round(disp.amountHeldInEscrow / 2);
+      decisionText = `Partial resolution: ₦${refundVal.toLocaleString()} refunded to buyer, remaining released to seller`;
+    }
+    if (notes) {
+      decisionText += ` (${notes})`;
+    }
+
+    const buyerEmail = ord?.buyerEmail || currentUser?.email || 'customer@shopit.ng';
+    const buyerName = disp.buyerName || ord?.buyerName || 'Customer';
+    sendTransactionalEmail(buyerEmail, 'dispute_resolved', {
+      name: buyerName,
+      order_id: disp.orderId,
+      decision: decisionText,
+    });
+
+    const targetSeller = sellers.find(s => s.id === disp.sellerId);
+    const sellerEmail = targetSeller?.email || (targetSeller?.ownerName
+      ? `${targetSeller.ownerName.toLowerCase().replace(/[^a-z0-9]/g, '')}@campus.ng`
+      : 'artisan@campus.ng');
+    const sellerName = targetSeller?.shopName || targetSeller?.ownerName || 'Seller';
+    sendTransactionalEmail(sellerEmail, 'dispute_resolved', {
+      name: sellerName,
+      order_id: disp.orderId,
+      decision: decisionText,
+    });
   };
 
   const updateFlagStatus = (flagId: string, action: 'warn' | 'lock_chat' | 'freeze_account' | 'dismiss') => {

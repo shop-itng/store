@@ -102,29 +102,39 @@ export const SellerWalletView: React.FC = () => {
     setOtpSent(false);
   };
 
-  const handleSendOtpClick = () => {
+  const handleSendOtpClick = async () => {
     if (withdrawCooldown > 0) return;
-    const res = sendWithdrawalOtp(withdrawAmount);
-    setOtpSent(true);
-    setWithdrawCooldown(60);
-    if (typeof res === 'string') {
-      setWithdrawalOtp(res);
-    } else if (res.code) {
-      setWithdrawalOtp(res.code);
+    const accountInfo = selectedAccount ? {
+      bank_name: selectedAccount.bankName,
+      last4: selectedAccount.accountNumber.slice(-4),
+    } : undefined;
+    const res = await sendWithdrawalOtp(withdrawAmount, accountInfo);
+    if (res.success) {
+      setOtpSent(true);
+      setWithdrawCooldown(60);
+      setWithdrawalOtp('');
     }
   };
 
-  const handleSendAccountOtpClick = () => {
+  const handleSendAccountOtpClick = async () => {
     if (accountCooldown > 0) return;
-    const res = sendPayoutAccountOtp();
-    if (res.success && res.code) {
+    const bank = NIGERIAN_BANKS.find(b => b.code === selectedBankCode) || {
+      code: selectedBankCode,
+      name: 'OPay Digital Services',
+    };
+    const last4 = accountNumber.trim().length >= 4 ? accountNumber.trim().slice(-4) : '••••';
+    const res = await sendPayoutAccountOtp({
+      bank_name: bank.name,
+      last4,
+    });
+    if (res.success) {
       setAccountOtpSent(true);
       setAccountCooldown(60);
-      setAccountOtp(res.code);
+      setAccountOtp('');
     }
   };
 
-  const handleWithdrawSubmit = (e: React.FormEvent) => {
+  const handleWithdrawSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedAccount) {
       notify('Please select or add a payout bank account / OPay first.', 'error');
@@ -136,24 +146,26 @@ export const SellerWalletView: React.FC = () => {
       return;
     }
 
-    if (!withdrawalOtp.trim()) {
-      notify('Please request and enter the 4-digit Email OTP sent to your registered email address.', 'error');
+    if (!withdrawalOtp.trim() || withdrawalOtp.trim().length !== 6) {
+      notify('Please request and enter the 6-digit Email OTP sent to your registered email address.', 'error');
       return;
     }
 
     setIsWithdrawing(true);
-    setTimeout(() => {
+    try {
+      const success = await requestWithdrawal(withdrawAmount, selectedAccount.id, withdrawalOtp);
       setIsWithdrawing(false);
-      const success = requestWithdrawal(withdrawAmount, selectedAccount.id, withdrawalOtp);
       if (success) {
         setIsWithdrawModalOpen(false);
         setWithdrawalOtp('');
         setOtpSent(false);
       }
-    }, 1200);
+    } catch {
+      setIsWithdrawing(false);
+    }
   };
 
-  const handleAddAccountSubmit = (e: React.FormEvent) => {
+  const handleAddAccountSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const bank = NIGERIAN_BANKS.find(b => b.code === selectedBankCode) || {
       code: selectedBankCode,
@@ -172,12 +184,12 @@ export const SellerWalletView: React.FC = () => {
       return;
     }
 
-    if (!accountOtp.trim() || accountOtp.trim().length !== 4) {
-      notify('Please request and enter the 4-digit Email OTP sent to your inbox to link this payout account.', 'error');
+    if (!accountOtp.trim() || accountOtp.trim().length !== 6) {
+      notify('Please request and enter the 6-digit Email OTP sent to your inbox to link this payout account.', 'error');
       return;
     }
 
-    const success = addPayoutAccount(bank.code, bank.name, accountNumber, accountName, accountOtp);
+    const success = await addPayoutAccount(bank.code, bank.name, accountNumber, accountName, accountOtp);
     if (success) {
       setIsAddAccountModalOpen(false);
       setAccountNumber('');
@@ -602,11 +614,11 @@ export const SellerWalletView: React.FC = () => {
                 <div className="flex items-center gap-2">
                   <input
                     type="text"
-                    maxLength={4}
+                    maxLength={6}
                     required
                     value={withdrawalOtp}
-                    onChange={e => setWithdrawalOtp(e.target.value)}
-                    placeholder="Enter 4-digit OTP"
+                    onChange={e => setWithdrawalOtp(e.target.value.replace(/\D/g, ''))}
+                    placeholder="••••••"
                     className="flex-1 h-10 px-3 tracking-widest text-center text-base font-black font-mono-numbers rounded-lg border-2 border-slate-300 bg-white text-slate-900 focus:outline-none focus:border-[#FF6B00]"
                   />
                   {!otpSent && (
@@ -762,11 +774,11 @@ export const SellerWalletView: React.FC = () => {
                 <div className="flex items-center gap-2">
                   <input
                     type="text"
-                    maxLength={4}
+                    maxLength={6}
                     required
                     value={accountOtp}
-                    onChange={e => setAccountOtp(e.target.value)}
-                    placeholder="Enter 4-digit code"
+                    onChange={e => setAccountOtp(e.target.value.replace(/\D/g, ''))}
+                    placeholder="••••••"
                     className="flex-1 h-10 px-3 tracking-widest text-center text-base font-black font-mono-numbers rounded-lg border-2 border-slate-300 bg-white text-slate-900 focus:outline-none focus:border-[#FF6B00]"
                   />
                   {!accountOtpSent && (

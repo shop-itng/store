@@ -94,7 +94,7 @@ export const AuthModal: React.FC = () => {
   if (!isAuthModalOpen) return null;
 
   // 1. Password Reset Flow (Email OTP, 10-min expiry, 3 attempts, 60s cooldown)
-  const handleSendResetOtp = (e: React.FormEvent) => {
+  const handleSendResetOtp = async (e: React.FormEvent) => {
     e.preventDefault();
     const cleanEmail = forgotEmail.trim().toLowerCase();
     if (!cleanEmail || !cleanEmail.includes('@') || !cleanEmail.includes('.')) {
@@ -103,7 +103,13 @@ export const AuthModal: React.FC = () => {
     }
 
     setIsSendingResetEmail(true);
-    const otpResult = generateEmailOtp(cleanEmail, 'password_reset');
+    const resetLink = typeof window !== 'undefined'
+      ? `${window.location.origin}/reset-password?email=${encodeURIComponent(cleanEmail)}`
+      : 'https://shop-itng-pied.vercel.app/reset-password';
+    const otpResult = await generateEmailOtp(cleanEmail, 'password_reset', {
+      name: cleanEmail.split('@')[0],
+      reset_link: resetLink,
+    });
     setIsSendingResetEmail(false);
 
     if (!otpResult.success) {
@@ -113,25 +119,32 @@ export const AuthModal: React.FC = () => {
 
     setForgotStep('otp_and_reset');
     setResetCooldown(60);
-    notify(`[Password Reset] 4-digit code sent to ${cleanEmail}! (Code: ${otpResult.code}). Valid for 10 mins.`, 'success');
+    setForgotOtpInput('');
+    notify(`[Password Reset] 6-digit verification code sent to ${cleanEmail}. Valid for 10 minutes.`, 'success');
   };
 
-  const handleResendResetOtp = () => {
+  const handleResendResetOtp = async () => {
     const cleanEmail = forgotEmail.trim().toLowerCase();
-    const otpResult = generateEmailOtp(cleanEmail, 'password_reset');
+    const resetLink = typeof window !== 'undefined'
+      ? `${window.location.origin}/reset-password?email=${encodeURIComponent(cleanEmail)}`
+      : 'https://shop-itng-pied.vercel.app/reset-password';
+    const otpResult = await generateEmailOtp(cleanEmail, 'password_reset', {
+      name: cleanEmail.split('@')[0],
+      reset_link: resetLink,
+    });
     if (!otpResult.success) {
       notify(otpResult.error || 'Please wait before requesting a new code.', 'error');
       return;
     }
     setResetCooldown(60);
-    notify(`[Password Reset] New code sent to ${cleanEmail}! (Code: ${otpResult.code}). Valid for 10 mins.`, 'info');
+    notify(`[Password Reset] A new 6-digit code was sent to ${cleanEmail}. Valid for 10 minutes.`, 'info');
   };
 
-  const handleResetPasswordSubmit = (e: React.FormEvent) => {
+  const handleResetPasswordSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const cleanEmail = forgotEmail.trim().toLowerCase();
 
-    const verifyResult = verifyEmailOtp(cleanEmail, 'password_reset', forgotOtpInput);
+    const verifyResult = await verifyEmailOtp(cleanEmail, 'password_reset', forgotOtpInput);
     if (!verifyResult.success) {
       notify(verifyResult.error || 'Invalid or expired reset code. Please request a new code.', 'error');
       return;
@@ -175,7 +188,7 @@ export const AuthModal: React.FC = () => {
   };
 
   // 2. Login Flow (Email & Password + New Device Challenge)
-  const handleLoginFormSubmit = (e: React.FormEvent) => {
+  const handleLoginFormSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const cleanEmail = loginEmail.trim().toLowerCase();
     const cleanPass = loginPassword.trim();
@@ -216,7 +229,7 @@ export const AuthModal: React.FC = () => {
     // New Device Security Check (Rule 3)
     const isDeviceKnown = isKnownDevice(cleanEmail, currentDeviceId);
     if (!isDeviceKnown) {
-      const otpResult = generateEmailOtp(cleanEmail, 'new_device_login');
+      const otpResult = await generateEmailOtp(cleanEmail, 'new_device_login', { name: matchedUser.name });
       if (!otpResult.success) {
         notify(otpResult.error || 'Could not dispatch device verification code.', 'error');
         return;
@@ -224,9 +237,9 @@ export const AuthModal: React.FC = () => {
 
       setPendingNewDeviceUser(matchedUser);
       setNewDeviceCooldown(60);
-      setDeviceOtpInput(otpResult.code!);
+      setDeviceOtpInput('');
       setAuthTab('new_device_otp' as any);
-      notify(`[Security Alert] New device detected! Authorization code sent to ${cleanEmail}. (Code: ${otpResult.code}). Valid for 10 mins.`, 'info');
+      notify(`[Security Alert] New device detected! A 6-digit authorization code was sent to ${cleanEmail}. Valid for 10 minutes.`, 'info');
       return;
     }
 
@@ -241,11 +254,11 @@ export const AuthModal: React.FC = () => {
     notify(`Welcome back, ${matchedUser.name}!`, 'success');
   };
 
-  const handleNewDeviceOtpSubmit = (e: React.FormEvent) => {
+  const handleNewDeviceOtpSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!pendingNewDeviceUser) return;
     const cleanEmail = pendingNewDeviceUser.email.toLowerCase();
-    const result = verifyEmailOtp(cleanEmail, 'new_device_login', deviceOtpInput);
+    const result = await verifyEmailOtp(cleanEmail, 'new_device_login', deviceOtpInput);
     if (!result.success) {
       notify(result.error || 'Invalid or expired authorization code. Please request a new code.', 'error');
       return;
@@ -263,21 +276,20 @@ export const AuthModal: React.FC = () => {
     notify(`New device authorized! Welcome back, ${pendingNewDeviceUser.name}.`, 'success');
   };
 
-  const handleResendNewDeviceOtp = () => {
+  const handleResendNewDeviceOtp = async () => {
     if (!pendingNewDeviceUser) return;
     const cleanEmail = pendingNewDeviceUser.email.toLowerCase();
-    const otpResult = generateEmailOtp(cleanEmail, 'new_device_login');
+    const otpResult = await generateEmailOtp(cleanEmail, 'new_device_login', { name: pendingNewDeviceUser.name });
     if (!otpResult.success) {
       notify(otpResult.error || 'Please wait before requesting a new code.', 'error');
       return;
     }
     setNewDeviceCooldown(60);
-    setDeviceOtpInput(otpResult.code!);
-    notify(`[Security Alert] New code sent to ${cleanEmail}: ${otpResult.code}. Valid for 10 mins.`, 'info');
+    notify(`[Security Alert] A new 6-digit code was sent to ${cleanEmail}. Valid for 10 minutes.`, 'info');
   };
 
   // 3. Initial Signup Flow (Email only - no phone number required)
-  const handleInitialSignup = (e: React.FormEvent) => {
+  const handleInitialSignup = async (e: React.FormEvent) => {
     e.preventDefault();
     const cleanEmail = email.trim().toLowerCase();
 
@@ -291,7 +303,7 @@ export const AuthModal: React.FC = () => {
       return;
     }
 
-    const otpResult = generateEmailOtp(cleanEmail, 'signup');
+    const otpResult = await generateEmailOtp(cleanEmail, 'signup', { name: name.trim() });
     if (!otpResult.success) {
       notify(otpResult.error || 'Could not send verification code.', 'error');
       return;
@@ -306,26 +318,25 @@ export const AuthModal: React.FC = () => {
     };
     setPendingAuthData(authData);
     setSignupCooldown(60);
-    setOtpCode(otpResult.code!);
+    setOtpCode('');
     setAuthTab('otp');
-    notify(`[Email Verification] A 4-digit code was sent to ${cleanEmail}! (Code: ${otpResult.code}). Valid for 10 mins.`, 'info');
+    notify(`[Email Verification] A 6-digit code was sent to ${cleanEmail}! Valid for 10 minutes.`, 'info');
   };
 
-  const handleResendSignupCode = () => {
+  const handleResendSignupCode = async () => {
     if (!pendingAuthData?.email) return;
-    const otpResult = generateEmailOtp(pendingAuthData.email, 'signup');
+    const otpResult = await generateEmailOtp(pendingAuthData.email, 'signup', { name: pendingAuthData.name });
     if (!otpResult.success) {
       notify(otpResult.error || 'Please wait before requesting a new code.', 'error');
       return;
     }
     setSignupCooldown(60);
-    setOtpCode(otpResult.code!);
-    notify(`[Email Verification] A new 4-digit code was sent to ${pendingAuthData.email}! (Code: ${otpResult.code}). Valid for 10 mins.`, 'info');
+    notify(`[Email Verification] A new 6-digit code was sent to ${pendingAuthData.email}! Valid for 10 minutes.`, 'info');
   };
 
-  const handleOtpSubmit = (e: React.FormEvent) => {
+  const handleOtpSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    verifyOtp(otpCode);
+    await verifyOtp(otpCode);
   };
 
   // Location Selector
@@ -468,20 +479,6 @@ export const AuthModal: React.FC = () => {
               <span>Sign In</span>
               <ArrowRight className="w-4 h-4" />
             </button>
-
-            <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 text-xs text-slate-600 flex items-center justify-between">
-              <span className="font-semibold text-slate-700">Test Moderator:</span>
-              <button
-                type="button"
-                onClick={() => {
-                  setLoginEmail(ADMIN_CREDENTIALS.email);
-                  setLoginPassword(ADMIN_CREDENTIALS.password);
-                }}
-                className="text-[11px] font-black text-[#FF6B00] bg-orange-50 px-2.5 py-1 rounded-lg border border-orange-200 hover:bg-orange-100"
-              >
-                Autofill Credentials
-              </button>
-            </div>
           </form>
         )}
 
@@ -494,20 +491,20 @@ export const AuthModal: React.FC = () => {
               </div>
               <h2 className="text-xl font-black text-slate-900">New Device Verification</h2>
               <p className="text-xs text-slate-500">
-                A 4-digit authorization code was sent to <strong className="text-slate-800">{pendingNewDeviceUser?.email}</strong>
+                A 6-digit authorization code was sent to <strong className="text-slate-800">{pendingNewDeviceUser?.email}</strong>
               </p>
             </div>
 
             <div className="py-2">
               <input
                 type="text"
-                maxLength={4}
+                maxLength={6}
                 autoFocus
                 required
                 value={deviceOtpInput}
-                onChange={e => setDeviceOtpInput(e.target.value)}
-                placeholder="••••"
-                className="w-36 h-12 mx-auto tracking-widest text-center text-2xl font-black rounded-xl border-2 border-[#111111] text-slate-900 block focus:outline-none focus:ring-2 focus:ring-[#FF6B00] font-mono-numbers"
+                onChange={e => setDeviceOtpInput(e.target.value.replace(/\D/g, ''))}
+                placeholder="••••••"
+                className="w-48 h-12 mx-auto tracking-widest text-center text-2xl font-black rounded-xl border-2 border-[#111111] text-slate-900 block focus:outline-none focus:ring-2 focus:ring-[#FF6B00] font-mono-numbers"
               />
               <span className="text-[11px] text-slate-500 text-center block mt-2">
                 ⏱ Code expires in 10 minutes · 3 attempts allowed
@@ -558,7 +555,7 @@ export const AuthModal: React.FC = () => {
               <h2 className="text-xl font-black text-[#111111]">Reset Password</h2>
               <p className="text-xs text-[#71717A] mt-1">
                 {forgotStep === 'email'
-                  ? 'Enter your registered email address to receive a 4-digit reset code.'
+                  ? 'Enter your registered email address to receive a 6-digit reset code.'
                   : `Enter the code sent to ${forgotEmail} and choose a new password.`}
               </p>
             </div>
@@ -590,7 +587,7 @@ export const AuthModal: React.FC = () => {
               <form onSubmit={handleResetPasswordSubmit} className="space-y-3.5">
                 <div>
                   <div className="flex items-center justify-between mb-1">
-                    <label className="text-xs font-semibold text-slate-700">4-Digit Email Code *</label>
+                    <label className="text-xs font-semibold text-slate-700">6-Digit Email Code *</label>
                     <button
                       type="button"
                       disabled={resetCooldown > 0}
@@ -604,14 +601,14 @@ export const AuthModal: React.FC = () => {
                   </div>
                   <input
                     type="text"
-                    maxLength={4}
+                    maxLength={6}
                     required
                     value={forgotOtpInput}
-                    onChange={e => setForgotOtpInput(e.target.value)}
-                    placeholder="••••"
-                    className="w-full h-11 px-3.5 tracking-widest text-center text-lg font-black font-mono-numbers rounded-xl border border-slate-200 text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#FF6B00]"
+                    onChange={e => setForgotOtpInput(e.target.value.replace(/\D/g, ''))}
+                    placeholder="••••••"
+                    className="w-48 mx-auto h-11 px-3.5 tracking-widest text-center text-lg font-black font-mono-numbers rounded-xl border border-slate-200 text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#FF6B00]"
                   />
-                  <span className="text-[10px] text-slate-500 block mt-1">
+                  <span className="text-[10px] text-slate-500 block text-center mt-1">
                     ⏱ Valid for 10 minutes · 3 wrong attempts max
                   </span>
                 </div>
@@ -765,20 +762,20 @@ export const AuthModal: React.FC = () => {
               </div>
               <h2 className="text-xl font-black text-slate-900">Verify Your Email Address</h2>
               <p className="text-xs text-slate-500">
-                Enter the 4-digit code sent to your inbox at <strong className="text-slate-800">{pendingAuthData?.email || email}</strong>
+                Enter the 6-digit code sent to your inbox at <strong className="text-slate-800">{pendingAuthData?.email || email}</strong>
               </p>
             </div>
 
             <div className="py-2">
               <input
                 type="text"
-                maxLength={4}
+                maxLength={6}
                 autoFocus
                 required
                 value={otpCode}
-                onChange={e => setOtpCode(e.target.value)}
-                placeholder="••••"
-                className="w-36 h-12 mx-auto tracking-widest text-center text-2xl font-black rounded-xl border-2 border-[#111111] text-slate-900 block focus:outline-none focus:ring-2 focus:ring-[#FF6B00] font-mono-numbers"
+                onChange={e => setOtpCode(e.target.value.replace(/\D/g, ''))}
+                placeholder="••••••"
+                className="w-48 h-12 mx-auto tracking-widest text-center text-2xl font-black rounded-xl border-2 border-[#111111] text-slate-900 block focus:outline-none focus:ring-2 focus:ring-[#FF6B00] font-mono-numbers"
               />
               <span className="text-[11px] text-slate-500 text-center block mt-2">
                 ⏱ Code expires in 10 minutes · 3 attempts allowed

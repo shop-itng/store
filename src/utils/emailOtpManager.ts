@@ -1,12 +1,14 @@
 /**
  * Email OTP Manager for Shop It
- * Compliant with strict security rules:
- * - 100% Email-only verification and OTP dispatch (zero SMS/phone dependence).
- * - Code expires in exactly 10 minutes (600,000 ms).
- * - Allows max 3 wrong attempts before code invalidation.
- * - Resend cooldown of exactly 60 seconds.
- * - Dual rate limiting: by email (max 5 OTPs per 15 mins) and by device (max 10 OTPs per 15 mins).
- * - Device tracking for new-device login challenges.
+ *
+ * Fully server-authoritative with Brevo integration and persistent database storage:
+ * - 100% Email-only verification and OTP dispatch (zero phone/SMS).
+ * - 6-digit numeric codes generated on the server and stored hashed with SHA-256.
+ * - Expires in exactly 10 minutes.
+ * - Max 3 failed attempts before the code is cancelled.
+ * - Resend is blocked for 60 seconds (enforced on server).
+ * - Rate limiting: 5 requests per email and 10 per device per 15 minutes (enforced in database).
+ * - Device tracking for new-device login security challenges.
  */
 
 export type OtpPurpose =
@@ -16,30 +18,6 @@ export type OtpPurpose =
   | 'withdrawal'
   | 'payout_account';
 
-export interface EmailOtpSession {
-  code: string;
-  email: string;
-  purpose: OtpPurpose;
-  createdAt: number;
-  expiresAt: number;
-  attemptsRemaining: number;
-  resendAvailableAt: number;
-  metadata?: Record<string, any>;
-}
-
-interface RateLimitTracker {
-  timestamps: number[];
-}
-
-const OTP_EXPIRY_MS = 10 * 60 * 1000; // 10 minutes
-const RESEND_COOLDOWN_MS = 60 * 1000; // 60 seconds
-const MAX_ATTEMPTS = 3;
-const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
-const MAX_EMAIL_REQUESTS = 5;
-const MAX_DEVICE_REQUESTS = 10;
-
-const STORAGE_KEY_SESSIONS = 'shopit_email_otp_sessions';
-const STORAGE_KEY_RATE_LIMITS = 'shopit_email_otp_rate_limits';
 const STORAGE_KEY_DEVICE_ID = 'shopit_device_id';
 
 const memoryStore = new Map<string, string>();
@@ -49,9 +27,7 @@ function safeGetItem(key: string): string | null {
     if (typeof localStorage !== 'undefined' && localStorage) {
       return localStorage.getItem(key);
     }
-  } catch {
-    // fallback to memory
-  }
+  } catch {}
   return memoryStore.get(key) || null;
 }
 
@@ -61,9 +37,7 @@ function safeSetItem(key: string, value: string): void {
       localStorage.setItem(key, value);
       return;
     }
-  } catch {
-    // fallback to memory
-  }
+  } catch {}
   memoryStore.set(key, value);
 }
 
@@ -117,258 +91,106 @@ export function recordKnownDevice(email: string, deviceId: string): void {
   }
 }
 
-function loadSessions(): Record<string, EmailOtpSession> {
-  try {
-    const raw = safeGetItem(STORAGE_KEY_SESSIONS);
-    return raw ? JSON.parse(raw) : {};
-  } catch {
-    return {};
-  }
-}
-
-function saveSessions(sessions: Record<string, EmailOtpSession>): void {
-  try {
-    safeSetItem(STORAGE_KEY_SESSIONS, JSON.stringify(sessions));
-  } catch (err) {
-    console.warn('Could not save OTP sessions:', err);
-  }
-}
-
-function getRateLimits(): Record<string, RateLimitTracker> {
-  try {
-    const raw = safeGetItem(STORAGE_KEY_RATE_LIMITS);
-    return raw ? JSON.parse(raw) : {};
-  } catch {
-    return {};
-  }
-}
-
-function recordRateLimitAttempt(email: string, deviceId: string): void {
-  try {
-    const now = Date.now();
-    const data = getRateLimits();
-
-    const emailKey = `email_${email.trim().toLowerCase()}`;
-    const devKey = `dev_${deviceId}`;
-
-    const cleanList = (arr?: number[]) =>
-      (arr || []).filter(ts => now - ts < RATE_LIMIT_WINDOW_MS);
-
-    data[emailKey] = { timestamps: [...cleanList(data[emailKey]?.timestamps), now] };
-    data[devKey] = { timestamps: [...cleanList(data[devKey]?.timestamps), now] };
-
-    safeSetItem(STORAGE_KEY_RATE_LIMITS, JSON.stringify(data));
-  } catch (err) {
-    console.warn('Could not record rate limit:', err);
-  }
-}
-
 /**
- * Validates whether the email or device has exceeded the rate limit.
+ * Requests the server to generate a 6-digit code, store it hashed in the database,
+ * enforce rate limits (5/email, 10/device per 15m) and resend block (60s),
+ * and dispatch the email via the Brevo API.
  */
-export function checkRateLimit(
-  email: string,
-  deviceId: string
-): { allowed: boolean; reason?: string } {
-  try {
-    const now = Date.now();
-    const data = getRateLimits();
-
-    const emailKey = `email_${email.trim().toLowerCase()}`;
-    const devKey = `dev_${deviceId}`;
-
-    const emailAttempts = (data[emailKey]?.timestamps || []).filter(
-      ts => now - ts < RATE_LIMIT_WINDOW_MS
-    );
-    if (emailAttempts.length >= MAX_EMAIL_REQUESTS) {
-      const oldest = Math.min(...emailAttempts);
-      const remainingMinutes = Math.ceil((RATE_LIMIT_WINDOW_MS - (now - oldest)) / 60000);
-      return {
-        allowed: false,
-        reason: `Too many OTP requests for this email. Please wait ${remainingMinutes} minute(s) before trying again.`,
-      };
-    }
-
-    const devAttempts = (data[devKey]?.timestamps || []).filter(
-      ts => now - ts < RATE_LIMIT_WINDOW_MS
-    );
-    if (devAttempts.length >= MAX_DEVICE_REQUESTS) {
-      const oldest = Math.min(...devAttempts);
-      const remainingMinutes = Math.ceil((RATE_LIMIT_WINDOW_MS - (now - oldest)) / 60000);
-      return {
-        allowed: false,
-        reason: `Too many OTP requests from this device. Please wait ${remainingMinutes} minute(s) before trying again.`,
-      };
-    }
-
-    return { allowed: true };
-  } catch {
-    return { allowed: true };
-  }
-}
-
-/**
- * Generates an Email OTP with 10-minute expiry, 3 attempts allowed, and 60s resend timer.
- */
-export function generateEmailOtp(
+export async function generateEmailOtp(
   email: string,
   purpose: OtpPurpose,
   metadata?: Record<string, any>
-): {
+): Promise<{
   success: boolean;
-  code?: string;
   error?: string;
   waitSeconds?: number;
-} {
+}> {
   const cleanEmail = email.trim().toLowerCase();
   if (!cleanEmail || !cleanEmail.includes('@')) {
     return { success: false, error: 'Please enter a valid email address.' };
   }
 
   const deviceId = getDeviceId();
-  const sessionKey = `${cleanEmail}_${purpose}`;
-  const sessions = loadSessions();
-  const existing = sessions[sessionKey];
-  const now = Date.now();
 
-  // Check 60-second resend cooldown
-  if (existing && now < existing.resendAvailableAt) {
-    const waitSeconds = Math.ceil((existing.resendAvailableAt - now) / 1000);
+  try {
+    const res = await fetch('/api/auth/send-otp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: cleanEmail,
+        purpose,
+        deviceId,
+        metadata,
+      }),
+    });
+
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.status === false) {
+      return {
+        success: false,
+        error: data.message || 'Failed to dispatch verification code.',
+        waitSeconds: data.waitSeconds,
+      };
+    }
+
+    return {
+      success: true,
+    };
+  } catch (err: any) {
     return {
       success: false,
-      error: `Please wait ${waitSeconds}s before requesting a new code.`,
-      waitSeconds,
+      error: err.message || 'Network error communicating with email server.',
     };
   }
-
-  // Check Email & Device rate limits (15 min window)
-  const rateCheck = checkRateLimit(cleanEmail, deviceId);
-  if (!rateCheck.allowed) {
-    return { success: false, error: rateCheck.reason };
-  }
-
-  // Generate 4-digit numeric code
-  const code = Math.floor(1000 + Math.random() * 9000).toString();
-
-  const newSession: EmailOtpSession = {
-    code,
-    email: cleanEmail,
-    purpose,
-    createdAt: now,
-    expiresAt: now + OTP_EXPIRY_MS, // 10 minutes
-    attemptsRemaining: MAX_ATTEMPTS, // 3 wrong tries
-    resendAvailableAt: now + RESEND_COOLDOWN_MS, // 60 seconds
-    metadata,
-  };
-
-  sessions[sessionKey] = newSession;
-  saveSessions(sessions);
-  recordRateLimitAttempt(cleanEmail, deviceId);
-
-  return {
-    success: true,
-    code,
-  };
 }
 
 /**
- * Verifies an entered Email OTP code.
- * Strictly enforces 10-minute expiry and invalidates after 3 failed attempts.
+ * Verifies an entered 6-digit OTP code against the server database hash.
+ * Enforces 10-minute expiry and invalidates after 3 wrong tries.
  */
-export function verifyEmailOtp(
+export async function verifyEmailOtp(
   email: string,
   purpose: OtpPurpose,
   inputCode: string
-): {
+): Promise<{
   success: boolean;
   error?: string;
   attemptsRemaining?: number;
-} {
+}> {
   const cleanEmail = email.trim().toLowerCase();
-  const sessionKey = `${cleanEmail}_${purpose}`;
-  const sessions = loadSessions();
-  const session = sessions[sessionKey];
-  const now = Date.now();
+  const cleanCode = inputCode.trim();
 
-  if (!session) {
-    return {
-      success: false,
-      error: 'No active verification code found. Please request a new code.',
-    };
+  if (!cleanCode || cleanCode.length !== 6) {
+    return { success: false, error: 'Please enter a valid 6-digit verification code.' };
   }
 
-  // 10-minute expiry check
-  if (now > session.expiresAt) {
-    delete sessions[sessionKey];
-    saveSessions(sessions);
-    return {
-      success: false,
-      error: 'Verification code has expired (10 minutes limit). Please request a new code.',
-      attemptsRemaining: 0,
-    };
-  }
+  try {
+    const res = await fetch('/api/auth/verify-otp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: cleanEmail,
+        purpose,
+        code: cleanCode,
+      }),
+    });
 
-  // Attempt limit check
-  if (session.attemptsRemaining <= 0) {
-    delete sessions[sessionKey];
-    saveSessions(sessions);
-    return {
-      success: false,
-      error: 'Maximum attempts exceeded (3 wrong tries). This code has been invalidated. Please request a new code.',
-      attemptsRemaining: 0,
-    };
-  }
-
-  // Code comparison
-  const trimmedInput = (inputCode || '').trim();
-  if (trimmedInput !== session.code) {
-    session.attemptsRemaining -= 1;
-
-    if (session.attemptsRemaining <= 0) {
-      delete sessions[sessionKey];
-      saveSessions(sessions);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.status === false) {
       return {
         success: false,
-        error: 'Incorrect code. 0 attempts remaining. This code is now invalid. Please request a new code.',
-        attemptsRemaining: 0,
-      };
-    } else {
-      sessions[sessionKey] = session;
-      saveSessions(sessions);
-      return {
-        success: false,
-        error: `Incorrect code. ${session.attemptsRemaining} attempt(s) remaining.`,
-        attemptsRemaining: session.attemptsRemaining,
+        error: data.message || 'Invalid verification code.',
+        attemptsRemaining: data.attemptsRemaining,
       };
     }
-  }
 
-  // Correct code - invalidate to prevent reuse
-  delete sessions[sessionKey];
-  saveSessions(sessions);
-
-  // If this was a new device login, mark device as known
-  if (purpose === 'new_device_login') {
-    recordKnownDevice(cleanEmail, getDeviceId());
-  }
-
-  return { success: true };
-}
-
-/**
- * Returns remaining seconds before resend is allowed (0 if ready).
- */
-export function getResendCooldownSeconds(email: string, purpose: OtpPurpose): number {
-  try {
-    const cleanEmail = email.trim().toLowerCase();
-    const sessionKey = `${cleanEmail}_${purpose}`;
-    const sessions = loadSessions();
-    const session = sessions[sessionKey];
-    if (!session) return 0;
-    const now = Date.now();
-    if (now >= session.resendAvailableAt) return 0;
-    return Math.ceil((session.resendAvailableAt - now) / 1000);
-  } catch {
-    return 0;
+    return {
+      success: true,
+    };
+  } catch (err: any) {
+    return {
+      success: false,
+      error: err.message || 'Network error verifying code.',
+    };
   }
 }

@@ -23,6 +23,7 @@ export interface SellerProfile {
   id: string;
   shopName: string;
   ownerName?: string;
+  email?: string;
   bio: string;
   campus?: Campus;
   location?: NigerianLocation;
@@ -174,6 +175,7 @@ export interface Order {
   buyerId: string;
   buyerMaskedId: string; // e.g. "Buyer #7821" for anti-bypass privacy
   buyerName?: string; // Visible only to admin, NOT seller!
+  buyerEmail?: string;
   deliveryArea: string;
   pickupPoint?: string;
   items: OrderItem[];
