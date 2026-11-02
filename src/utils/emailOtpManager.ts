@@ -194,3 +194,13 @@ export async function verifyEmailOtp(
     };
   }
 }
+
+/**
+ * Helper to compute remaining cooldown seconds for UI countdowns (default 60s).
+ */
+export function getResendCooldownSeconds(lastSentTimestamp?: number): number {
+  if (!lastSentTimestamp) return 0;
+  const elapsed = Math.floor((Date.now() - lastSentTimestamp) / 1000);
+  return elapsed < 60 ? 60 - elapsed : 0;
+}
+

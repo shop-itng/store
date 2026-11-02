@@ -100,6 +100,7 @@ async function getPgPool() {
   if (!PG_URL) return null;
   if (!pgPool) {
     try {
+      // @ts-ignore
       const { Pool } = await import('pg');
       pgPool = new Pool({ connectionString: PG_URL, max: 5 });
     } catch {
