@@ -55,6 +55,28 @@ export interface SellerProfile {
   joinedDate: string;
 }
 
+export type AppView =
+  | 'catalog'
+  | 'product_detail'
+  | 'seller_shop'
+  | 'seller_dashboard'
+  | 'wishlist'
+  | 'cart'
+  | 'orders'
+  | 'admin'
+  | 'chat'
+  | 'campus_logistics'
+  | 'craft_studio'
+  | 'campus_ambassadors'
+  | 'terms'
+  | 'privacy'
+  | 'refunds'
+  | 'prohibited-items'
+  | 'seller-guide'
+  | 'buyer-protection'
+  | 'faq'
+  | 'contact';
+
 export interface User {
   id: string;
   email: string;
@@ -69,7 +91,13 @@ export interface User {
   savedDeliveryArea?: string;
   location?: NigerianLocation;
   locationArea?: string;
+  age?: number;
+  hasGuardianConsent?: boolean;
+  guardianName?: string;
+  agreedToTermsDate?: string;
   createdAt?: string;
+  deletionRequestedAt?: string;
+  scheduledDeletionDate?: string;
 }
 
 export type ProductCategory =

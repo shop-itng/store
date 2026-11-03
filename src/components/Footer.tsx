@@ -28,9 +28,9 @@ export const Footer: React.FC = () => {
     <footer className="bg-white dark:bg-[#0D0E12] border-t border-[#E4E4E7] dark:border-[#27272A] mt-16 pt-12 pb-28 md:pb-14 text-xs text-[#52525B] dark:text-[#A1A1AA] transition-colors duration-200">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 space-y-10">
         {/* Main Footer Links & Info */}
-        <div className="grid grid-cols-1 md:grid-cols-12 gap-8">
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-12 gap-8">
           {/* Col 1: Brand & Logo */}
-          <div className="md:col-span-4 space-y-3.5">
+          <div className="md:col-span-3 space-y-3.5">
             <div className="flex items-center gap-2.5">
               <img
                 src="/shopit-logo.png"
@@ -42,13 +42,13 @@ export const Footer: React.FC = () => {
                   Shop It
                 </span>
                 <span className="text-[11px] font-semibold text-[#71717A] dark:text-[#A1A1AA] block mt-0.5">
-                  Nigerian Teens & Youth Marketplace
+                  Operated by TEEDS
                 </span>
               </div>
             </div>
 
-            <p className="text-xs text-[#52525B] dark:text-[#A1A1AA] leading-relaxed max-w-sm">
-              The dedicated safe marketplace built for Nigerian teens and youth to buy and sell handmade beads, fashion, fragrance oils, crochet wear, and crafts with full escrow protection.
+            <p className="text-xs text-[#52525B] dark:text-[#A1A1AA] leading-relaxed">
+              Safe Nigerian youth marketplace where students and teenagers sell what they make with escrow payment protection.
             </p>
 
             <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-[#FAFAFA] dark:bg-[#15161C] border border-[#E4E4E7] dark:border-[#27272A] text-[11px] text-[#111111] dark:text-white font-semibold">
@@ -58,9 +58,9 @@ export const Footer: React.FC = () => {
           </div>
 
           {/* Col 2: Categories */}
-          <div className="md:col-span-3 space-y-3">
+          <div className="md:col-span-2 space-y-3">
             <span className="font-bold text-[#111111] dark:text-white uppercase tracking-wider text-[11px] block">
-              Popular Categories
+              Categories
             </span>
             <ul className="space-y-2 text-[#52525B] dark:text-[#A1A1AA]">
               {[
@@ -87,10 +87,10 @@ export const Footer: React.FC = () => {
             </ul>
           </div>
 
-          {/* Col 3: Safe Spots & Quick Links */}
+          {/* Col 3: Quick Links */}
           <div className="md:col-span-2 space-y-3">
             <span className="font-bold text-[#111111] dark:text-white uppercase tracking-wider text-[11px] block">
-              Quick Links
+              Marketplace
             </span>
             <ul className="space-y-2 text-[#52525B] dark:text-[#A1A1AA]">
               <li>
@@ -106,7 +106,10 @@ export const Footer: React.FC = () => {
               </li>
               <li>
                 <button
-                  onClick={() => setActiveView('campus_logistics')}
+                  onClick={() => {
+                    setActiveView('campus_logistics');
+                    window.scrollTo({ top: 0, behavior: 'smooth' });
+                  }}
                   className="hover:text-[#FF6B00] dark:hover:text-[#FF6B00] font-medium"
                 >
                   Safe Pickup Spots
@@ -114,7 +117,10 @@ export const Footer: React.FC = () => {
               </li>
               <li>
                 <button
-                  onClick={() => setActiveView('orders')}
+                  onClick={() => {
+                    setActiveView('orders');
+                    window.scrollTo({ top: 0, behavior: 'smooth' });
+                  }}
                   className="hover:text-[#FF6B00] dark:hover:text-[#FF6B00] font-medium"
                 >
                   Track Escrow Orders
@@ -139,21 +145,120 @@ export const Footer: React.FC = () => {
             </ul>
           </div>
 
-          {/* Col 4: Safety Notice */}
+          {/* Col 4: Legal & Policies */}
           <div className="md:col-span-3 space-y-3">
             <span className="font-bold text-[#111111] dark:text-white uppercase tracking-wider text-[11px] block">
-              Youth Safety Rules
+              Legal &amp; Trust
             </span>
-            <p className="text-[11px] text-[#52525B] dark:text-[#A1A1AA] leading-relaxed">
-              Never accept payments outside Shop It. Digits and number words are blocked in in-app chat to protect teen buyers and sellers from off-platform fraud.
-            </p>
+            <ul className="space-y-2 text-[#52525B] dark:text-[#A1A1AA]">
+              <li>
+                <button
+                  onClick={() => {
+                    setActiveView('terms');
+                    window.scrollTo({ top: 0, behavior: 'smooth' });
+                  }}
+                  className="hover:text-[#FF6B00] dark:hover:text-[#FF6B00] font-medium"
+                >
+                  Terms of Service
+                </button>
+              </li>
+              <li>
+                <button
+                  onClick={() => {
+                    setActiveView('privacy');
+                    window.scrollTo({ top: 0, behavior: 'smooth' });
+                  }}
+                  className="hover:text-[#FF6B00] dark:hover:text-[#FF6B00] font-medium"
+                >
+                  Privacy Policy (NDPA)
+                </button>
+              </li>
+              <li>
+                <button
+                  onClick={() => {
+                    setActiveView('refunds');
+                    window.scrollTo({ top: 0, behavior: 'smooth' });
+                  }}
+                  className="hover:text-[#FF6B00] dark:hover:text-[#FF6B00] font-medium"
+                >
+                  Refund &amp; Dispute Policy
+                </button>
+              </li>
+              <li>
+                <button
+                  onClick={() => {
+                    setActiveView('prohibited-items');
+                    window.scrollTo({ top: 0, behavior: 'smooth' });
+                  }}
+                  className="hover:text-[#FF6B00] dark:hover:text-[#FF6B00] font-medium"
+                >
+                  Prohibited Items List
+                </button>
+              </li>
+              <li>
+                <button
+                  onClick={() => {
+                    setActiveView('seller-guide');
+                    window.scrollTo({ top: 0, behavior: 'smooth' });
+                  }}
+                  className="hover:text-[#FF6B00] dark:hover:text-[#FF6B00] font-medium"
+                >
+                  Seller Guide
+                </button>
+              </li>
+              <li>
+                <button
+                  onClick={() => {
+                    setActiveView('buyer-protection');
+                    window.scrollTo({ top: 0, behavior: 'smooth' });
+                  }}
+                  className="hover:text-[#FF6B00] dark:hover:text-[#FF6B00] font-medium"
+                >
+                  Buyer Protection &amp; Escrow
+                </button>
+              </li>
+            </ul>
+          </div>
+
+          {/* Col 5: Help & Contact */}
+          <div className="md:col-span-2 space-y-3">
+            <span className="font-bold text-[#111111] dark:text-white uppercase tracking-wider text-[11px] block">
+              Help &amp; Support
+            </span>
+            <ul className="space-y-2 text-[#52525B] dark:text-[#A1A1AA]">
+              <li>
+                <button
+                  onClick={() => {
+                    setActiveView('faq');
+                    window.scrollTo({ top: 0, behavior: 'smooth' });
+                  }}
+                  className="hover:text-[#FF6B00] dark:hover:text-[#FF6B00] font-medium"
+                >
+                  FAQ (14 Questions)
+                </button>
+              </li>
+              <li>
+                <button
+                  onClick={() => {
+                    setActiveView('contact');
+                    window.scrollTo({ top: 0, behavior: 'smooth' });
+                  }}
+                  className="hover:text-[#FF6B00] dark:hover:text-[#FF6B00] font-medium"
+                >
+                  Contact Us
+                </button>
+              </li>
+            </ul>
+
             <div className="p-3 bg-[#FAFAFA] dark:bg-[#15161C] rounded-xl border border-[#E4E4E7] dark:border-[#27272A] text-[11px] space-y-1">
-              <span className="font-bold text-[#111111] dark:text-white flex items-center gap-1">
-                <MapPin className="w-3.5 h-3.5 text-[#FF6B00]" />
-                <span>All 36 States + FCT Supported</span>
+              <span className="font-bold text-[#111111] dark:text-white block">
+                Direct Support
               </span>
-              <p className="text-[#71717A] dark:text-[#A1A1AA]">
-                Shop locally within your area or arrange safe interstate courier delivery.
+              <p className="text-[#71717A] dark:text-[#A1A1AA] break-all">
+                shopitverified@gmail.com
+              </p>
+              <p className="text-[10px] text-[#FF6B00] font-semibold">
+                Replies within 3 working days
               </p>
             </div>
           </div>
@@ -216,12 +321,65 @@ export const Footer: React.FC = () => {
           )}
         </div>
 
-        {/* Bottom copyright - strictly as requested: "copyright 2026 shop it made by teeds" */}
-        <div className="pt-6 border-t border-[#E4E4E7] dark:border-[#27272A] flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-[#71717A] dark:text-[#A1A1AA]">
-          <div className="font-semibold text-[#111111] dark:text-white">
-            © 2026 Shop It. Made by TEEDS.
+        {/* Bottom copyright and legal links - strictly as requested: "copyright 2026 shop it made by teeds" */}
+        <div className="pt-6 border-t border-[#E4E4E7] dark:border-[#27272A] flex flex-col md:flex-row items-center justify-between gap-4 text-xs text-[#71717A] dark:text-[#A1A1AA]">
+          <div className="flex flex-wrap items-center justify-center sm:justify-start gap-x-3 gap-y-1 text-[11px] font-medium">
+            <button
+              onClick={() => {
+                setActiveView('terms');
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+              }}
+              className="hover:text-[#FF6B00] transition-colors"
+            >
+              Terms of Service
+            </button>
+            <span>·</span>
+            <button
+              onClick={() => {
+                setActiveView('privacy');
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+              }}
+              className="hover:text-[#FF6B00] transition-colors"
+            >
+              Privacy Policy
+            </button>
+            <span>·</span>
+            <button
+              onClick={() => {
+                setActiveView('refunds');
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+              }}
+              className="hover:text-[#FF6B00] transition-colors"
+            >
+              Refund Policy
+            </button>
+            <span>·</span>
+            <button
+              onClick={() => {
+                setActiveView('prohibited-items');
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+              }}
+              className="hover:text-[#FF6B00] transition-colors"
+            >
+              Prohibited Items
+            </button>
+            <span>·</span>
+            <button
+              onClick={() => {
+                setActiveView('contact');
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+              }}
+              className="hover:text-[#FF6B00] transition-colors"
+            >
+              Contact Us
+            </button>
           </div>
+
           <div className="flex items-center gap-4 text-[11px]">
+            <div className="font-semibold text-[#111111] dark:text-white">
+              © 2026 Shop It. Made by TEEDS.
+            </div>
+            <span>·</span>
             <span>Currency: Nigerian Naira (₦)</span>
             <span>·</span>
             <span className="text-[#166534] dark:text-[#9FE870] font-bold bg-[#DCFCE7] dark:bg-[#1E2028] border dark:border-[#27272A] px-2 py-0.5 rounded">

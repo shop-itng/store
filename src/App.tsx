@@ -20,6 +20,7 @@ import { CheckoutModal } from './components/CheckoutModal';
 import { AuthModal } from './components/AuthModal';
 import { ToastContainer } from './components/ToastContainer';
 import { Footer } from './components/Footer';
+import { LegalAndHelpPages } from './components/LegalAndHelpPages';
 import { BroadcastBanner } from './components/BroadcastBanner';
 import { Analytics } from '@vercel/analytics/react';
 import { Loading } from './components/Loading';
@@ -380,6 +381,17 @@ const MarketplaceContent: React.FC = () => {
               </div>
             )}
           </div>
+        )}
+
+        {(activeView === 'terms' ||
+          activeView === 'privacy' ||
+          activeView === 'refunds' ||
+          activeView === 'prohibited-items' ||
+          activeView === 'seller-guide' ||
+          activeView === 'buyer-protection' ||
+          activeView === 'faq' ||
+          activeView === 'contact') && (
+          <LegalAndHelpPages initialSlug={activeView as any} />
         )}
       </main>
 

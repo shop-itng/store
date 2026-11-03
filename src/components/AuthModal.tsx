@@ -40,6 +40,7 @@ export const AuthModal: React.FC = () => {
     login,
     notify,
     emergencyControls,
+    setActiveView,
   } = useApp();
 
   // Login form state
@@ -51,6 +52,10 @@ export const AuthModal: React.FC = () => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [role, setRole] = useState<UserRole>('buyer');
+  const [signupAge, setSignupAge] = useState<string>('');
+  const [guardianConsentGiven, setGuardianConsentGiven] = useState(false);
+  const [signupGuardianName, setSignupGuardianName] = useState('');
+  const [agreedToTerms, setAgreedToTerms] = useState(false);
 
   // OTP state
   const [otpCode, setOtpCode] = useState('');
@@ -303,6 +308,33 @@ export const AuthModal: React.FC = () => {
       return;
     }
 
+    const parsedAge = parseInt(signupAge, 10);
+    if (!signupAge || isNaN(parsedAge)) {
+      notify('Please enter your age.', 'error');
+      return;
+    }
+
+    if (parsedAge < 10) {
+      notify('You must be at least 10 years old to use Shop It.', 'error');
+      return;
+    }
+
+    if (parsedAge < 18) {
+      if (!guardianConsentGiven) {
+        notify('Users aged 10 to 17 require parent or guardian consent to register.', 'error');
+        return;
+      }
+      if (!signupGuardianName.trim()) {
+        notify('Please enter your parent or guardian name.', 'error');
+        return;
+      }
+    }
+
+    if (!agreedToTerms) {
+      notify('You must agree to the Terms of Service and Privacy Policy to create an account.', 'error');
+      return;
+    }
+
     const otpResult = await generateEmailOtp(cleanEmail, 'signup', { name: name.trim() });
     if (!otpResult.success) {
       notify(otpResult.error || 'Could not send verification code.', 'error');
@@ -315,6 +347,10 @@ export const AuthModal: React.FC = () => {
       email: cleanEmail,
       password,
       role,
+      age: parsedAge,
+      hasGuardianConsent: parsedAge < 18 ? guardianConsentGiven : true,
+      guardianName: parsedAge < 18 ? signupGuardianName.trim() : undefined,
+      agreedToTermsDate: new Date().toISOString(),
     };
     setPendingAuthData(authData);
     setSignupCooldown(60);
@@ -739,6 +775,99 @@ export const AuthModal: React.FC = () => {
                 placeholder="At least 6 characters"
                 className="w-full h-11 px-3.5 rounded-xl border border-slate-200 text-xs sm:text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#FF6B00]"
               />
+            </div>
+
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-xs font-semibold text-slate-700">Your Age *</label>
+                <span className="text-[11px] text-slate-500">Minimum age is 10</span>
+              </div>
+              <input
+                type="number"
+                required
+                min={10}
+                max={120}
+                value={signupAge}
+                onChange={e => setSignupAge(e.target.value)}
+                placeholder="e.g. 16"
+                className="w-full h-11 px-3.5 rounded-xl border border-slate-200 text-xs sm:text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#FF6B00]"
+              />
+              {signupAge && parseInt(signupAge, 10) < 10 && (
+                <p className="text-[11px] text-red-600 font-bold mt-1">
+                  You must be at least 10 years old to use Shop It.
+                </p>
+              )}
+            </div>
+
+            {signupAge && parseInt(signupAge, 10) >= 10 && parseInt(signupAge, 10) < 18 && (
+              <div className="p-3 bg-amber-50 rounded-xl border border-amber-200 space-y-2.5">
+                <div className="text-[11px] text-amber-900 font-bold">
+                  Parent or Guardian Consent Required (Ages 10–17)
+                </div>
+                <div className="flex items-start gap-2">
+                  <input
+                    type="checkbox"
+                    id="guardian-consent"
+                    required
+                    checked={guardianConsentGiven}
+                    onChange={e => setGuardianConsentGiven(e.target.checked)}
+                    className="mt-0.5 w-4 h-4 rounded text-[#FF6B00] border-amber-300 focus:ring-[#FF6B00]"
+                  />
+                  <label htmlFor="guardian-consent" className="text-xs text-amber-900 leading-snug">
+                    I confirm that I have my parent or guardian&apos;s consent to register and use Shop It.
+                  </label>
+                </div>
+                <div>
+                  <label className="text-[11px] font-semibold text-amber-900 block mb-1">
+                    Parent or Guardian Full Name *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={signupGuardianName}
+                    onChange={e => setSignupGuardianName(e.target.value)}
+                    placeholder="e.g. Mrs. Funke Adeyemi"
+                    className="w-full h-9 px-3 rounded-lg border border-amber-300 bg-white text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#FF6B00]"
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Terms and Privacy Policy Agreement */}
+            <div className="flex items-start gap-2 pt-1">
+              <input
+                type="checkbox"
+                id="agree-terms"
+                required
+                checked={agreedToTerms}
+                onChange={e => setAgreedToTerms(e.target.checked)}
+                className="mt-0.5 w-4 h-4 rounded text-[#FF6B00] border-slate-300 focus:ring-[#FF6B00]"
+              />
+              <label htmlFor="agree-terms" className="text-xs text-slate-600 leading-snug">
+                I agree to the{' '}
+                <button
+                  type="button"
+                  onClick={() => {
+                    closeAuthModal();
+                    setActiveView('terms');
+                  }}
+                  className="underline font-bold text-[#111111] hover:text-[#FF6B00]"
+                >
+                  Terms of Service
+                </button>{' '}
+                and{' '}
+                <button
+                  type="button"
+                  onClick={() => {
+                    closeAuthModal();
+                    setActiveView('privacy');
+                  }}
+                  className="underline font-bold text-[#111111] hover:text-[#FF6B00]"
+                >
+                  Privacy Policy
+                </button>
+                .
+              </label>
             </div>
 
             <button

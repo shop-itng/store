@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import {
   User,
+  AppView,
   Product,
   SellerProfile,
   CartItem,
@@ -157,34 +158,9 @@ interface AppContextType {
   getDeliveryFee: (sellerLoc?: NigerianLocation) => { fee: number; method: string };
 
   // Navigation views
-  activeView:
-    | 'catalog'
-    | 'product_detail'
-    | 'seller_shop'
-    | 'seller_dashboard'
-    | 'wishlist'
-    | 'cart'
-    | 'orders'
-    | 'admin'
-    | 'chat'
-    | 'campus_logistics'
-    | 'craft_studio'
-    | 'campus_ambassadors';
-  setActiveView: (
-    view:
-      | 'catalog'
-      | 'product_detail'
-      | 'seller_shop'
-      | 'seller_dashboard'
-      | 'wishlist'
-      | 'cart'
-      | 'orders'
-      | 'admin'
-      | 'chat'
-      | 'campus_logistics'
-      | 'craft_studio'
-      | 'campus_ambassadors'
-  ) => void;
+  activeView: AppView;
+  setActiveView: (view: AppView) => void;
+  requestAccountDeletion: () => void;
   selectedProductId: string | null;
   selectedSellerId: string | null;
   openProduct: (id: string) => void;
@@ -551,21 +527,57 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
   };
 
+  const LEGAL_SLUGS: AppView[] = [
+    'terms',
+    'privacy',
+    'refunds',
+    'prohibited-items',
+    'seller-guide',
+    'buyer-protection',
+    'faq',
+    'contact',
+  ];
+
+  const getInitialView = (): AppView => {
+    if (typeof window !== 'undefined') {
+      const path = window.location.pathname.replace(/^\//, '').toLowerCase();
+      if (LEGAL_SLUGS.includes(path as AppView)) {
+        return path as AppView;
+      }
+    }
+    return 'catalog';
+  };
+
   // Navigation states
-  const [activeView, setActiveView] = useState<
-    | 'catalog'
-    | 'product_detail'
-    | 'seller_shop'
-    | 'seller_dashboard'
-    | 'wishlist'
-    | 'cart'
-    | 'orders'
-    | 'admin'
-    | 'chat'
-    | 'campus_logistics'
-    | 'craft_studio'
-    | 'campus_ambassadors'
-  >('catalog');
+  const [activeView, _setActiveView] = useState<AppView>(getInitialView);
+
+  const setActiveView = (view: AppView) => {
+    _setActiveView(view);
+    if (typeof window !== 'undefined') {
+      if (LEGAL_SLUGS.includes(view)) {
+        if (window.location.pathname !== `/${view}`) {
+          window.history.pushState({ view }, '', `/${view}`);
+        }
+      } else if (view === 'catalog') {
+        if (window.location.pathname !== '/' && window.location.pathname !== '') {
+          window.history.pushState({ view: 'catalog' }, '', '/');
+        }
+      }
+    }
+  };
+
+  useEffect(() => {
+    const onPopState = () => {
+      const path = window.location.pathname.replace(/^\//, '').toLowerCase();
+      if (LEGAL_SLUGS.includes(path as AppView)) {
+        _setActiveView(path as AppView);
+      } else if (path === '' || path === '/') {
+        _setActiveView('catalog');
+      }
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
   const [selectedProductId, setSelectedProductId] = useState<string | null>(null);
   const [selectedSellerId, setSelectedSellerId] = useState<string | null>(null);
 
@@ -906,6 +918,59 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const interval = setInterval(checkAutoRelease, 30000);
     return () => clearInterval(interval);
   }, [orders]);
+
+  // NDPA Compliance: 30-day automated purge for verification ID photos and selfies
+  useEffect(() => {
+    const purgeStaleVerificationFiles = () => {
+      const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+      const now = Date.now();
+      setVerificationRequests(prev => {
+        let changed = false;
+        const updated = prev.map(req => {
+          const submittedTime = req.submittedAt ? new Date(req.submittedAt).getTime() : 0;
+          const isOlderThan30Days = submittedTime > 0 && now - submittedTime > THIRTY_DAYS_MS;
+          if (
+            isOlderThan30Days &&
+            (req.idCardPhotoUrl !== '[Purged after 30-day retention]' ||
+              (req.selfiePhotoUrl && req.selfiePhotoUrl !== '[Purged after 30-day retention]'))
+          ) {
+            changed = true;
+            return {
+              ...req,
+              idCardPhotoUrl: '[Purged after 30-day retention]',
+              selfiePhotoUrl: req.selfiePhotoUrl ? '[Purged after 30-day retention]' : undefined,
+            };
+          }
+          return req;
+        });
+        return changed ? updated : prev;
+      });
+    };
+
+    purgeStaleVerificationFiles();
+    const interval = setInterval(purgeStaleVerificationFiles, 60000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const requestAccountDeletion = () => {
+    if (!currentUser) return;
+    const scheduledDate = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toLocaleDateString('en-NG', {
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric',
+    });
+    notify(
+      `Account deletion scheduled. As guaranteed by our Privacy Policy, your account and personal data will be permanently purged in 14 days (${scheduledDate}).`,
+      'info'
+    );
+    const updatedUser: User = {
+      ...currentUser,
+      deletionRequestedAt: new Date().toISOString(),
+      scheduledDeletionDate: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(),
+    };
+    setCurrentUser(updatedUser);
+    localStorage.setItem('shopit_current_user', JSON.stringify(updatedUser));
+  };
 
   const notify = (message: string, type: 'success' | 'info' | 'error' = 'info') => {
     const id = Date.now().toString() + Math.random().toString().slice(2, 5);
@@ -3163,6 +3228,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         resetFilters,
         activeView,
         setActiveView,
+        requestAccountDeletion,
         selectedProductId,
         selectedSellerId,
         openProduct,

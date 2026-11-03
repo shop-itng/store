@@ -394,14 +394,16 @@ export const CheckoutModal: React.FC = () => {
           </div>
         )}
 
-        {/* Rule 1 Guarantee Banner */}
-        <div className="p-3 bg-amber-50/70 dark:bg-[#1E2028] border border-amber-200 dark:border-amber-700/50 rounded-xl text-xs space-y-1">
-          <div className="flex items-center gap-1.5 font-bold text-amber-900 dark:text-amber-200">
-            <ShieldCheck className="w-4 h-4 text-[#FF6B00]" />
-            <span>Paystack Escrow Protection & Buyer Refund Guarantee</span>
+        {/* Buyer Escrow Safety Banner */}
+        <div className="p-3.5 bg-emerald-50 dark:bg-emerald-950/30 border-2 border-emerald-500/30 dark:border-emerald-500/40 rounded-xl text-xs space-y-1 shadow-xs">
+          <div className="flex items-center gap-1.5 font-bold text-emerald-900 dark:text-emerald-200">
+            <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-[#9FE870] shrink-0" />
+            <span className="text-xs sm:text-sm font-black">
+              Your money is held safely until you confirm your item arrived. Never pay outside Shop It.
+            </span>
           </div>
-          <p className="text-[11px] text-amber-800 dark:text-[#A1A1AA] leading-relaxed">
-            Your money stays held securely in escrow. Sellers are only paid after you inspect and accept your craft.
+          <p className="text-[11px] text-emerald-800 dark:text-emerald-300 leading-relaxed pl-5.5">
+            Payments are processed securely via Paystack. Sellers are only paid after you inspect and tap &quot;Item received&quot;.
           </p>
         </div>
 
