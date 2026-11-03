@@ -1,7 +1,7 @@
 import express from 'express';
 import crypto from 'crypto';
-import paystackWebhookHandler from './paystack/webhook';
-import { renderTransactionalEmail, EmailTemplateKey } from '../src/utils/transactionalEmails';
+import paystackWebhookHandler from './paystack/webhook.js';
+import { renderTransactionalEmail, EmailTemplateKey } from '../src/utils/transactionalEmails.js';
 import {
   checkRateLimit as checkOtpRateLimit,
   recordRateLimit as recordOtpRateLimit,
@@ -12,7 +12,7 @@ import {
   deleteOtpRecord,
   hashOtp,
   verifyOtpHash,
-} from './db/otpStore';
+} from './db/otpStore.js';
 
 const app = express();
 
