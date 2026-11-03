@@ -216,11 +216,17 @@ export const CheckoutModal: React.FC = () => {
 
       const initData = await response.json();
 
-      if (!initData.status || !initData.data) {
+      if (!initData.status) {
         throw new Error(initData.message || 'Payment initialization failed. Please try again.');
       }
 
-      const { reference, orderId: assignedOrderId, pricing, amountInKobo, authorization_url, publicKey } = initData.data;
+      const payload = initData.data || initData;
+      const reference = payload.reference;
+      const assignedOrderId = payload.orderId;
+      const pricing = payload.pricing;
+      const amountInKobo = payload.amountInKobo;
+      const authorization_url = payload.authorization_url || payload.authorizationUrl;
+      const publicKey = payload.publicKey || activePublicKey;
       const pubKey = publicKey || activePublicKey;
 
       if (pubKey) {

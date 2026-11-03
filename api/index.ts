@@ -313,15 +313,23 @@ router.post('/paystack/initialize', async (req, res) => {
           newServerOrder.authorizationUrl = paystackData.data.authorization_url;
           newServerOrder.accessCode = paystackData.data.access_code;
 
-          return res.json({
-            status: true,
+          const responseData = {
             reference,
             orderId: assignedOrderId,
             amountInKobo: pricing.amountInKobo,
             amountNaira: pricing.grandTotalNaira,
             accessCode: paystackData.data.access_code,
+            access_code: paystackData.data.access_code,
             authorizationUrl: paystackData.data.authorization_url,
+            authorization_url: paystackData.data.authorization_url,
+            publicKey: PAYSTACK_PUBLIC_KEY,
             pricing,
+          };
+
+          return res.json({
+            status: true,
+            ...responseData,
+            data: responseData,
           });
         } else {
           console.warn('Paystack API initialize failed:', paystackData.message);
@@ -331,13 +339,19 @@ router.post('/paystack/initialize', async (req, res) => {
       }
     }
 
-    return res.json({
-      status: true,
+    const fallbackData = {
       reference,
       orderId: assignedOrderId,
       amountInKobo: pricing.amountInKobo,
       amountNaira: pricing.grandTotalNaira,
+      publicKey: PAYSTACK_PUBLIC_KEY,
       pricing,
+    };
+
+    return res.json({
+      status: true,
+      ...fallbackData,
+      data: fallbackData,
     });
   } catch (err: any) {
     console.error('Error in /api/paystack/initialize:', err.message);
