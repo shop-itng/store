@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import crypto from 'crypto';
+import { savePaymentRecord } from '../db/otpStore.js';
 
 /**
  * Vercel Serverless Function Config:
@@ -350,8 +351,26 @@ export default async function handler(req: any, res: any) {
           }
         }
 
-        // Record reference in idempotency cache
+        // Record reference in idempotency cache and persistent database
         processedReferences.add(reference);
+        try {
+          await savePaymentRecord({
+            reference,
+            orderId: data.metadata?.orderId || `ORD_${reference}`,
+            amountKobo: confirmedAmountKobo,
+            amountNaira: confirmedAmountKobo / 100,
+            currency: String(data.currency || 'NGN').toUpperCase(),
+            channel: data.channel || 'card',
+            status: 'paid',
+            webhookReceived: true,
+            customerEmail: data.customer?.email || '',
+            data,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          });
+        } catch (dbErr: any) {
+          console.warn('[Paystack Webhook DB Save Warning]', dbErr.message);
+        }
 
         res.setHeader('Content-Type', 'application/json');
         res.statusCode = 200;

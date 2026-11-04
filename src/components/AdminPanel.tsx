@@ -38,6 +38,11 @@ import {
   Power,
   ShieldAlert,
   History,
+  CreditCard,
+  Flag,
+  Download,
+  ExternalLink,
+  Clock,
 } from 'lucide-react';
 import { formatNaira, calculateServiceFee, getPricingBreakdown } from '../utils/pricing';
 import { AdminSubRole, LedgerEntryType, Order } from '../types';
@@ -153,6 +158,111 @@ export const AdminPanel: React.FC = () => {
   });
   const [selectedAdminReceiptOrder, setSelectedAdminReceiptOrder] = useState<Order | null>(null);
 
+  // Paystack Live Payments audit state (Point 11)
+  const [paymentsList, setPaymentsList] = useState<any[]>([]);
+  const [loadingPayments, setLoadingPayments] = useState(false);
+  const [recheckingRef, setRecheckingRef] = useState<string | null>(null);
+
+  // User Reports queue state (Part 2 Item 4)
+  const [reportsList, setReportsList] = useState<any[]>([]);
+  const [loadingReports, setLoadingReports] = useState(false);
+  const [reportFilter, setReportFilter] = useState<'all' | 'open' | 'reviewing' | 'resolved'>('all');
+  const [reportActionNotes, setReportActionNotes] = useState<Record<string, string>>({});
+  const [isExportingData, setIsExportingData] = useState(false);
+
+  const fetchPayments = async () => {
+    setLoadingPayments(true);
+    try {
+      const res = await fetch('/api/paystack/payments');
+      const data = await res.json();
+      if (data.status && Array.isArray(data.payments)) {
+        setPaymentsList(data.payments);
+      }
+    } catch (e) {
+      console.error('Failed to load payments:', e);
+    } finally {
+      setLoadingPayments(false);
+    }
+  };
+
+  const fetchReports = async () => {
+    setLoadingReports(true);
+    try {
+      const res = await fetch('/api/reports');
+      const data = await res.json();
+      if (data.status && Array.isArray(data.reports)) {
+        setReportsList(data.reports);
+      }
+    } catch (e) {
+      console.error('Failed to load reports:', e);
+    } finally {
+      setLoadingReports(false);
+    }
+  };
+
+  const recheckPaymentWithPaystack = async (reference: string) => {
+    setRecheckingRef(reference);
+    try {
+      const res = await fetch(`/api/paystack/verify/${encodeURIComponent(reference)}`);
+      const data = await res.json();
+      if (data.status) {
+        notify(`Payment Verified: Ref ${reference} is ${data.isPaid ? 'PAID' : data.paystackStatus || 'Pending'}`, 'success');
+        await fetchPayments();
+      } else {
+        notify(`Verification Check: ${data.message || 'Payment not verified'}`, 'info');
+      }
+    } catch (e: any) {
+      notify(`Re-check Failed: ${e.message}`, 'error');
+    } finally {
+      setRecheckingRef(null);
+    }
+  };
+
+  const handleUpdateReport = async (reportId: string, status: 'open' | 'reviewing' | 'resolved') => {
+    const note = reportActionNotes[reportId] || `Status updated to ${status} by moderator`;
+    try {
+      const res = await fetch(`/api/reports/${encodeURIComponent(reportId)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status, actionNote: note }),
+      });
+      const data = await res.json();
+      if (data.status) {
+        notify(`Report Updated: Status changed to ${status}`, 'success');
+        await fetchReports();
+      }
+    } catch (e: any) {
+      notify(`Update Failed: ${e.message}`, 'error');
+    }
+  };
+
+  const handleExportData = async () => {
+    setIsExportingData(true);
+    try {
+      const res = await fetch('/api/admin/export-data');
+      if (!res.ok) throw new Error('Export request failed');
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `shopit-backup-${new Date().toISOString().split('T')[0]}.json`;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+      notify('Export Complete: Sanitized JSON backup downloaded.', 'success');
+    } catch (e: any) {
+      notify(`Export Failed: ${e.message}`, 'error');
+    } finally {
+      setIsExportingData(false);
+    }
+  };
+
+  React.useEffect(() => {
+    fetchPayments();
+    fetchReports();
+  }, []);
+
   // Calculate live financial figures
   const pendingOrders = orders.filter(o => o.status === 'paid' || o.status === 'packed' || o.status === 'shipped' || o.status === 'delivered');
   const totalHeldInEscrow = pendingOrders.reduce((sum, o) => sum + o.grandTotal, 0);
@@ -185,11 +295,13 @@ export const AdminPanel: React.FC = () => {
           </p>
         </div>
 
-        {/* Sub-role selector tabs and Quick Database Wipe */}
+        {/* Sub-role selector tabs and Action Buttons */}
         <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
           <div className="flex items-center bg-stone-900 p-1.5 rounded-xl border border-stone-800 shrink-0 overflow-x-auto gap-1">
             {[
               { id: 'moderator', label: 'NIN & Safety', icon: ShieldCheck, badge: verificationRequests.filter(r => r.status === 'pending').length },
+              { id: 'payments', label: 'Payments & Paystack', icon: CreditCard, badge: undefined },
+              { id: 'reports', label: 'Reports Queue', icon: Flag, badge: reportsList.filter(r => r.status === 'open').length },
               { id: 'accounts', label: 'All Accounts & Powers', icon: Users, badge: registeredUsers.length },
               { id: 'finance', label: 'Finance & Escrow', icon: DollarSign, badge: undefined },
               { id: 'support', label: 'Support & Disputes', icon: Headphones, badge: disputes.filter(d => d.status === 'open').length },
@@ -203,6 +315,8 @@ export const AdminPanel: React.FC = () => {
                   onClick={() => {
                     setActiveTab(tab.id as AdminSubRole);
                     setAdminSubRole(tab.id as AdminSubRole);
+                    if (tab.id === 'payments') fetchPayments();
+                    if (tab.id === 'reports') fetchReports();
                   }}
                   className={`flex items-center gap-2 px-3 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-black transition-all ${
                     isActive
@@ -222,18 +336,31 @@ export const AdminPanel: React.FC = () => {
             })}
           </div>
 
-          <button
-            type="button"
-            onClick={() => {
-              setClearDbConfirmText('');
-              setIsClearDbModalOpen(true);
-            }}
-            className="px-3.5 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-black transition-all flex items-center justify-center gap-1.5 border border-red-500 shadow-md shrink-0 active:scale-95"
-            title="Wipe database: removes all sellers, businesses, and accounts except Moderator"
-          >
-            <Trash2 className="w-4 h-4" />
-            <span>Clear Database</span>
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleExportData}
+              disabled={isExportingData}
+              className="px-3.5 py-2.5 rounded-xl bg-stone-800 hover:bg-stone-700 text-white text-xs font-black transition-all flex items-center justify-center gap-1.5 border border-stone-700 shadow-md shrink-0 active:scale-95 disabled:opacity-50"
+              title="Download sanitized data backup JSON (NDPA compliant)"
+            >
+              <Download className={`w-4 h-4 ${isExportingData ? 'animate-bounce' : ''}`} />
+              <span>{isExportingData ? 'Exporting...' : 'Export Data'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setClearDbConfirmText('');
+                setIsClearDbModalOpen(true);
+              }}
+              className="px-3.5 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-black transition-all flex items-center justify-center gap-1.5 border border-red-500 shadow-md shrink-0 active:scale-95"
+              title="Wipe database: removes all sellers, businesses, and accounts except Moderator"
+            >
+              <Trash2 className="w-4 h-4" />
+              <span>Clear Database</span>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -2116,6 +2243,408 @@ export const AdminPanel: React.FC = () => {
               ))}
             </div>
           </div>
+        </div>
+      )}
+
+      {/* ========================================================= */}
+      {/* 6. PAYMENTS & PAYSTACK AUDIT TAB (Point 11)              */}
+      {/* ========================================================= */}
+      {activeTab === 'payments' && (
+        <div className="space-y-6">
+          {/* Top Metrics Cards */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+            <div className="p-4 bg-white rounded-2xl border border-stone-200 shadow-xs">
+              <span className="text-xs text-stone-500 font-medium">Total Transactions</span>
+              <p className="text-2xl font-black font-mono-numbers text-stone-900 mt-1">
+                {paymentsList.length}
+              </p>
+              <span className="text-[11px] text-stone-400 mt-0.5 block">Card, Transfer & USSD</span>
+            </div>
+
+            <div className="p-4 bg-white rounded-2xl border border-stone-200 shadow-xs">
+              <span className="text-xs text-stone-500 font-medium">Confirmed Paid</span>
+              <p className="text-2xl font-black font-mono-numbers text-emerald-600 mt-1">
+                {paymentsList.filter(p => p.status === 'paid').length}
+              </p>
+              <span className="text-[11px] text-emerald-700 font-semibold mt-0.5 block">Secured in Escrow</span>
+            </div>
+
+            <div className="p-4 bg-white rounded-2xl border border-stone-200 shadow-xs">
+              <span className="text-xs text-stone-500 font-medium">Total Settled Inflow</span>
+              <p className="text-xl sm:text-2xl font-black font-mono-numbers text-stone-900 mt-1">
+                {formatNaira(
+                  paymentsList
+                    .filter(p => p.status === 'paid')
+                    .reduce((sum, p) => sum + (p.amountNaira || 0), 0)
+                )}
+              </p>
+              <span className="text-[11px] text-stone-400 mt-0.5 block">Processed through Paystack</span>
+            </div>
+
+            <div className="p-4 bg-white rounded-2xl border border-stone-200 shadow-xs">
+              <span className="text-xs text-stone-500 font-medium">Webhooks Verified</span>
+              <p className="text-2xl font-black font-mono-numbers text-[#FF6B00] mt-1">
+                {paymentsList.filter(p => p.webhookReceived).length}
+              </p>
+              <span className="text-[11px] text-stone-400 mt-0.5 block">HMAC SHA512 confirmed</span>
+            </div>
+          </div>
+
+          {/* Table Container */}
+          <div className="bg-white rounded-2xl border border-stone-200 shadow-xs overflow-hidden">
+            <div className="p-5 border-b border-stone-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <h3 className="text-base font-black text-stone-900 flex items-center gap-2">
+                  <CreditCard className="w-5 h-5 text-[#FF6B00]" />
+                  <span>Paystack Real-Time Payments Ledger</span>
+                </h3>
+                <p className="text-xs text-stone-500 mt-0.5">
+                  Every transaction started on server in kobo with unique reference, channels, and Paystack verification status.
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={fetchPayments}
+                  disabled={loadingPayments}
+                  className="px-3.5 py-2 rounded-xl border border-stone-300 hover:bg-stone-50 text-xs font-bold text-stone-700 flex items-center gap-1.5 transition-colors disabled:opacity-50"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${loadingPayments ? 'animate-spin' : ''}`} />
+                  <span>Refresh</span>
+                </button>
+              </div>
+            </div>
+
+            {loadingPayments && paymentsList.length === 0 ? (
+              <div className="p-12 text-center text-xs text-stone-500">
+                <RefreshCw className="w-6 h-6 animate-spin text-[#FF6B00] mx-auto mb-2" />
+                Loading live payment records...
+              </div>
+            ) : paymentsList.length === 0 ? (
+              <div className="p-12 text-center text-xs text-stone-500">
+                <CreditCard className="w-8 h-8 text-stone-300 mx-auto mb-2" />
+                <p className="font-bold text-stone-700">No payment records logged yet</p>
+                <p className="text-stone-400 mt-1">
+                  Payments initialized by buyers at checkout will automatically appear here.
+                </p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-stone-50 text-stone-600 font-bold border-b border-stone-200">
+                    <tr>
+                      <th className="py-3 px-4">Order & Customer</th>
+                      <th className="py-3 px-4">Reference</th>
+                      <th className="py-3 px-4">Channel</th>
+                      <th className="py-3 px-4">Amount</th>
+                      <th className="py-3 px-4">Status</th>
+                      <th className="py-3 px-4">Webhook</th>
+                      <th className="py-3 px-4">Time</th>
+                      <th className="py-3 px-4 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-stone-100">
+                    {paymentsList.map(payment => {
+                      const isPaid = payment.status === 'paid';
+                      const isPending = payment.status === 'pending_payment';
+                      const isRefunded = payment.status === 'refunded';
+                      const isRechecking = recheckingRef === payment.reference;
+
+                      return (
+                        <tr key={payment.reference} className="hover:bg-stone-50/70 transition-colors">
+                          <td className="py-3.5 px-4 font-medium">
+                            <span className="font-bold text-stone-900 block font-mono text-[11px]">
+                              #{payment.orderId || 'N/A'}
+                            </span>
+                            <span className="text-[11px] text-stone-500">
+                              {payment.customerEmail || 'Buyer'}
+                            </span>
+                          </td>
+                          <td className="py-3.5 px-4 font-mono text-[11px] text-stone-700">
+                            <span className="bg-stone-100 px-2 py-1 rounded text-[11px] select-all">
+                              {payment.reference}
+                            </span>
+                          </td>
+                          <td className="py-3.5 px-4">
+                            <span className="px-2 py-0.5 rounded-md bg-stone-100 text-stone-700 text-[10px] font-bold uppercase tracking-wider">
+                              {payment.channel || 'multi'}
+                            </span>
+                          </td>
+                          <td className="py-3.5 px-4 font-bold text-stone-900 font-mono-numbers">
+                            {formatNaira(payment.amountNaira || (payment.amountKobo ? payment.amountKobo / 100 : 0))}
+                          </td>
+                          <td className="py-3.5 px-4">
+                            <span
+                              className={`px-2.5 py-1 rounded-full text-[10px] font-black inline-flex items-center gap-1 ${
+                                isPaid
+                                  ? 'bg-emerald-100 text-emerald-800'
+                                  : isRefunded
+                                  ? 'bg-purple-100 text-purple-800'
+                                  : isPending
+                                  ? 'bg-amber-100 text-amber-800'
+                                  : 'bg-stone-100 text-stone-800'
+                              }`}
+                            >
+                              {isPaid && <CheckCircle2 className="w-3 h-3" />}
+                              {isRefunded && <RefreshCw className="w-3 h-3" />}
+                              {isPending && <Clock className="w-3 h-3" />}
+                              <span className="capitalize">{payment.status.replace('_', ' ')}</span>
+                            </span>
+                          </td>
+                          <td className="py-3.5 px-4">
+                            {payment.webhookReceived ? (
+                              <span className="px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 text-[10px] font-bold inline-flex items-center gap-1">
+                                <Check className="w-3 h-3" /> Yes
+                              </span>
+                            ) : (
+                              <span className="px-2 py-0.5 rounded bg-stone-100 text-stone-500 text-[10px] font-medium">
+                                Pending
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-3.5 px-4 text-[11px] text-stone-500">
+                            {new Date(payment.createdAt).toLocaleString('en-NG', {
+                              month: 'short',
+                              day: 'numeric',
+                              hour: '2-digit',
+                              minute: '2-digit',
+                            })}
+                          </td>
+                          <td className="py-3.5 px-4 text-right">
+                            <button
+                              type="button"
+                              onClick={() => recheckPaymentWithPaystack(payment.reference)}
+                              disabled={isRechecking}
+                              className="px-3 py-1.5 rounded-lg bg-stone-900 hover:bg-black text-[#9FE870] text-[11px] font-black transition-all inline-flex items-center gap-1 disabled:opacity-50 cursor-pointer"
+                              title="Query Paystack Verify Transaction API directly"
+                            >
+                              <RefreshCw className={`w-3 h-3 ${isRechecking ? 'animate-spin' : ''}`} />
+                              <span>{isRechecking ? 'Checking...' : 'Re-check'}</span>
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================= */}
+      {/* 7. REPORTS QUEUE TAB (Part 2 Item 4)                     */}
+      {/* ========================================================= */}
+      {activeTab === 'reports' && (
+        <div className="space-y-6">
+          {/* Top Metrics Cards */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+            <div className="p-4 bg-white rounded-2xl border border-stone-200 shadow-xs">
+              <span className="text-xs text-stone-500 font-medium">Total Reports</span>
+              <p className="text-2xl font-black font-mono-numbers text-stone-900 mt-1">
+                {reportsList.length}
+              </p>
+              <span className="text-[11px] text-stone-400 mt-0.5 block">Community safety submissions</span>
+            </div>
+
+            <div className="p-4 bg-white rounded-2xl border border-stone-200 shadow-xs">
+              <span className="text-xs text-stone-500 font-medium">Open / Unreviewed</span>
+              <p className="text-2xl font-black font-mono-numbers text-red-600 mt-1">
+                {reportsList.filter(r => r.status === 'open').length}
+              </p>
+              <span className="text-[11px] text-red-700 font-semibold mt-0.5 block">Requires immediate action</span>
+            </div>
+
+            <div className="p-4 bg-white rounded-2xl border border-stone-200 shadow-xs">
+              <span className="text-xs text-stone-500 font-medium">In Investigation</span>
+              <p className="text-2xl font-black font-mono-numbers text-amber-600 mt-1">
+                {reportsList.filter(r => r.status === 'reviewing').length}
+              </p>
+              <span className="text-[11px] text-amber-700 font-semibold mt-0.5 block">Moderator actively auditing</span>
+            </div>
+
+            <div className="p-4 bg-white rounded-2xl border border-stone-200 shadow-xs">
+              <span className="text-xs text-stone-500 font-medium">Resolved Cases</span>
+              <p className="text-2xl font-black font-mono-numbers text-emerald-600 mt-1">
+                {reportsList.filter(r => r.status === 'resolved').length}
+              </p>
+              <span className="text-[11px] text-emerald-700 font-semibold mt-0.5 block">Closed with action logs</span>
+            </div>
+          </div>
+
+          {/* Filter Bar & Header */}
+          <div className="bg-white rounded-2xl border border-stone-200 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs">
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-bold text-stone-600">Filter Reports:</span>
+              {(['all', 'open', 'reviewing', 'resolved'] as const).map(f => (
+                <button
+                  key={f}
+                  type="button"
+                  onClick={() => setReportFilter(f)}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold capitalize transition-all ${
+                    reportFilter === f
+                      ? 'bg-[#FF6B00] text-white shadow-xs'
+                      : 'bg-stone-100 text-stone-600 hover:bg-stone-200'
+                  }`}
+                >
+                  {f} {f !== 'all' && `(${reportsList.filter(r => r.status === f).length})`}
+                </button>
+              ))}
+            </div>
+
+            <button
+              type="button"
+              onClick={fetchReports}
+              disabled={loadingReports}
+              className="px-3.5 py-1.5 rounded-xl border border-stone-300 hover:bg-stone-50 text-xs font-bold text-stone-700 flex items-center gap-1.5 transition-colors self-start sm:self-auto"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${loadingReports ? 'animate-spin' : ''}`} />
+              <span>Refresh Queue</span>
+            </button>
+          </div>
+
+          {/* Reports List */}
+          {reportsList
+            .filter(r => reportFilter === 'all' || r.status === reportFilter)
+            .length === 0 ? (
+            <div className="bg-white rounded-2xl border border-stone-200 p-12 text-center">
+              <Flag className="w-8 h-8 text-stone-300 mx-auto mb-2" />
+              <p className="font-bold text-stone-700 text-sm">No reports in this category</p>
+              <p className="text-stone-400 text-xs mt-1">
+                Community submissions from products, seller shops, reviews, and chats appear here.
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {reportsList
+                .filter(r => reportFilter === 'all' || r.status === reportFilter)
+                .map(report => {
+                  const isOpen = report.status === 'open';
+                  const isReviewing = report.status === 'reviewing';
+                  const isResolved = report.status === 'resolved';
+
+                  return (
+                    <div
+                      key={report.id}
+                      className="bg-white rounded-2xl border border-stone-200 p-5 shadow-xs space-y-4 hover:border-stone-300 transition-colors"
+                    >
+                      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="px-2.5 py-0.5 rounded-md bg-stone-900 text-white text-[10px] font-black uppercase tracking-wider">
+                              {report.targetType}
+                            </span>
+                            <span
+                              className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                isOpen
+                                  ? 'bg-red-100 text-red-800'
+                                  : isReviewing
+                                  ? 'bg-amber-100 text-amber-800'
+                                  : 'bg-emerald-100 text-emerald-800'
+                              }`}
+                            >
+                              ● {report.status.toUpperCase()}
+                            </span>
+                            <span className="text-[11px] font-mono text-stone-400">
+                              #{report.id}
+                            </span>
+                          </div>
+
+                          <h4 className="text-sm font-black text-stone-900 mt-1">
+                            {report.targetTitle || `Target ID: ${report.targetId}`}
+                          </h4>
+
+                          <p className="text-xs text-red-600 font-bold flex items-center gap-1">
+                            <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                            <span>Reason: {report.reason}</span>
+                          </p>
+                        </div>
+
+                        <div className="text-right text-[11px] text-stone-400 shrink-0">
+                          <span className="block font-medium text-stone-600">
+                            By: {report.reporterEmail || 'Anonymous Student'}
+                          </span>
+                          <span>{new Date(report.createdAt).toLocaleString('en-NG')}</span>
+                        </div>
+                      </div>
+
+                      {report.details && (
+                        <div className="bg-stone-50 p-3 rounded-xl border border-stone-200 text-xs text-stone-700 leading-relaxed">
+                          <span className="font-bold text-stone-900 block mb-0.5">Reporter Context:</span>
+                          {report.details}
+                        </div>
+                      )}
+
+                      {/* Action Logs History */}
+                      {report.actionLogs && report.actionLogs.length > 0 && (
+                        <div className="border-t border-stone-100 pt-3 space-y-1">
+                          <span className="text-[11px] font-bold text-stone-500 uppercase tracking-wider block">
+                            Audit Trail:
+                          </span>
+                          <div className="space-y-1">
+                            {report.actionLogs.map((log: any, idx: number) => (
+                              <div key={idx} className="text-[11px] text-stone-600 flex items-center gap-2">
+                                <span className="font-bold text-stone-800">[{log.action}]</span>
+                                <span>{log.note}</span>
+                                <span className="text-stone-400 ml-auto">
+                                  {new Date(log.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Moderator Decision Action Box */}
+                      <div className="border-t border-stone-100 pt-3 flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                        <input
+                          type="text"
+                          placeholder="Add moderator action note (e.g. Warning sent, listing removed)..."
+                          value={reportActionNotes[report.id] || ''}
+                          onChange={e =>
+                            setReportActionNotes({ ...reportActionNotes, [report.id]: e.target.value })
+                          }
+                          className="flex-1 px-3 py-2 text-xs rounded-xl border border-stone-300 focus:outline-hidden focus:border-[#FF6B00]"
+                        />
+
+                        <div className="flex items-center gap-2 shrink-0">
+                          {report.status !== 'reviewing' && (
+                            <button
+                              type="button"
+                              onClick={() => handleUpdateReport(report.id, 'reviewing')}
+                              className="px-3 py-2 rounded-xl bg-amber-500 hover:bg-amber-600 text-white font-bold text-xs transition-colors"
+                            >
+                              In Review
+                            </button>
+                          )}
+                          {report.status !== 'resolved' && (
+                            <button
+                              type="button"
+                              onClick={() => handleUpdateReport(report.id, 'resolved')}
+                              className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs transition-colors flex items-center gap-1"
+                            >
+                              <CheckCircle2 className="w-3.5 h-3.5" />
+                              <span>Resolve</span>
+                            </button>
+                          )}
+                          {report.status === 'resolved' && (
+                            <button
+                              type="button"
+                              onClick={() => handleUpdateReport(report.id, 'open')}
+                              className="px-3 py-2 rounded-xl border border-stone-300 text-stone-700 text-xs font-bold hover:bg-stone-50"
+                            >
+                              Re-open
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+            </div>
+          )}
         </div>
       )}
 

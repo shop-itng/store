@@ -24,7 +24,11 @@ import { LegalAndHelpPages } from './components/LegalAndHelpPages';
 import { BroadcastBanner } from './components/BroadcastBanner';
 import { Analytics } from '@vercel/analytics/react';
 import { Loading } from './components/Loading';
+import { ErrorBoundary } from './components/ErrorBoundary';
+import { TestModeBanner } from './components/TestModeBanner';
+import { NotFoundView } from './components/NotFoundView';
 import { Store, ShieldCheck, MapPin, Star, ArrowRight, PackageOpen, PlusCircle, ShoppingBag, ShieldAlert } from 'lucide-react';
+
 
 const MarketplaceContent: React.FC = () => {
   const [isInitialLoading, setIsInitialLoading] = React.useState(true);
@@ -97,6 +101,9 @@ const MarketplaceContent: React.FC = () => {
 
   return (
     <div className="min-h-screen w-full max-w-full overflow-x-hidden flex flex-col bg-[#f9fafb] dark:bg-[#0D0E12] text-neutral-900 dark:text-[#F4F4F5] pb-20 md:pb-0 transition-colors duration-200">
+      {/* Global Paystack Test Mode Banner (Point 10) */}
+      <TestModeBanner />
+
       {/* Role Switcher Toolbar */}
       <RoleSwitcherBar />
 
@@ -311,22 +318,36 @@ const MarketplaceContent: React.FC = () => {
         )}
 
         {/* Other view routers */}
-        {activeView === 'product_detail' && selectedProduct && (
-          <div className="animate-fade-in-up">
-            <ProductDetailView
-              product={selectedProduct}
-              onBack={() => setActiveView('catalog')}
+        {activeView === 'product_detail' && (
+          selectedProduct ? (
+            <div className="animate-fade-in-up">
+              <ProductDetailView
+                product={selectedProduct}
+                onBack={() => setActiveView('catalog')}
+              />
+            </div>
+          ) : (
+            <NotFoundView
+              title="Product Listing Not Found"
+              message="This crafted item may have already been purchased, deleted by the seller, or removed by moderation."
             />
-          </div>
+          )
         )}
 
-        {activeView === 'seller_shop' && selectedSellerId && (
-          <div className="animate-fade-in-up">
-            <SellerShopView
-              sellerId={selectedSellerId}
-              onBack={() => setActiveView('catalog')}
+        {activeView === 'seller_shop' && (
+          selectedSellerId ? (
+            <div className="animate-fade-in-up">
+              <SellerShopView
+                sellerId={selectedSellerId}
+                onBack={() => setActiveView('catalog')}
+              />
+            </div>
+          ) : (
+            <NotFoundView
+              title="Artisan Shop Not Found"
+              message="We could not find this seller profile. The student shop may have closed or changed its address."
             />
-          </div>
+          )
         )}
 
         {activeView === 'seller_dashboard' && (
@@ -421,9 +442,11 @@ const MarketplaceContent: React.FC = () => {
 
 export default function App() {
   return (
-    <AppProvider>
-      <MarketplaceContent />
-      <Analytics />
-    </AppProvider>
+    <ErrorBoundary>
+      <AppProvider>
+        <MarketplaceContent />
+        <Analytics />
+      </AppProvider>
+    </ErrorBoundary>
   );
 }

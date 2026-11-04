@@ -13,7 +13,10 @@ import {
   Instagram,
   ShoppingBag,
   Palmtree,
+  Flag,
 } from 'lucide-react';
+import { ShareButtons } from './ShareButtons';
+import { ReportModal, ReportTarget } from './ReportModal';
 
 interface SellerShopViewProps {
   sellerId: string;
@@ -23,6 +26,7 @@ interface SellerShopViewProps {
 export const SellerShopView: React.FC<SellerShopViewProps> = ({ sellerId, onBack }) => {
   const { getSellerById, products, openProduct } = useApp();
   const seller = getSellerById(sellerId);
+  const [reportTarget, setReportTarget] = React.useState<ReportTarget | null>(null);
 
   if (!seller) {
     return (
@@ -159,6 +163,31 @@ export const SellerShopView: React.FC<SellerShopViewProps> = ({ sellerId, onBack
               </div>
             </div>
           </div>
+
+          {/* Share and Report Row */}
+          <div className="mt-6 pt-4 border-t border-slate-100 flex flex-wrap items-center justify-between gap-3">
+            <ShareButtons
+              title={`Shop ${seller.shopName}`}
+              sellerShopName={seller.shopName}
+              campus={seller.campus}
+              imageUrl={seller.bannerUrl || seller.logoUrl}
+            />
+
+            <button
+              type="button"
+              onClick={() =>
+                setReportTarget({
+                  targetType: 'seller',
+                  targetId: seller.id,
+                  targetTitle: seller.shopName,
+                })
+              }
+              className="flex items-center gap-1.5 text-xs text-stone-400 hover:text-rose-600 transition-colors ml-auto"
+            >
+              <Flag className="w-3.5 h-3.5" />
+              <span>Report this Seller</span>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -195,6 +224,14 @@ export const SellerShopView: React.FC<SellerShopViewProps> = ({ sellerId, onBack
           </div>
         )}
       </div>
+
+      {/* Safety & Operations Report Modal */}
+      <ReportModal
+        target={reportTarget}
+        isOpen={!!reportTarget}
+        onClose={() => setReportTarget(null)}
+      />
     </div>
   );
 };
+

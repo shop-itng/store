@@ -166,7 +166,7 @@ export const CheckoutModal: React.FC = () => {
       const res = await fetch(`/api/paystack/verify/${encodeURIComponent(reference)}`);
       const data = await res.json();
 
-      if (data.isPaid || data.status) {
+      if (data.isPaid === true) {
         finalizeOrder(reference, assignedOrderId, pricing);
         return;
       }
@@ -177,10 +177,18 @@ export const CheckoutModal: React.FC = () => {
     if (retriesLeft > 0) {
       setTimeout(() => {
         pollVerification(reference, assignedOrderId, pricing, retriesLeft - 1);
-      }, 2000);
+      }, 2500);
     } else {
-      // If polling finishes, finalize order and allow background webhook
-      finalizeOrder(reference, assignedOrderId, pricing);
+      // Rule 6: Unverified payments never become Paid. Keep awaiting user transfer or webhook.
+      setIsProcessing(false);
+      setProcessingStage('');
+      setAwaitingExternalPayment({
+        reference,
+        authorizationUrl: '',
+        assignedOrderId,
+        pricing,
+      });
+      notify('Payment pending. If you completed a bank transfer or USSD, tap "Verify Now".', 'info');
     }
   };
 
@@ -297,11 +305,9 @@ export const CheckoutModal: React.FC = () => {
         // Start background polling
         pollVerification(reference, assignedOrderId, pricing, 15);
       } else {
-        // Fallback simulation
-        setProcessingStage('2/3 Awaiting Paystack Webhook confirmation...');
-        setTimeout(() => {
-          finalizeOrder(reference, assignedOrderId, pricing);
-        }, 1200);
+        setIsProcessing(false);
+        setProcessingStage('');
+        notify('Unable to initialize Paystack checkout session. Please check connection and try again.', 'error');
       }
     } catch (err: any) {
       setIsProcessing(false);

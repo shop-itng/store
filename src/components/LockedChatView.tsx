@@ -10,9 +10,11 @@ import {
   Tag,
   CheckCircle2,
   X,
+  Flag,
 } from 'lucide-react';
 import { checkNumbersInText, PRESET_PRICES, PRESET_QUANTITIES } from '../utils/antiBypass';
 import { formatNaira } from '../utils/pricing';
+import { ReportModal, ReportTarget } from './ReportModal';
 
 export const LockedChatView: React.FC = () => {
   const {
@@ -33,6 +35,7 @@ export const LockedChatView: React.FC = () => {
   const [selectedPrice, setSelectedPrice] = useState<number>(1000);
   const [showOfferPicker, setShowOfferPicker] = useState<boolean>(false);
   const [numberWarning, setNumberWarning] = useState<string | null>(null);
+  const [reportTarget, setReportTarget] = useState<ReportTarget | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -188,9 +191,27 @@ export const LockedChatView: React.FC = () => {
                   </p>
                 </div>
 
-                <div className="flex items-center gap-1.5 text-[11px] font-bold text-[#111111] bg-[#FFF4EC] border border-[#FED7AA] px-2.5 py-1 rounded-lg">
-                  <Lock className="w-3 h-3 text-[#FF6B00]" />
-                  <span>Numbers Blocked</span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setReportTarget({
+                        targetType: 'chat',
+                        targetId: activeConv.id,
+                        targetTitle: `Chat with ${activeConv.sellerShopName} (Re: ${activeConv.productTitle})`,
+                      })
+                    }
+                    className="p-1.5 text-stone-400 hover:text-rose-600 rounded-lg hover:bg-stone-100 transition-colors flex items-center gap-1 text-[11px] font-bold"
+                    title="Report Conversation"
+                  >
+                    <Flag className="w-3.5 h-3.5 text-rose-500" />
+                    <span className="hidden sm:inline text-rose-600">Report</span>
+                  </button>
+
+                  <div className="flex items-center gap-1.5 text-[11px] font-bold text-[#111111] bg-[#FFF4EC] border border-[#FED7AA] px-2.5 py-1 rounded-lg">
+                    <Lock className="w-3 h-3 text-[#FF6B00]" />
+                    <span>Numbers Blocked</span>
+                  </div>
                 </div>
               </div>
 
@@ -437,6 +458,13 @@ export const LockedChatView: React.FC = () => {
           )}
         </div>
       </div>
+
+      {/* Safety & Operations Report Modal (Part 2 Item 4) */}
+      <ReportModal
+        target={reportTarget}
+        isOpen={!!reportTarget}
+        onClose={() => setReportTarget(null)}
+      />
     </div>
   );
 };

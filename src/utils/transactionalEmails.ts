@@ -51,7 +51,8 @@ export function renderTransactionalEmail(
   const bankName = (data.bank_name || data.bankName || 'OPay / Bank').trim();
   const last4 = (data.last4 || '••••').trim();
   const item = (data.item || 'your item').trim();
-  const resetLink = (data.reset_link || data.resetLink || `${data.appUrl || 'https://shop-itng-pied.vercel.app'}/reset-password`).trim();
+  const appUrl = (data.appUrl || (typeof window !== 'undefined' ? window.location.origin : '') || 'https://shop-itng-pied.vercel.app').replace(/\/$/, '');
+  const resetLink = (data.reset_link || data.resetLink || `${appUrl}/reset-password`).trim();
   const decision = (data.decision || 'Refund processed').trim();
   const reason = (data.reason || 'Document was unreadable or selfie could not be verified').trim();
 
@@ -113,10 +114,15 @@ export function renderTransactionalEmail(
 
     case 'order_placed_buyer':
       subject = `We got your order #${orderId}`;
-      bodyText = `Payment of ₦${total} received. Your money is held safely until you confirm the item arrived.`;
+      bodyText = `Payment of ₦${total} received. Your money is held safely until you confirm the item arrived. Track your order: ${appUrl}/orders?track=${orderId}`;
       bodyHtmlContent = `
         <p style="margin: 0 0 16px; font-size: 15px; color: #0f172a; line-height: 1.6;">
           Payment of <strong>₦${total}</strong> received. Your money is held safely until you confirm the item arrived.
+        </p>
+        <p style="margin: 16px 0;">
+          <a href="${appUrl}/orders?track=${orderId}" style="display: inline-block; background: #111111; color: #9FE870; font-weight: 700; font-size: 13px; text-decoration: none; padding: 10px 18px; border-radius: 8px; border: 1px solid #FF6B00;">
+            Track Order Live &rarr;
+          </a>
         </p>
       `;
       break;
@@ -133,10 +139,15 @@ export function renderTransactionalEmail(
 
     case 'order_shipped_buyer':
       subject = `Your order #${orderId} is on the way`;
-      bodyText = `When it arrives, tap "Item received" so the seller gets paid.`;
+      bodyText = `When it arrives, tap "Item received" so the seller gets paid. Track your shipment: ${appUrl}/orders?track=${orderId}`;
       bodyHtmlContent = `
         <p style="margin: 0 0 16px; font-size: 15px; color: #0f172a; line-height: 1.6;">
           When it arrives, tap "Item received" so the seller gets paid.
+        </p>
+        <p style="margin: 16px 0;">
+          <a href="${appUrl}/orders?track=${orderId}" style="display: inline-block; background: #111111; color: #9FE870; font-weight: 700; font-size: 13px; text-decoration: none; padding: 10px 18px; border-radius: 8px; border: 1px solid #FF6B00;">
+            View Tracking Timeline &rarr;
+          </a>
         </p>
       `;
       break;

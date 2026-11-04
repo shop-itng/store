@@ -20,6 +20,8 @@ import {
   Zap,
   MessageSquare,
 } from 'lucide-react';
+import { ShareButtons } from './ShareButtons';
+import { ReportModal, ReportTarget } from './ReportModal';
 
 interface ProductDetailViewProps {
   product: Product;
@@ -66,8 +68,7 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({ product, o
 
   // Notification state for sold out
   const [notifyMeSet, setNotifyMeSet] = useState(false);
-  const [showReportModal, setShowReportModal] = useState(false);
-  const [reportReason, setReportReason] = useState('');
+  const [reportTarget, setReportTarget] = useState<ReportTarget | null>(null);
 
   // Calculate dynamic delivery fee based on buyer vs seller location
   const dynamicDelivery = getDeliveryFee(product.location);
@@ -118,13 +119,6 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({ product, o
     if (product.isSoldOut) return;
     handleAddToCart();
     setActiveView('cart');
-  };
-
-  const handleReportSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    setShowReportModal(false);
-    setReportReason('');
-    notify('Report submitted to Trust & Safety moderation team.', 'success');
   };
 
   return (
@@ -541,10 +535,30 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({ product, o
             )}
           </div>
 
+          {/* Share Buttons (WhatsApp, Copy Link, Status Preview) (Part 2 Item 8) */}
+          <div className="pt-4 border-t border-slate-100 dark:border-stone-800 space-y-2">
+            <span className="text-[11px] font-black text-slate-500 uppercase tracking-wide block">
+              Share Item:
+            </span>
+            <ShareButtons
+              title={product.title}
+              price={product.displayPrice}
+              sellerShopName={product.sellerShopName}
+              campus={product.sellerCampus}
+              imageUrl={product.images[0]}
+            />
+          </div>
+
           {/* Report Problem or Counterfeit Link */}
-          <div className="pt-4 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
+          <div className="pt-3 border-t border-slate-100 dark:border-stone-800 flex items-center justify-between text-xs text-slate-500">
             <button
-              onClick={() => setShowReportModal(true)}
+              onClick={() =>
+                setReportTarget({
+                  targetType: 'product',
+                  targetId: product.id,
+                  targetTitle: product.title,
+                })
+              }
               className="flex items-center gap-1 text-slate-400 hover:text-rose-600 transition-colors"
             >
               <Flag className="w-3.5 h-3.5" />
@@ -555,18 +569,18 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({ product, o
         </div>
       </div>
 
-      {/* Verified Reviews Section (Hides when empty per requirement: "Every section starts empty, fills with real users' content, and hides when empty") */}
+      {/* Verified Reviews Section */}
       {product.reviews && product.reviews.length > 0 && (
-        <section className="pt-8 border-t border-slate-200 space-y-6">
+        <section className="pt-8 border-t border-slate-200 dark:border-stone-800 space-y-6">
           <div className="flex items-center justify-between">
             <div>
-              <h3 className="text-lg font-bold text-slate-900">Buyer Reviews</h3>
-              <p className="text-xs text-slate-500 mt-0.5">
+              <h3 className="text-lg font-bold text-slate-900 dark:text-white">Buyer Reviews</h3>
+              <p className="text-xs text-slate-500 dark:text-stone-400 mt-0.5">
                 Only verified completed orders can submit reviews on Shop It.
               </p>
             </div>
             <div className="flex items-center gap-2">
-              <span className="text-xl font-bold font-mono-numbers text-slate-900">
+              <span className="text-xl font-bold font-mono-numbers text-slate-900 dark:text-white">
                 {product.rating.toFixed(1)}
               </span>
               <div className="flex text-amber-500">
@@ -579,17 +593,33 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({ product, o
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {product.reviews.map(rev => (
-              <div key={rev.id} className="p-4 bg-white rounded-xl border border-slate-200/90 space-y-2">
+              <div key={rev.id} className="p-4 bg-white dark:bg-stone-900 rounded-xl border border-slate-200/90 dark:border-stone-800 space-y-2">
                 <div className="flex items-center justify-between">
-                  <span className="text-xs font-semibold text-slate-700">
+                  <span className="text-xs font-semibold text-slate-700 dark:text-slate-200">
                     {rev.buyerMaskedId}
                   </span>
-                  <span className="text-[11px] text-slate-500">{rev.date}</span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[11px] text-slate-500">{rev.date}</span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setReportTarget({
+                          targetType: 'review',
+                          targetId: rev.id,
+                          targetTitle: `Review by ${rev.buyerMaskedId} on ${product.title}`,
+                        })
+                      }
+                      title="Report Review"
+                      className="text-stone-400 hover:text-rose-600 transition-colors"
+                    >
+                      <Flag className="w-3 h-3" />
+                    </button>
+                  </div>
                 </div>
                 <div className="flex text-amber-500 text-xs">
                   {'★'.repeat(rev.rating)}
                 </div>
-                <p className="text-xs text-slate-700 leading-normal">{rev.comment}</p>
+                <p className="text-xs text-slate-700 dark:text-slate-300 leading-normal">{rev.comment}</p>
                 <div className="text-[11px] text-[#008751] flex items-center gap-1 font-medium pt-1">
                   <CheckCircle2 className="w-3 h-3" />
                   <span>Verified Purchase</span>
@@ -600,51 +630,12 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({ product, o
         </section>
       )}
 
-      {/* Report Modal */}
-      {showReportModal && (
-        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4 animate-backdrop">
-          <div className="bg-white rounded-2xl max-w-md w-full p-6 space-y-4 animate-modal-enter">
-            <h3 className="text-base font-bold text-slate-900">Report this Listing</h3>
-            <p className="text-xs text-slate-600">
-              Help keep Shop It safe. Reports go directly to our Trust & Safety team.
-            </p>
-            <form onSubmit={handleReportSubmit} className="space-y-4">
-              <div>
-                <label className="text-xs font-semibold text-slate-700 block mb-1">
-                  Reason for Report
-                </label>
-                <select
-                  required
-                  value={reportReason}
-                  onChange={e => setReportReason(e.target.value)}
-                  className="w-full h-10 px-3 rounded-lg border border-slate-200 text-xs text-slate-900"
-                >
-                  <option value="">Select a violation...</option>
-                  <option value="fake">Prohibited or counterfeit item</option>
-                  <option value="bypass">Seller attempted to take chat/payment off-platform</option>
-                  <option value="pricing">Misleading pricing or photo</option>
-                  <option value="other">Other trust violation</option>
-                </select>
-              </div>
-              <div className="flex justify-end gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setShowReportModal(false)}
-                  className="px-4 py-2 text-xs font-medium text-slate-600 hover:text-slate-900"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-4 py-2 text-xs font-semibold text-white bg-rose-600 rounded-lg hover:bg-rose-700"
-                >
-                  Submit Report
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      {/* Global Safety & Operations Report Modal (Part 2 Item 4) */}
+      <ReportModal
+        target={reportTarget}
+        isOpen={!!reportTarget}
+        onClose={() => setReportTarget(null)}
+      />
     </div>
   );
 };

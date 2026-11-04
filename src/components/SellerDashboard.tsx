@@ -28,6 +28,7 @@ import {
 } from 'lucide-react';
 import { SellerWalletView } from './SellerWalletView';
 import { SellerVerificationModal } from './SellerVerificationModal';
+import { SellerOnboardingChecklist } from './SellerOnboardingChecklist';
 
 export const SellerDashboard: React.FC = () => {
   const {
@@ -282,6 +283,23 @@ export const SellerDashboard: React.FC = () => {
           </button>
         </div>
       </div>
+
+      {/* Seller Onboarding Checklist (Part 2 Item 7: Auto-ticks and hides when complete) */}
+      <SellerOnboardingChecklist
+        seller={currentSeller}
+        wallet={sellerWallet}
+        productCount={sellerProducts.length}
+        onOpenVerification={() => setIsVerifModalOpen(true)}
+        onOpenAddProduct={() => {
+          if (!isVerified) {
+            setIsVerifModalOpen(true);
+          } else {
+            resetForm();
+            setIsAddModalOpen(true);
+          }
+        }}
+        onOpenWallet={() => setDashboardTab('wallet')}
+      />
 
       {/* 'Get Verified' Badge & Trust Component with Real Identity Check */}
       <div

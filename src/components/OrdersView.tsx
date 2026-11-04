@@ -22,6 +22,7 @@ import {
   FileText,
 } from 'lucide-react';
 import { EscrowReceiptModal } from './EscrowReceiptModal';
+import { OrderTrackingModal } from './OrderTrackingModal';
 
 export const OrdersView: React.FC = () => {
   const {
@@ -38,13 +39,51 @@ export const OrdersView: React.FC = () => {
     openReportProblemModal,
   } = useApp();
 
-  // Modal states for Dispute, Review & Safe Pass Receipt
+  // Modal states for Dispute, Review, Safe Pass Receipt & Timeline Tracking
   const [selectedDisputeOrder, setSelectedDisputeOrder] = useState<Order | null>(null);
   const [disputeReason, setDisputeReason] = useState('');
   const [selectedReviewOrder, setSelectedReviewOrder] = useState<Order | null>(null);
   const [reviewRating, setReviewRating] = useState(5);
   const [reviewComment, setReviewComment] = useState('');
   const [selectedReceiptOrder, setSelectedReceiptOrder] = useState<Order | null>(null);
+  const [trackingOrder, setTrackingOrder] = useState<Order | null>(null);
+
+  // Return URL verification state (Part 1 Item 4)
+  const [verifiedPaymentBanner, setVerifiedPaymentBanner] = useState<{
+    reference: string;
+    amount?: number;
+    orderId?: string;
+  } | null>(null);
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const urlParams = new URLSearchParams(window.location.search);
+    const ref = urlParams.get('ref') || urlParams.get('reference') || urlParams.get('trxref');
+    const trackId = urlParams.get('track') || urlParams.get('trackOrder');
+
+    if (ref) {
+      fetch(`/api/paystack/verify/${encodeURIComponent(ref)}`)
+        .then(res => res.json())
+        .then(data => {
+          if (data.isPaid === true) {
+            setVerifiedPaymentBanner({
+              reference: ref,
+              amount: data.amountNaira,
+              orderId: data.orderId,
+            });
+            notify('Payment confirmed via Paystack! Order verified and funds held in Escrow.', 'success');
+          }
+        })
+        .catch(() => {});
+    }
+
+    if (trackId) {
+      const match = orders.find(o => o.id === trackId || o.id === `ORD-${trackId}`);
+      if (match) {
+        setTrackingOrder(match);
+      }
+    }
+  }, [orders]);
 
   const [activeTab, setActiveTab] = useState<'all' | 'active' | 'completed'>('all');
 
@@ -150,6 +189,35 @@ export const OrdersView: React.FC = () => {
           </button>
         </div>
       </div>
+
+      {/* Return URL Verified Payment Banner (Part 1 Item 4) */}
+      {verifiedPaymentBanner && (
+        <div className="bg-emerald-50 dark:bg-emerald-950/30 border-2 border-emerald-500 rounded-2xl p-4 sm:p-5 flex items-start justify-between gap-3 shadow-md animate-fade-in-up">
+          <div className="flex items-start gap-3">
+            <div className="w-9 h-9 rounded-xl bg-emerald-500 text-white flex items-center justify-center shrink-0 mt-0.5">
+              <ShieldCheck className="w-5 h-5" />
+            </div>
+            <div className="text-xs space-y-1">
+              <span className="font-black text-emerald-800 dark:text-emerald-300 uppercase tracking-wider text-[10px] bg-emerald-100 dark:bg-emerald-900/50 px-2 py-0.5 rounded-full">
+                Payment Verified by Paystack
+              </span>
+              <h3 className="font-bold text-sm text-slate-900 dark:text-white">
+                Transaction Confirmed · Funds Secured in Escrow
+              </h3>
+              <p className="text-slate-600 dark:text-slate-300">
+                Reference: <code className="font-mono bg-white dark:bg-stone-800 px-1.5 py-0.5 rounded border border-emerald-200">{verifiedPaymentBanner.reference}</code>
+                {verifiedPaymentBanner.orderId && ` · Order #${verifiedPaymentBanner.orderId}`}
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={() => setVerifiedPaymentBanner(null)}
+            className="text-slate-400 hover:text-slate-700 dark:hover:text-white p-1"
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       {/* Orders List */}
       {filteredOrders.length > 0 ? (
@@ -402,6 +470,16 @@ export const OrdersView: React.FC = () => {
                     </button>
                   )}
 
+                  {/* Track Order Timeline Button (Part 2 Item 6) */}
+                  <button
+                    type="button"
+                    onClick={() => setTrackingOrder(order)}
+                    className="px-3.5 py-2 text-xs font-black text-stone-900 dark:text-white bg-[#9FE870]/20 hover:bg-[#9FE870]/30 rounded-xl transition-all border-2 border-[#111111] dark:border-stone-700 shadow-[0_2px_0_#111111] active:translate-y-0.5 flex items-center gap-1.5"
+                  >
+                    <Truck className="w-3.5 h-3.5 text-[#FF6B00]" />
+                    <span>Track Timeline</span>
+                  </button>
+
                   {/* Safe Pass & Official Receipt */}
                   <button
                     type="button"
@@ -600,6 +678,14 @@ export const OrdersView: React.FC = () => {
         order={selectedReceiptOrder}
         isOpen={!!selectedReceiptOrder}
         onClose={() => setSelectedReceiptOrder(null)}
+      />
+
+      {/* Live Order Tracking Timeline Modal (Part 2 Item 6) */}
+      <OrderTrackingModal
+        order={trackingOrder}
+        onClose={() => setTrackingOrder(null)}
+        onConfirmReceived={confirmItemReceived}
+        onReportIssue={openReportProblemModal}
       />
     </div>
   );

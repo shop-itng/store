@@ -57,18 +57,31 @@ function ensureFileStoreDir() {
   } catch {}
 }
 
-function readFileStore(): { otps: Record<string, StoredOtpRecord>; rateLimits: Record<string, number[]> } {
+export interface FileStoreSchema {
+  otps: Record<string, StoredOtpRecord>;
+  rateLimits: Record<string, number[]>;
+  payments: Record<string, any>;
+  reports: Record<string, any>;
+}
+
+function readFileStore(): FileStoreSchema {
   try {
     ensureFileStoreDir();
     if (fs.existsSync(FILE_STORE_PATH)) {
       const raw = fs.readFileSync(FILE_STORE_PATH, 'utf-8');
-      return JSON.parse(raw);
+      const parsed = JSON.parse(raw);
+      return {
+        otps: parsed.otps || {},
+        rateLimits: parsed.rateLimits || {},
+        payments: parsed.payments || {},
+        reports: parsed.reports || {},
+      };
     }
   } catch {}
-  return { otps: {}, rateLimits: {} };
+  return { otps: {}, rateLimits: {}, payments: {}, reports: {} };
 }
 
-function writeFileStore(data: { otps: Record<string, StoredOtpRecord>; rateLimits: Record<string, number[]> }) {
+function writeFileStore(data: FileStoreSchema) {
   try {
     ensureFileStoreDir();
     fs.writeFileSync(FILE_STORE_PATH, JSON.stringify(data), 'utf-8');
@@ -118,6 +131,32 @@ async function getPgPool() {
         CREATE TABLE IF NOT EXISTS shopit_rate_limits (
           key VARCHAR(255) PRIMARY KEY,
           timestamps JSONB NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS shopit_payments (
+          reference VARCHAR(255) PRIMARY KEY,
+          order_id VARCHAR(255),
+          amount_kobo BIGINT,
+          amount_naira NUMERIC,
+          currency VARCHAR(10) DEFAULT 'NGN',
+          channel VARCHAR(50),
+          status VARCHAR(50),
+          webhook_received BOOLEAN DEFAULT FALSE,
+          customer_email VARCHAR(255),
+          data JSONB,
+          created_at TIMESTAMPTZ DEFAULT NOW(),
+          updated_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE TABLE IF NOT EXISTS shopit_reports (
+          id VARCHAR(255) PRIMARY KEY,
+          target_type VARCHAR(50) NOT NULL,
+          target_id VARCHAR(255) NOT NULL,
+          target_title VARCHAR(255),
+          reporter_email VARCHAR(255),
+          reason VARCHAR(255) NOT NULL,
+          details TEXT,
+          status VARCHAR(50) DEFAULT 'open',
+          action_logs JSONB DEFAULT '[]'::jsonb,
+          created_at TIMESTAMPTZ DEFAULT NOW()
         );
       `);
       pgTableInitialized = true;
@@ -474,4 +513,288 @@ export async function deleteOtpRecord(email: string, purpose: string): Promise<v
   const store = readFileStore();
   delete store.otps[key];
   writeFileStore(store);
+}
+
+// -------------------------------------------------------------
+// Payment Records Store (Server-Authoritative & Idempotent)
+// -------------------------------------------------------------
+
+export interface PaymentRecord {
+  reference: string;
+  orderId: string;
+  amountKobo: number;
+  amountNaira: number;
+  currency: string;
+  channel: string;
+  status: 'pending' | 'pending_payment' | 'paid' | 'failed' | 'refunded';
+  webhookReceived: boolean;
+  customerEmail: string;
+  data?: any;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function savePaymentRecord(record: PaymentRecord): Promise<void> {
+  const pool = await getPgPool();
+  if (pool) {
+    try {
+      await pool.query(
+        `INSERT INTO shopit_payments (
+          reference, order_id, amount_kobo, amount_naira, currency, channel, status, webhook_received, customer_email, data, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+        ON CONFLICT (reference) DO UPDATE SET
+          status = $7,
+          webhook_received = $8,
+          channel = COALESCE(NULLIF($6, ''), shopit_payments.channel),
+          updated_at = NOW(),
+          data = $10`,
+        [
+          record.reference,
+          record.orderId,
+          record.amountKobo,
+          record.amountNaira,
+          record.currency || 'NGN',
+          record.channel || 'unknown',
+          record.status,
+          record.webhookReceived,
+          record.customerEmail,
+          JSON.stringify(record.data || {}),
+        ]
+      );
+      return;
+    } catch (err: any) {
+      console.warn('[Payments PG Save Error]', err.message);
+    }
+  }
+
+  if (KV_URL && KV_TOKEN) {
+    try {
+      await runKvCommand('SET', `shopit_payment_${record.reference}`, JSON.stringify(record));
+    } catch {}
+  }
+
+  const store = readFileStore();
+  store.payments[record.reference] = record;
+  writeFileStore(store);
+}
+
+export async function getPaymentRecord(reference: string): Promise<PaymentRecord | null> {
+  const pool = await getPgPool();
+  if (pool) {
+    try {
+      const res = await pool.query('SELECT * FROM shopit_payments WHERE reference = $1', [reference]);
+      if (res.rows.length > 0) {
+        const row = res.rows[0];
+        return {
+          reference: row.reference,
+          orderId: row.order_id,
+          amountKobo: Number(row.amount_kobo),
+          amountNaira: Number(row.amount_naira),
+          currency: row.currency,
+          channel: row.channel,
+          status: row.status,
+          webhookReceived: Boolean(row.webhook_received),
+          customerEmail: row.customer_email,
+          data: row.data,
+          createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
+          updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : new Date().toISOString(),
+        };
+      }
+    } catch {}
+  }
+
+  if (KV_URL && KV_TOKEN) {
+    try {
+      const raw = await runKvCommand('GET', `shopit_payment_${reference}`);
+      if (raw) return typeof raw === 'string' ? JSON.parse(raw) : raw;
+    } catch {}
+  }
+
+  const store = readFileStore();
+  return store.payments[reference] || null;
+}
+
+export async function getAllPaymentRecords(): Promise<PaymentRecord[]> {
+  const pool = await getPgPool();
+  if (pool) {
+    try {
+      const res = await pool.query('SELECT * FROM shopit_payments ORDER BY created_at DESC LIMIT 200');
+      if (res.rows.length > 0) {
+        return res.rows.map((row: any) => ({
+          reference: row.reference,
+          orderId: row.order_id,
+          amountKobo: Number(row.amount_kobo),
+          amountNaira: Number(row.amount_naira),
+          currency: row.currency,
+          channel: row.channel,
+          status: row.status,
+          webhookReceived: Boolean(row.webhook_received),
+          customerEmail: row.customer_email,
+          data: row.data,
+          createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
+          updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : new Date().toISOString(),
+        }));
+      }
+    } catch {}
+  }
+
+  const store = readFileStore();
+  return Object.values(store.payments).sort(
+    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+  );
+}
+
+// -------------------------------------------------------------
+// Report Records Store
+// -------------------------------------------------------------
+
+export interface ReportRecord {
+  id: string;
+  targetType: 'product' | 'seller' | 'review' | 'chat';
+  targetId: string;
+  targetTitle: string;
+  reporterEmail?: string;
+  reason: string;
+  details: string;
+  status: 'open' | 'reviewing' | 'resolved';
+  actionLogs: Array<{ action: string; note: string; timestamp: string }>;
+  createdAt: string;
+}
+
+export async function saveReportRecord(report: ReportRecord): Promise<void> {
+  const pool = await getPgPool();
+  if (pool) {
+    try {
+      await pool.query(
+        `INSERT INTO shopit_reports (id, target_type, target_id, target_title, reporter_email, reason, details, status, action_logs, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+         ON CONFLICT (id) DO UPDATE SET status = $8, action_logs = $9`,
+        [
+          report.id,
+          report.targetType,
+          report.targetId,
+          report.targetTitle,
+          report.reporterEmail || null,
+          report.reason,
+          report.details,
+          report.status,
+          JSON.stringify(report.actionLogs || []),
+        ]
+      );
+      return;
+    } catch (err: any) {
+      console.warn('[Reports PG Save Error]', err.message);
+    }
+  }
+
+  const store = readFileStore();
+  store.reports[report.id] = report;
+  writeFileStore(store);
+}
+
+export async function getAllReportRecords(): Promise<ReportRecord[]> {
+  const pool = await getPgPool();
+  if (pool) {
+    try {
+      const res = await pool.query('SELECT * FROM shopit_reports ORDER BY created_at DESC LIMIT 200');
+      if (res.rows.length > 0) {
+        return res.rows.map((row: any) => ({
+          id: row.id,
+          targetType: row.target_type,
+          targetId: row.target_id,
+          targetTitle: row.target_title,
+          reporterEmail: row.reporter_email,
+          reason: row.reason,
+          details: row.details,
+          status: row.status,
+          actionLogs: row.action_logs || [],
+          createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
+        }));
+      }
+    } catch {}
+  }
+
+  const store = readFileStore();
+  return Object.values(store.reports).sort(
+    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+  );
+}
+
+export async function updateReportStatus(
+  reportId: string,
+  status: 'open' | 'reviewing' | 'resolved',
+  actionNote?: string
+): Promise<void> {
+  const pool = await getPgPool();
+  if (pool) {
+    try {
+      const existing = await pool.query('SELECT action_logs FROM shopit_reports WHERE id = $1', [reportId]);
+      const logs = existing.rows[0]?.action_logs || [];
+      if (actionNote) {
+        logs.push({ action: `Status changed to ${status}`, note: actionNote, timestamp: new Date().toISOString() });
+      }
+      await pool.query('UPDATE shopit_reports SET status = $1, action_logs = $2 WHERE id = $3', [
+        status,
+        JSON.stringify(logs),
+        reportId,
+      ]);
+      return;
+    } catch {}
+  }
+
+  const store = readFileStore();
+  if (store.reports[reportId]) {
+    store.reports[reportId].status = status;
+    if (actionNote) {
+      store.reports[reportId].actionLogs = store.reports[reportId].actionLogs || [];
+      store.reports[reportId].actionLogs.push({
+        action: `Status changed to ${status}`,
+        note: actionNote,
+        timestamp: new Date().toISOString(),
+      });
+    }
+    writeFileStore(store);
+  }
+}
+
+// -------------------------------------------------------------
+// Health Check Diagnostic Routine (Part 2 Item 2)
+// -------------------------------------------------------------
+
+export async function pingHealth(): Promise<{
+  app: 'ok';
+  database: 'connected' | 'not_configured' | 'error';
+  redis: 'connected' | 'not_configured' | 'error';
+  timestamp: string;
+}> {
+  let dbStatus: 'connected' | 'not_configured' | 'error' = 'not_configured';
+  let redisStatus: 'connected' | 'not_configured' | 'error' = 'not_configured';
+
+  if (PG_URL) {
+    try {
+      const pool = await getPgPool();
+      if (pool) {
+        await pool.query('SELECT 1');
+        dbStatus = 'connected';
+      }
+    } catch {
+      dbStatus = 'error';
+    }
+  }
+
+  if (KV_URL && KV_TOKEN) {
+    try {
+      await runKvCommand('PING');
+      redisStatus = 'connected';
+    } catch {
+      redisStatus = 'error';
+    }
+  }
+
+  return {
+    app: 'ok',
+    database: dbStatus,
+    redis: redisStatus,
+    timestamp: new Date().toISOString(),
+  };
 }

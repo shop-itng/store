@@ -1,5 +1,6 @@
 export type UserRole = 'buyer' | 'seller' | 'admin';
-export type AdminSubRole = 'moderator' | 'accounts' | 'finance' | 'support' | 'emergency';
+export type AdminSubRole = 'moderator' | 'accounts' | 'finance' | 'support' | 'emergency' | 'payments' | 'reports';
+
 
 export type Campus =
   | 'UNILAG (Akoka)'

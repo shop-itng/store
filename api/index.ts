@@ -12,16 +12,31 @@ import {
   deleteOtpRecord,
   hashOtp,
   verifyOtpHash,
+  savePaymentRecord,
+  getPaymentRecord,
+  getAllPaymentRecords,
+  saveReportRecord,
+  getAllReportRecords,
+  updateReportStatus,
+  pingHealth,
+  type PaymentRecord,
+  type ReportRecord,
 } from './db/otpStore.js';
 
 const app = express();
 
-// Security headers middleware
+// Security headers middleware (Part 2 Item 9: CSP, HSTS, Permissions-Policy without breaking Paystack)
 app.use((_req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'SAMEORIGIN');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   res.setHeader('X-XSS-Protection', '1; mode=block');
+  res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
+  res.setHeader('Permissions-Policy', 'camera=(self), microphone=(), geolocation=(self)');
+  res.setHeader(
+    'Content-Security-Policy',
+    "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://js.paystack.co https://checkout.paystack.com; frame-src 'self' https://checkout.paystack.com https://api.paystack.co https://standard.paystack.co; connect-src 'self' https://api.paystack.co https://api.brevo.com https://*.ingest.sentry.io https://*.upstash.io; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline' https:; font-src 'self' data: https:;"
+  );
   next();
 });
 
@@ -189,15 +204,15 @@ function calculateServerPrice(params: {
 // Router for all API routes - mounted at both /api and / to handle Vercel rewrite variations
 const router = express.Router();
 
-// Health check endpoint
-router.get(['/health', '/'], (_req, res) => {
-  res.json({
-    status: true,
-    service: 'Shop It API',
-    timestamp: new Date().toISOString(),
-    isPaystackConfigured: Boolean(PAYSTACK_SECRET_KEY),
+// Health check endpoint (Part 2 Item 2: checks app, Neon Postgres, Upstash Redis, no secrets in response)
+router.get(['/health', '/api/health'], async (_req, res) => {
+  const health = await pingHealth();
+  return res.json({
+    status: 'OK',
+    ...health,
   });
 });
+
 
 // 1. GET /paystack/config - Public client-safe config
 router.get('/paystack/config', (_req, res) => {
@@ -282,6 +297,21 @@ router.post('/paystack/initialize', async (req, res) => {
     serverOrders.set(assignedOrderId, newServerOrder);
     serverOrdersByRef.set(reference, newServerOrder);
 
+    // Persist pending payment record to PostgreSQL / KV database
+    await savePaymentRecord({
+      reference,
+      orderId: assignedOrderId,
+      amountKobo: pricing.amountInKobo,
+      amountNaira: pricing.grandTotalNaira,
+      currency: 'NGN',
+      channel: 'card,bank_transfer,ussd',
+      status: 'pending_payment',
+      webhookReceived: false,
+      customerEmail: email.trim().toLowerCase(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
     if (PAYSTACK_SECRET_KEY) {
       try {
         const paystackRes = await fetch('https://api.paystack.co/transaction/initialize', {
@@ -293,9 +323,10 @@ router.post('/paystack/initialize', async (req, res) => {
           body: JSON.stringify({
             email: email.trim().toLowerCase(),
             amount: pricing.amountInKobo,
+            currency: 'NGN',
             reference,
             callback_url: `${APP_URL}/orders?ref=${reference}`,
-            channels: ['card', 'bank', 'ussd', 'qr', 'mobile_money', 'bank_transfer'],
+            channels: ['card', 'bank_transfer', 'ussd'],
             metadata: {
               orderId: assignedOrderId,
               campus: campus || 'Nigeria',
@@ -419,6 +450,42 @@ async function sendBrevoEmail(
 
   const data: any = await response.json().catch(() => ({}));
   return { success: true, messageId: data?.messageId };
+}
+
+// Global de-duplicated admin alert dispatcher (Part 2 Item 5)
+const sentAdminAlertKeys = new Set<string>();
+
+export async function sendAdminAlert(
+  key: string,
+  subject: string,
+  htmlDetails: string
+): Promise<void> {
+  if (sentAdminAlertKeys.has(key)) return;
+  sentAdminAlertKeys.add(key);
+
+  const adminEmail = 'shopitverified@gmail.com';
+  try {
+    await sendBrevoEmail(
+      adminEmail,
+      `[Shop It Alert] ${subject}`,
+      subject,
+      `<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; padding: 24px; color: #1e293b; max-width: 600px; border: 1px solid #e2e8f0; border-radius: 12px;">
+        <div style="margin-bottom: 16px;">
+          <span style="background: #FF6B00; color: #ffffff; padding: 4px 8px; border-radius: 6px; font-size: 11px; font-weight: 800; text-transform: uppercase;">Admin Notification</span>
+          <h2 style="color: #0f172a; margin: 8px 0 0; font-size: 18px;">${subject}</h2>
+        </div>
+        <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 14px; font-size: 14px; line-height: 1.6;">
+          ${htmlDetails}
+        </div>
+        <div style="margin-top: 20px; padding-top: 14px; border-top: 1px solid #e2e8f0; color: #64748b; font-size: 12px;">
+          Shop It Operations & Safety Alert · Sent to <strong>${adminEmail}</strong>
+        </div>
+      </div>`,
+      'Shop It Admin'
+    );
+  } catch (err: any) {
+    console.warn('[Admin Alert Brevo Warning]', err.message);
+  }
 }
 
 // 4c. POST /email/send - Handles all 15 platform transactional emails via Brevo
@@ -605,12 +672,28 @@ router.post('/auth/verify-otp', async (req, res) => {
   }
 });
 
-// 5. GET /paystack/verify/:reference
+// 5. GET /paystack/verify/:reference - Strict verification with database persistence & idempotency
 router.get('/paystack/verify/:reference', async (req, res) => {
   const { reference } = req.params;
 
   if (!reference) {
     return res.status(400).json({ status: false, message: 'Reference is required' });
+  }
+
+  // 1. Check persistent database payment record first (Rule 5: Idempotency)
+  const existingRecord = await getPaymentRecord(reference);
+  if (existingRecord && existingRecord.status === 'paid') {
+    return res.json({
+      status: true,
+      isPaid: true,
+      reference,
+      orderId: existingRecord.orderId,
+      amountInKobo: existingRecord.amountKobo,
+      amountNaira: existingRecord.amountNaira,
+      currency: existingRecord.currency,
+      channel: existingRecord.channel,
+      message: 'Transaction already verified and confirmed Paid',
+    });
   }
 
   const order = serverOrdersByRef.get(reference);
@@ -639,7 +722,28 @@ router.get('/paystack/verify/:reference', async (req, res) => {
       );
 
       const verifyData: any = await verifyRes.json();
+      
+      // Rule 4 & 6: Strict checks - status must be 'success', currency must be 'NGN', amount must match
       if (verifyData.status && verifyData.data?.status === 'success') {
+        const receivedCurrency = verifyData.data.currency || 'NGN';
+        if (receivedCurrency !== 'NGN') {
+          return res.status(400).json({
+            status: false,
+            isPaid: false,
+            message: `Invalid currency ${receivedCurrency}. Only NGN payments are accepted.`,
+          });
+        }
+
+        const receivedKobo = Number(verifyData.data.amount);
+        const expectedKobo = existingRecord?.amountKobo || order?.amountInKobo;
+        if (expectedKobo && receivedKobo < expectedKobo) {
+          return res.status(400).json({
+            status: false,
+            isPaid: false,
+            message: `Amount mismatch: received ₦${receivedKobo / 100}, expected ₦${expectedKobo / 100}`,
+          });
+        }
+
         if (order) {
           order.status = 'paid';
           order.paidAt = new Date().toISOString();
@@ -647,17 +751,52 @@ router.get('/paystack/verify/:reference', async (req, res) => {
         }
         processedReferences.add(reference);
 
+        // Update persistent payment record to 'paid'
+        await savePaymentRecord({
+          reference,
+          orderId: existingRecord?.orderId || order?.orderId || reference,
+          amountKobo: receivedKobo,
+          amountNaira: receivedKobo / 100,
+          currency: 'NGN',
+          channel: verifyData.data.channel || 'card',
+          status: 'paid',
+          webhookReceived: existingRecord?.webhookReceived || false,
+          customerEmail: verifyData.data.customer?.email,
+          data: {
+            paystackId: verifyData.data.id,
+            gatewayResponse: verifyData.data.gateway_response,
+          },
+          createdAt: existingRecord?.createdAt || new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        });
+
+        // Part 2 Item 5: Brevo alert for high-value orders (>= ₦50,000)
+        if (receivedKobo >= 5000000) {
+          await sendAdminAlert(
+            `high_order_${reference}`,
+            `High-Value Order Confirmed (₦${(receivedKobo / 100).toLocaleString()})`,
+            `An order above ₦50,000 has been verified and committed to Escrow.<br/>
+             Order ID: <strong>#${existingRecord?.orderId || order?.orderId || reference}</strong><br/>
+             Amount: <strong>₦${(receivedKobo / 100).toLocaleString()}</strong><br/>
+             Payment Channel: <strong>${verifyData.data.channel || 'card'}</strong><br/>
+             Customer: <strong>${verifyData.data.customer?.email || 'Student Buyer'}</strong>`
+          );
+        }
+
         return res.json({
           status: true,
           isPaid: true,
           reference,
-          amountInKobo: verifyData.data.amount,
-          amountNaira: verifyData.data.amount / 100,
-          orderId: order?.orderId,
+          amountInKobo: receivedKobo,
+          amountNaira: receivedKobo / 100,
+          currency: 'NGN',
+          channel: verifyData.data.channel,
+          orderId: order?.orderId || existingRecord?.orderId,
           order,
           message: 'Transaction confirmed with Paystack API and order marked Paid',
         });
       } else {
+        // Unpaid or pending bank transfer
         return res.json({
           status: true,
           isPaid: false,
@@ -678,9 +817,79 @@ router.get('/paystack/verify/:reference', async (req, res) => {
     status: true,
     isPaid: order?.status === 'paid',
     reference,
-    orderId: order?.orderId,
+    orderId: order?.orderId || existingRecord?.orderId,
     order,
   });
+});
+
+// 5b. POST /paystack/refund - Refund API calling Paystack and updating escrow/wallet
+router.post('/paystack/refund', async (req, res) => {
+  const { reference, amountKobo, reason } = req.body;
+
+  if (!reference) {
+    return res.status(400).json({ status: false, message: 'Payment reference is required for refund' });
+  }
+
+  if (PAYSTACK_SECRET_KEY) {
+    try {
+      const refundRes = await fetch('https://api.paystack.co/refund', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          transaction: reference,
+          amount: amountKobo ? Number(amountKobo) : undefined,
+          merchant_note: reason || 'Customer refund approved by Shop It Moderator',
+        }),
+      });
+
+      const refundData: any = await refundRes.json();
+      
+      const existing = await getPaymentRecord(reference);
+      if (existing) {
+        existing.status = 'refunded';
+        existing.updatedAt = new Date().toISOString();
+        await savePaymentRecord(existing);
+      }
+
+      return res.json({
+        status: refundData.status || true,
+        message: refundData.message || 'Refund successfully dispatched via Paystack',
+        data: refundData.data,
+      });
+    } catch (err: any) {
+      console.error('Paystack refund API error:', err.message);
+      return res.status(502).json({
+        status: false,
+        message: `Failed to contact Paystack Refund API: ${err.message}`,
+      });
+    }
+  }
+
+  // Fallback: update DB record
+  const existing = await getPaymentRecord(reference);
+  if (existing) {
+    existing.status = 'refunded';
+    existing.updatedAt = new Date().toISOString();
+    await savePaymentRecord(existing);
+  }
+
+  return res.json({
+    status: true,
+    message: 'Refund recorded in database and order escrow returned to buyer.',
+  });
+});
+
+// 5c. GET /paystack/payments - Full payment list for Admin Payments Page (Point 11)
+router.get('/paystack/payments', async (_req, res) => {
+  try {
+    const payments = await getAllPaymentRecords();
+    return res.json({ status: true, payments });
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: err.message });
+  }
 });
 
 // 6. GET /paystack/events
@@ -692,9 +901,9 @@ router.get('/paystack/events', (_req, res) => {
   });
 });
 
-// 7. POST /paystack/transfer
-router.post('/paystack/transfer', (req, res) => {
-  const { amount, accountNumber, bankName } = req.body;
+// 7. POST /paystack/transfer - Seller withdrawal dispatcher with high-value alert (Part 2 Item 5)
+router.post('/paystack/transfer', async (req, res) => {
+  const { amount, accountNumber, bankName, sellerId, shopName } = req.body;
 
   if (!amount || Number(amount) < 1000) {
     return res.status(400).json({ status: false, message: 'Minimum withdrawal is ₦1,000' });
@@ -702,6 +911,18 @@ router.post('/paystack/transfer', (req, res) => {
 
   const transferCode = `TRF_${Date.now()}_${Math.floor(10000 + Math.random() * 90000)}`;
   const recipientCode = `RCP_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
+
+  // Alert admin if withdrawal is >= ₦50,000 (Part 2 Item 5)
+  if (Number(amount) >= 50000) {
+    await sendAdminAlert(
+      `withdrawal_alert_${transferCode}`,
+      `High-Value Withdrawal Request (₦${Number(amount).toLocaleString()})`,
+      `Artisan <strong>"${shopName || sellerId || 'Seller'}"</strong> requested a payout of <strong>₦${Number(amount).toLocaleString()}</strong>.<br/>
+       Bank: <strong>${bankName}</strong><br/>
+       Account Number: <strong>Ending in ${String(accountNumber).slice(-4)}</strong><br/>
+       Transfer Reference: <strong>${transferCode}</strong>`
+    );
+  }
 
   return res.json({
     status: true,
@@ -712,6 +933,131 @@ router.post('/paystack/transfer', (req, res) => {
     accountNumber,
     message: `Transfer dispatched to ${bankName} (${accountNumber}). Reference: ${transferCode}`,
   });
+});
+
+// 7b. POST /reports - Submit safety/dispute report (Part 2 Item 4)
+router.post('/reports', async (req, res) => {
+  try {
+    const { targetType, targetId, targetTitle, reporterEmail, reason, details } = req.body;
+
+    if (!targetType || !targetId || !reason) {
+      return res.status(400).json({ status: false, message: 'targetType, targetId, and reason are required' });
+    }
+
+    const reportId = `REP_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
+    const newReport: ReportRecord = {
+      id: reportId,
+      targetType: targetType as any,
+      targetId,
+      targetTitle: targetTitle || 'Marketplace Item / User',
+      reporterEmail,
+      reason,
+      details: details || '',
+      status: 'open',
+      actionLogs: [
+        {
+          action: 'Report Submitted',
+          note: `Flagged for: ${reason}`,
+          timestamp: new Date().toISOString(),
+        },
+      ],
+      createdAt: new Date().toISOString(),
+    };
+
+    await saveReportRecord(newReport);
+
+    // Part 2 Item 5: Alert admin of new safety report
+    await sendAdminAlert(
+      `report_alert_${reportId}`,
+      `Safety Report Filed: ${targetType.toUpperCase()}`,
+      `A user submitted a safety report.<br/>
+       Target Type: <strong>${targetType}</strong><br/>
+       Target: <strong>${targetTitle || targetId}</strong><br/>
+       Reason: <strong>${reason}</strong><br/>
+       Details: ${details || 'None provided'}<br/>
+       Reporter: ${reporterEmail || 'Anonymous'}`
+    );
+
+    return res.json({
+      status: true,
+      reportId,
+      message: 'Report received. Our moderation team will investigate promptly.',
+    });
+  } catch (err: any) {
+    console.error('Error submitting report:', err.message);
+    return res.status(500).json({ status: false, message: 'Internal server error filing report' });
+  }
+});
+
+// 7c. GET /reports - List all reports for Moderator Panel (Part 2 Item 4)
+router.get('/reports', async (_req, res) => {
+  try {
+    const reports = await getAllReportRecords();
+    return res.json({ status: true, reports });
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: err.message });
+  }
+});
+
+// 7d. PATCH /reports/:id - Update report status and add action note (Part 2 Item 4)
+router.patch('/reports/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, actionNote } = req.body;
+
+    if (!['open', 'reviewing', 'resolved'].includes(status)) {
+      return res.status(400).json({ status: false, message: 'Invalid status. Must be open, reviewing, or resolved.' });
+    }
+
+    await updateReportStatus(id, status as any, actionNote);
+    return res.json({ status: true, message: `Report status updated to ${status}.` });
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: err.message });
+  }
+});
+
+// 7e. GET /admin/export-data - Sanitized JSON export omitting NINs & biometric photos (Part 2 Item 3)
+router.get('/admin/export-data', async (_req, res) => {
+  try {
+    const payments = await getAllPaymentRecords();
+    const reports = await getAllReportRecords();
+    
+    // Sanitize verification records: never export full NINs or base64 photo buffers!
+    const sanitizedVerifications = Array.from(verificationSubmissions.values()).map(v => ({
+      id: v.id,
+      sellerId: v.sellerId,
+      shopName: v.shopName,
+      ownerName: v.ownerName,
+      idType: v.idType,
+      maskedNin: v.idNumber, // masked like ***-***-1234
+      under18: v.under18,
+      status: v.status,
+      submittedAt: v.submittedAt,
+      reviewedAt: v.reviewedAt,
+      // NOTE: Photographic image data and plain NINs omitted under NDPA 2023
+    }));
+
+    const exportPayload = {
+      version: '1.0',
+      exportedAt: new Date().toISOString(),
+      platform: 'Shop It Nigeria (TEEDS)',
+      summary: {
+        totalPayments: payments.length,
+        totalReports: reports.length,
+        totalVerifications: sanitizedVerifications.length,
+      },
+      payments,
+      reports,
+      verifications: sanitizedVerifications,
+      orders: Array.from(serverOrders.values()),
+    };
+
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Disposition', `attachment; filename="shopit-backup-${Date.now()}.json"`);
+    return res.send(JSON.stringify(exportPayload, null, 2));
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: err.message });
+  }
 });
 
 // ============================================================================
@@ -1008,6 +1354,17 @@ router.post('/verification/submit', async (req: any, res) => {
       timestamp: new Date().toISOString(),
       details: `Artisan "${fullName}" submitted verification. Status: ${finalStatus}. Masked NIN: ${maskedNin}. API Provider: ${apiResult.provider}.`,
     });
+
+    // Part 2 Item 5: Alert admin of new seller verification submission
+    await sendAdminAlert(
+      `verif_submission_${submissionId}`,
+      `New Seller Identity Verification: ${shopName || fullName}`,
+      `Artisan <strong>"${shopName || fullName}"</strong> (${fullName}) submitted identity documents for verification.<br/>
+       Status: <strong>${finalStatus === 'verified' ? 'Auto-Verified with NIMC' : 'Pending Moderator Review'}</strong><br/>
+       ID Type: <strong>${idDocumentType || 'NIN Slip'}</strong><br/>
+       Masked NIN: <strong>${maskedNin}</strong><br/>
+       Under 18: <strong>${under18 ? 'Yes (Guardian details attached)' : 'No'}</strong>`
+    );
 
     return res.status(200).json({
       status: true,

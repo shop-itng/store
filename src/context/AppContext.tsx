@@ -578,6 +578,44 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
   }, []);
+
+  // Rule 6: 24-hour unpaid order cancellation routine (cancels unpaid orders older than 24h & returns stock)
+  useEffect(() => {
+    const checkUnpaidOrders = () => {
+      const now = Date.now();
+      const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+      setOrders(prev =>
+        prev.map(ord => {
+          if (
+            (ord.status as any) === 'pending_payment' &&
+            now - new Date(ord.createdAt).getTime() > ONE_DAY_MS
+          ) {
+            // Restore product stock
+            ord.items.forEach(item => {
+              setProducts(currProds =>
+                currProds.map(p =>
+                  p.id === item.productId
+                    ? { ...p, stock: (p.stock || 0) + item.quantity, isSoldOut: false }
+                    : p
+                )
+              );
+            });
+            return {
+              ...ord,
+              status: 'cancelled',
+              disputeReason: 'Order automatically cancelled after 24 hours without payment. Stock returned.',
+            };
+          }
+          return ord;
+        })
+      );
+    };
+
+    checkUnpaidOrders();
+    const interval = setInterval(checkUnpaidOrders, 60 * 1000);
+    return () => clearInterval(interval);
+  }, []);
+
   const [selectedProductId, setSelectedProductId] = useState<string | null>(null);
   const [selectedSellerId, setSelectedSellerId] = useState<string | null>(null);
 
@@ -2670,6 +2708,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const ord = orders.find(o => o.id === orderId);
     if (!ord) return;
     updateOrderStatus(orderId, 'cancelled', { disputeReason: notes || 'Moderator forced refund to buyer' });
+
+    // Call server Paystack Refund API
+    if (ord.paymentReference) {
+      fetch('/api/paystack/refund', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          reference: ord.paymentReference,
+          amountKobo: Math.round(ord.grandTotal * 100),
+          reason: notes || `Moderator forced refund for Order #${orderId}`,
+        }),
+      }).catch(err => {
+        console.warn('Paystack refund call warning:', err.message);
+      });
+    }
+
     ord.items.forEach(item => {
       setWallets(prev => {
         const w = prev[item.sellerId];
@@ -2688,7 +2742,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 fee: 0,
                 balanceAfter: w.availableBalance,
                 status: 'completed',
-                description: `Moderator Forced Refund for Order #${orderId}`,
+                description: `Moderator Forced Refund for Order #${orderId} via Paystack`,
                 reference: orderId,
                 createdAt: 'Just now',
               },
@@ -2698,8 +2752,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         };
       });
     });
-    notify(`[Moderator Override] Order #${orderId} cancelled & 100% refunded to buyer.`, 'success');
-    addAdminAuditLog('ORDER_FORCE_REFUNDED', `Order #${orderId} cancelled and funds returned to buyer. Notes: ${notes || 'Direct intervention'}`, orderId);
+    notify(`[Moderator Override] Order #${orderId} cancelled & 100% refunded to buyer via Paystack.`, 'success');
+    addAdminAuditLog('ORDER_FORCE_REFUNDED', `Order #${orderId} cancelled and funds returned to buyer via Paystack. Notes: ${notes || 'Direct intervention'}`, orderId);
   };
 
   const addAdminAuditLog = (action: string, details: string, targetId?: string) => {
