@@ -165,34 +165,34 @@ export const AuthModal: React.FC = () => {
       return;
     }
 
-    // Update password in localStorage registered users
-    const registeredUsersStr = localStorage.getItem('shopit_registered_users');
-    let registeredUsers: any[] = registeredUsersStr ? JSON.parse(registeredUsersStr) : [];
-    const existingIndex = registeredUsers.findIndex(u => u.email?.toLowerCase() === cleanEmail);
-
-    if (existingIndex >= 0) {
-      registeredUsers[existingIndex].password = newPassword;
-    } else {
-      registeredUsers.push({
-        id: `user_${Date.now()}`,
-        name: cleanEmail.split('@')[0],
-        email: cleanEmail,
-        password: newPassword,
-        role: 'buyer',
-        isVerifiedEmail: true,
+    // Update password in PostgreSQL via server API (STEP 2 ITEM 4)
+    try {
+      const resp = await fetch('/api/auth/reset-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: cleanEmail,
+          code: forgotOtpInput,
+          newPassword,
+        }),
       });
+      const data = await resp.json();
+      if (!resp.ok || !data.status) {
+        notify(data.message || 'Database error updating password.', 'error');
+        return;
+      }
+
+      notify('Password reset successfully in database! You can now sign in with your new password.', 'success');
+      setLoginEmail(cleanEmail);
+      setLoginPassword('');
+      setForgotStep('email');
+      setAuthTab('login');
+    } catch (err: any) {
+      notify('Unable to reach server database. Please try again.', 'error');
     }
-
-    localStorage.setItem('shopit_registered_users', JSON.stringify(registeredUsers));
-
-    notify('Password reset successfully! You can now sign in with your new password.', 'success');
-    setLoginEmail(cleanEmail);
-    setLoginPassword('');
-    setForgotStep('email');
-    setAuthTab('login');
   };
 
-  // 2. Login Flow (Email & Password + New Device Challenge)
+  // 2. Login Flow (Email & Password verified against PostgreSQL + New Device Challenge)
   const handleLoginFormSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const cleanEmail = loginEmail.trim().toLowerCase();
@@ -201,28 +201,51 @@ export const AuthModal: React.FC = () => {
 
     let matchedUser: any = null;
 
-    // Check if logging in as Admin Moderator (Adeyinka Joseph)
-    if (
-      cleanEmail === ADMIN_CREDENTIALS.email.toLowerCase() &&
-      cleanPass === ADMIN_CREDENTIALS.password
-    ) {
-      matchedUser = {
-        id: 'admin_adeyinka_joseph',
-        name: ADMIN_CREDENTIALS.name,
-        email: ADMIN_CREDENTIALS.email,
-        role: 'admin',
-        adminSubRole: 'moderator',
-        isVerifiedEmail: true,
-      };
-    } else {
-      // Check localStorage registered users
-      const registeredUsersStr = localStorage.getItem('shopit_registered_users');
-      const registeredUsers: any[] = registeredUsersStr ? JSON.parse(registeredUsersStr) : [];
-      const foundUser = registeredUsers.find(
-        u => u.email.toLowerCase() === cleanEmail && u.password === cleanPass
-      );
-      if (foundUser) {
-        matchedUser = foundUser;
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: cleanEmail, password: cleanPass }),
+      });
+      const data = await res.json();
+      if (res.ok && data.status && data.user) {
+        matchedUser = data.user;
+      } else {
+        // Fallback check for root admin in mock credentials if offline or migration delay
+        if (
+          cleanEmail === ADMIN_CREDENTIALS.email.toLowerCase() &&
+          cleanPass === ADMIN_CREDENTIALS.password
+        ) {
+          matchedUser = {
+            id: 'admin_adeyinka_joseph',
+            name: ADMIN_CREDENTIALS.name,
+            email: ADMIN_CREDENTIALS.email,
+            role: 'admin',
+            adminSubRole: 'moderator',
+            isVerifiedEmail: true,
+          };
+        } else {
+          notify(data.message || 'Invalid login credentials. Please check your email and password.', 'error');
+          return;
+        }
+      }
+    } catch (err: any) {
+      // Local fallback if offline
+      if (
+        cleanEmail === ADMIN_CREDENTIALS.email.toLowerCase() &&
+        cleanPass === ADMIN_CREDENTIALS.password
+      ) {
+        matchedUser = {
+          id: 'admin_adeyinka_joseph',
+          name: ADMIN_CREDENTIALS.name,
+          email: ADMIN_CREDENTIALS.email,
+          role: 'admin',
+          adminSubRole: 'moderator',
+          isVerifiedEmail: true,
+        };
+      } else {
+        notify('Unable to connect to database server. Please check your network.', 'error');
+        return;
       }
     }
 

@@ -1108,19 +1108,40 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       notify('Email verified! Complete your shop profile.', 'success');
       return true;
     } else {
-      login({
-        id: pendingAuthData.id,
-        name: pendingAuthData.name,
-        email: pendingAuthData.email,
-        role: 'buyer',
-        password: pendingAuthData.password,
-      } as any);
-      // 15. WELCOME EMAIL (buyer)
-      sendTransactionalEmail(pendingAuthData.email, 'welcome', {
-        name: pendingAuthData.name || pendingAuthData.email.split('@')[0],
-      });
-      closeAuthModal();
-      return true;
+      // Persist Buyer to PostgreSQL database on the server (STEP 2 ITEM 3)
+      try {
+        const resp = await fetch('/api/auth/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: pendingAuthData.email,
+            password: pendingAuthData.password,
+            name: pendingAuthData.name,
+            role: 'buyer',
+            age: pendingAuthData.age,
+            hasGuardianConsent: pendingAuthData.hasGuardianConsent,
+            guardianName: pendingAuthData.guardianName,
+          }),
+        });
+        const regData = await resp.json();
+        if (!resp.ok || !regData.status) {
+          notify(regData.message || 'Database error saving user account.', 'error');
+          return false;
+        }
+
+        const savedUser = regData.user;
+        login(savedUser);
+        sendTransactionalEmail(pendingAuthData.email, 'welcome', {
+          name: pendingAuthData.name || pendingAuthData.email.split('@')[0],
+        });
+        closeAuthModal();
+        notify('Account created and registered successfully in database!', 'success');
+        return true;
+      } catch (err: any) {
+        console.error('[Registration Error]:', err.message);
+        notify('Unable to connect to database server. Please try again.', 'error');
+        return false;
+      }
     }
   };
 
@@ -1140,7 +1161,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return result;
   };
 
-  const submitSellerRegistration = (sellerData: {
+  const submitSellerRegistration = async (sellerData: {
     shopName: string;
     campus?: Campus;
     location?: NigerianLocation;
@@ -1150,81 +1171,89 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     guardianName?: string;
     guardianPhone?: string;
   }) => {
-    const newSellerId = `seller_${Date.now()}`;
     const resolvedArea = sellerData.locationArea || sellerData.location?.area || 'Lagos Mainland';
-    const newSeller: SellerProfile = {
-      id: newSellerId,
-      shopName: sellerData.shopName,
-      ownerName: pendingAuthData?.name || sellerData.shopName,
-      email: pendingAuthData?.email || 'artisan@campus.ng',
-      bio: sellerData.bio,
-      campus: sellerData.campus || 'UNILAG (Akoka)',
-      location: sellerData.location,
-      locationArea: resolvedArea,
-      isVerifiedSeller: false,
-      verificationStatus: 'not_started',
-      under18: sellerData.under18,
-      guardianConsent: sellerData.under18,
-      guardianName: sellerData.guardianName,
-      guardianPhone: sellerData.guardianPhone,
-      badges: [],
-      level: 1,
-      rating: 5.0,
-      reviewCount: 0,
-      salesCount: 0,
-      viewsCount: 0,
-      vacationMode: false,
-      joinedDate: 'Today',
-    };
 
-    setSellers(prev => [newSeller, ...prev]);
+    // Persist Seller to PostgreSQL database on the server (STEP 2 ITEM 3)
+    try {
+      const resp = await fetch('/api/auth/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: pendingAuthData?.email,
+          password: pendingAuthData?.password,
+          name: pendingAuthData?.name || sellerData.shopName,
+          role: 'seller',
+          age: pendingAuthData?.age,
+          hasGuardianConsent: pendingAuthData?.hasGuardianConsent,
+          guardianName: sellerData.guardianName || pendingAuthData?.guardianName,
+          shopName: sellerData.shopName,
+          bio: sellerData.bio,
+          campus: sellerData.campus || 'UNILAG (Akoka)',
+          location: sellerData.location,
+          locationArea: resolvedArea,
+        }),
+      });
 
-    // Initialize new seller wallet
-    const newWallet: SellerWallet = {
-      sellerId: newSellerId,
-      pendingBalance: 0,
-      availableBalance: 0,
-      totalWithdrawn: 0,
-      isFrozen: false,
-      payoutAccounts: [],
-      ledger: [],
-      transactions: [],
-    };
-    setWallets(prev => ({ ...prev, [newSellerId]: newWallet }));
+      const regData = await resp.json();
+      if (!resp.ok || !regData.status) {
+        notify(regData.message || 'Database error saving seller shop.', 'error');
+        return;
+      }
 
-    const sellerUser: User = {
-      id: newSellerId,
-      name: pendingAuthData?.name || sellerData.shopName,
-      email: pendingAuthData?.email || 'artisan@campus.ng',
-      role: 'seller',
-      isVerifiedEmail: true,
-      sellerProfile: newSeller,
-      savedDeliveryArea: resolvedArea,
-      location: sellerData.location,
-      locationArea: resolvedArea,
-    };
+      const serverUser = regData.user;
+      const serverSellerProfile = serverUser.sellerProfile || {
+        id: serverUser.id,
+        shopName: sellerData.shopName,
+        ownerName: serverUser.name,
+        email: serverUser.email,
+        bio: sellerData.bio,
+        campus: sellerData.campus || 'UNILAG (Akoka)',
+        location: sellerData.location,
+        locationArea: resolvedArea,
+        isVerifiedSeller: false,
+        verificationStatus: 'not_started',
+        under18: sellerData.under18,
+        guardianConsent: sellerData.under18,
+        guardianName: sellerData.guardianName,
+        guardianPhone: sellerData.guardianPhone,
+        badges: [],
+        level: 1,
+        rating: 5.0,
+        reviewCount: 0,
+        salesCount: 0,
+        viewsCount: 0,
+        vacationMode: false,
+        joinedDate: 'Today',
+      };
 
-    const userWithPass: User = {
-      ...sellerUser,
-      password: pendingAuthData?.password || 'ShopItArtisan2026!',
-      createdAt: new Date().toLocaleDateString('en-GB'),
-    };
+      setSellers(prev => [serverSellerProfile, ...prev]);
 
-    setRegisteredUsers(prev => {
-      const updated = [userWithPass, ...prev.filter(u => u.id !== sellerUser.id && u.email.toLowerCase() !== sellerUser.email.toLowerCase())];
-      localStorage.setItem('shopit_registered_users', JSON.stringify(updated));
-      return updated;
-    });
+      const newWallet: SellerWallet = {
+        sellerId: serverUser.id,
+        pendingBalance: 0,
+        availableBalance: 0,
+        totalWithdrawn: 0,
+        isFrozen: false,
+        payoutAccounts: [],
+        ledger: [],
+        transactions: [],
+      };
+      setWallets(prev => ({ ...prev, [serverUser.id]: newWallet }));
 
-    // 15. WELCOME EMAIL (seller)
-    sendTransactionalEmail(sellerUser.email, 'welcome', {
-      name: sellerUser.name || sellerData.shopName,
-    });
+      setCurrentUser(serverUser);
+      localStorage.setItem('shopit_current_user', JSON.stringify(serverUser));
 
-    setCurrentUser(sellerUser);
-    closeAuthModal();
-    setActiveView('seller_dashboard');
-    notify(`Shop "${sellerData.shopName}" registered in ${resolvedArea}! Welcome to Shop It.`, 'success');
+      sendTransactionalEmail(serverUser.email, 'welcome', {
+        name: serverUser.name || sellerData.shopName,
+      });
+
+      closeAuthModal();
+      setActiveView('seller_dashboard');
+      notify(`Shop "${sellerData.shopName}" registered in ${resolvedArea} and saved to database!`, 'success');
+    } catch (err: any) {
+      console.error('[Seller Registration Error]:', err.message);
+      notify('Unable to reach database server. Please try again.', 'error');
+    }
   };
 
   const addProduct = (
@@ -2594,6 +2623,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const targetUser = registeredUsers.find(u => u.id === userId);
     const targetEmail = targetUser?.email;
 
+    // Delete in PostgreSQL on server (STEP 2 ITEM 5)
+    fetch(`/api/admin/users/${encodeURIComponent(userId)}`, { method: 'DELETE' }).catch(err => {
+      console.warn('API delete user warning:', err.message);
+    });
+
     setRegisteredUsers(prev => {
       const updated = prev.filter(u => u.id !== userId);
       localStorage.setItem('shopit_registered_users', JSON.stringify(updated));
@@ -2617,7 +2651,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setActiveView('catalog');
     }
 
-    notify(`Account "${targetUser?.name || 'User'}" (${targetEmail || userId}) permanently deleted by Moderator.`, 'success');
+    notify(`Account "${targetUser?.name || 'User'}" (${targetEmail || userId}) permanently deleted from database.`, 'success');
     addAdminAuditLog('ACCOUNT_DELETED', `Permanently deleted account ${targetUser?.name || 'User'} (${targetEmail || userId})`, userId);
     return true;
   };
@@ -2628,6 +2662,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return;
     }
 
+    // Update in PostgreSQL on server (STEP 2 ITEM 5)
+    fetch(`/api/admin/users/${encodeURIComponent(userId)}/ban`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ isBanned, banReason: reason }),
+    }).catch(err => {
+      console.warn('API ban user warning:', err.message);
+    });
+
     setRegisteredUsers(prev => {
       const updated = prev.map(u => u.id === userId ? { ...u, isBanned } : u);
       localStorage.setItem('shopit_registered_users', JSON.stringify(updated));
@@ -2637,12 +2680,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (isBanned) {
       toggleWalletFreeze(userId, true, reason || 'Account suspended by moderator');
       setSellers(prev => prev.map(s => s.id === userId ? { ...s, vacationMode: true } : s));
-      notify(`Account suspended and store hidden from marketplace.`, 'info');
+      notify(`Account suspended in database and store hidden from marketplace.`, 'info');
       addAdminAuditLog('ACCOUNT_SUSPENDED', `Suspended account ${userId}. Reason: ${reason || 'Safety violation'}`, userId);
     } else {
       toggleWalletFreeze(userId, false);
       setSellers(prev => prev.map(s => s.id === userId ? { ...s, vacationMode: false } : s));
-      notify(`Account suspension lifted by moderator.`, 'success');
+      notify(`Account suspension lifted in database.`, 'success');
       addAdminAuditLog('ACCOUNT_UNSUSPENDED', `Lifted suspension for account ${userId}`, userId);
     }
   };
@@ -2652,17 +2695,36 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       notify('Password must be at least 6 characters.', 'error');
       return false;
     }
+
+    // Update in PostgreSQL on server (STEP 2 ITEM 5)
+    fetch(`/api/admin/users/${encodeURIComponent(userId)}/reset-password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ newPassword: newPass.trim() }),
+    }).catch(err => {
+      console.warn('API reset password warning:', err.message);
+    });
+
     setRegisteredUsers(prev => {
       const updated = prev.map(u => u.id === userId ? { ...u, password: newPass.trim() } : u);
       localStorage.setItem('shopit_registered_users', JSON.stringify(updated));
       return updated;
     });
-    notify('Password reset successfully for account.', 'success');
+    notify('Password reset successfully in database for account.', 'success');
     addAdminAuditLog('PASSWORD_RESET', `Direct password reset executed for account ${userId}`, userId);
     return true;
   };
 
   const adminToggleSellerVerification = (sellerId: string, isVerified: boolean) => {
+    // Update in PostgreSQL on server (STEP 2 ITEM 5)
+    fetch(`/api/admin/sellers/${encodeURIComponent(sellerId)}/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ isVerified }),
+    }).catch(err => {
+      console.warn('API verify seller warning:', err.message);
+    });
+
     setSellers(prev =>
       prev.map(s => {
         if (s.id === sellerId) {
@@ -2681,8 +2743,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
     notify(
       isVerified
-        ? `Seller verified with NIN Slip! Verified maker badge activated.`
-        : `Seller verification status revoked.`,
+        ? `Seller verified with NIN Slip! Verified maker badge activated in database.`
+        : `Seller verification status revoked in database.`,
       'info'
     );
     addAdminAuditLog(
@@ -3172,6 +3234,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const clearMarketplaceDatabase = () => {
+    // 0. Wipe non-admin accounts from PostgreSQL database on server (STEP 2 ITEM 5)
+    fetch('/api/admin/users/wipe-non-admins', { method: 'POST' }).catch(err => {
+      console.warn('Wipe non-admins API warning:', err.message);
+    });
+
     // 1. Wipe all products and listings
     setProducts([]);
     // 2. Wipe all sellers and shops

@@ -22,6 +22,20 @@ import {
   type PaymentRecord,
   type ReportRecord,
 } from './db/otpStore.js';
+import {
+  query as dbQuery,
+  hashPassword,
+  verifyPassword,
+  pingPostgres,
+  pingRedis,
+  runMigration,
+  DATABASE_URL_ENV_NAME,
+} from './db/postgres.js';
+
+// Run database migrations on server boot
+runMigration().catch(err => {
+  console.error('[PostgreSQL Startup Migration Error]:', err.message);
+});
 
 const app = express();
 
@@ -204,13 +218,500 @@ function calculateServerPrice(params: {
 // Router for all API routes - mounted at both /api and / to handle Vercel rewrite variations
 const router = express.Router();
 
-// Health check endpoint (Part 2 Item 2: checks app, Neon Postgres, Upstash Redis, no secrets in response)
+// Health check endpoint (STEP 2 Item 7: checks Neon & Upstash, returns only OK or failing service, no secrets)
 router.get(['/health', '/api/health'], async (_req, res) => {
-  const health = await pingHealth();
-  return res.json({
-    status: 'OK',
-    ...health,
+  const pgPing = await pingPostgres();
+  const redisPing = await pingRedis();
+
+  const isPgOk = pgPing.ok;
+  const hasRedisConfig = Boolean(process.env.KV_REST_API_URL);
+  const isRedisOk = !hasRedisConfig || redisPing.ok;
+
+  if (isPgOk && isRedisOk) {
+    return res.status(200).json({
+      status: 'OK',
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  const failingServices: string[] = [];
+  if (!isPgOk) failingServices.push('Neon Postgres');
+  if (!isRedisOk) failingServices.push('Upstash Redis');
+
+  return res.status(503).json({
+    status: 'ERROR',
+    failing: failingServices.join(', '),
+    timestamp: new Date().toISOString(),
   });
+});
+
+// ============================================================================
+// REAL POSTGRESQL AUTHENTICATION & USER GOVERNANCE (STEP 2 ITEMS 1, 3, 4, 5)
+// ============================================================================
+
+// POST /api/auth/register (or /api/auth/signup) - Inserts into PostgreSQL with PBKDF2 hash
+router.post(['/auth/register', '/auth/signup'], async (req, res) => {
+  try {
+    const { name, email, password, role = 'buyer', age, hasGuardianConsent, guardianName, shopName, campus, location, bio } = req.body;
+
+    if (!email || !password || !name) {
+      return res.status(400).json({ status: false, message: 'Name, email, and password are required.' });
+    }
+
+    const cleanEmail = String(email).trim().toLowerCase();
+    const cleanName = String(name).trim();
+    const cleanPassword = String(password).trim();
+
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      return res.status(400).json({ status: false, message: 'Please provide a valid email address.' });
+    }
+
+    if (cleanPassword.length < 6) {
+      return res.status(400).json({ status: false, message: 'Password must be at least 6 characters long.' });
+    }
+
+    const parsedAge = age !== undefined && age !== null ? parseInt(String(age), 10) : undefined;
+    if (parsedAge !== undefined && (isNaN(parsedAge) || parsedAge < 10)) {
+      return res.status(400).json({ status: false, message: 'You must be at least 10 years old to register on Shop It.' });
+    }
+
+    if (parsedAge !== undefined && parsedAge < 18 && !hasGuardianConsent) {
+      return res.status(400).json({ status: false, message: 'Parent or guardian consent is required for users under 18.' });
+    }
+
+    // Check if user already exists in PostgreSQL
+    const existing = await dbQuery('SELECT id FROM shopit_users WHERE LOWER(email) = LOWER($1)', [cleanEmail]);
+    if (existing.rows.length > 0) {
+      return res.status(409).json({ status: false, message: 'An account with this email address already exists. Please log in.' });
+    }
+
+    const userId = `user_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const passwordHash = hashPassword(cleanPassword);
+    const userRole = role === 'seller' ? 'seller' : 'buyer';
+
+    // Insert user row into PostgreSQL
+    const userInsert = await dbQuery(
+      `INSERT INTO shopit_users (
+        id, email, name, password_hash, role, is_verified_email, age, has_guardian_consent, guardian_name, created_at, updated_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
+      RETURNING id, email, name, role, is_verified_email, age, has_guardian_consent, guardian_name, created_at`,
+      [
+        userId,
+        cleanEmail,
+        cleanName,
+        passwordHash,
+        userRole,
+        true,
+        parsedAge || null,
+        Boolean(hasGuardianConsent),
+        guardianName ? String(guardianName).trim() : null,
+      ]
+    );
+
+    const savedUser = userInsert.rows[0];
+
+    // If role is seller, also insert seller profile and wallet row into PostgreSQL
+    let sellerProfile: any = null;
+    if (userRole === 'seller') {
+      const sellerId = userId;
+      const cleanShop = (shopName || `${cleanName}'s Shop`).trim();
+      const sellerInsert = await dbQuery(
+        `INSERT INTO shopit_sellers (
+          id, user_id, shop_name, owner_name, email, bio, campus, location_state, location_city, location_area, is_verified_seller, verification_status, under_18, guardian_consent, guardian_name, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, false, 'not_started', $11, $12, $13, NOW(), NOW())
+        RETURNING *`,
+        [
+          sellerId,
+          userId,
+          cleanShop,
+          cleanName,
+          cleanEmail,
+          bio ? String(bio).trim() : '',
+          campus ? String(campus).trim() : 'Lagos Mainland',
+          location?.state || 'Lagos',
+          location?.city || 'Lagos Mainland',
+          location?.area || 'Yaba',
+          parsedAge !== undefined ? parsedAge < 18 : false,
+          Boolean(hasGuardianConsent),
+          guardianName ? String(guardianName).trim() : null,
+        ]
+      );
+      sellerProfile = sellerInsert.rows[0];
+
+      // Initialize wallet in PostgreSQL
+      await dbQuery(
+        `INSERT INTO shopit_wallets (seller_id, pending_balance, available_balance, total_withdrawn, is_frozen, created_at, updated_at)
+         VALUES ($1, 0, 0, 0, false, NOW(), NOW())
+         ON CONFLICT (seller_id) DO NOTHING`,
+        [sellerId]
+      );
+    }
+
+    console.log(`[User Registration] Successfully created user in PostgreSQL: ${cleanEmail} (ID: ${userId}, Role: ${userRole})`);
+
+    return res.status(201).json({
+      status: true,
+      user: {
+        id: savedUser.id,
+        email: savedUser.email,
+        name: savedUser.name,
+        role: savedUser.role,
+        isVerifiedEmail: savedUser.is_verified_email,
+        age: savedUser.age,
+        hasGuardianConsent: savedUser.has_guardian_consent,
+        guardianName: savedUser.guardian_name,
+        createdAt: savedUser.created_at,
+        sellerProfile,
+      },
+      message: 'Account successfully registered and saved to database.',
+    });
+  } catch (err: any) {
+    console.error('[User Registration Error]:', err.message);
+    return res.status(500).json({
+      status: false,
+      message: 'Database error saving user account. Please try again.',
+    });
+  }
+});
+
+// POST /api/auth/login - Reads and verifies credentials from PostgreSQL
+router.post('/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) {
+      return res.status(400).json({ status: false, message: 'Email and password are required.' });
+    }
+
+    const cleanEmail = String(email).trim().toLowerCase();
+    const cleanPassword = String(password).trim();
+
+    const userRes = await dbQuery(
+      `SELECT u.*, s.id as seller_id, s.shop_name, s.verification_status, s.is_verified_seller, s.bio, s.campus
+       FROM shopit_users u
+       LEFT JOIN shopit_sellers s ON u.id = s.user_id
+       WHERE LOWER(u.email) = LOWER($1)`,
+      [cleanEmail]
+    );
+
+    if (userRes.rows.length === 0) {
+      return res.status(401).json({ status: false, message: 'Invalid email or password.' });
+    }
+
+    const userRow = userRes.rows[0];
+
+    // Verify password hash
+    const isPasswordValid = verifyPassword(cleanPassword, userRow.password_hash);
+    if (!isPasswordValid) {
+      return res.status(401).json({ status: false, message: 'Invalid email or password.' });
+    }
+
+    // Check account ban/suspension
+    if (userRow.is_banned) {
+      return res.status(403).json({
+        status: false,
+        message: userRow.ban_reason || 'This account has been suspended by an administrator.',
+      });
+    }
+
+    // Update last login in PostgreSQL
+    await dbQuery('UPDATE shopit_users SET last_login_at = NOW(), updated_at = NOW() WHERE id = $1', [userRow.id]);
+
+    console.log(`[User Login] Verified login for user: ${cleanEmail} (Role: ${userRow.role})`);
+
+    const sanitizedUser: any = {
+      id: userRow.id,
+      email: userRow.email,
+      name: userRow.name,
+      role: userRow.role,
+      isVerifiedEmail: Boolean(userRow.is_verified_email),
+      age: userRow.age,
+      hasGuardianConsent: Boolean(userRow.has_guardian_consent),
+      guardianName: userRow.guardian_name,
+      createdAt: userRow.created_at,
+      lastLoginAt: new Date().toISOString(),
+    };
+
+    if (userRow.role === 'seller' || userRow.seller_id) {
+      sanitizedUser.sellerProfile = {
+        id: userRow.seller_id || userRow.id,
+        shopName: userRow.shop_name || `${userRow.name}'s Shop`,
+        verificationStatus: userRow.verification_status || 'not_started',
+        isVerifiedSeller: Boolean(userRow.is_verified_seller),
+        bio: userRow.bio || '',
+        campus: userRow.campus || 'Lagos Mainland',
+      };
+    }
+
+    return res.json({
+      status: true,
+      user: sanitizedUser,
+      message: 'Login successful.',
+    });
+  } catch (err: any) {
+    console.error('[User Login Error]:', err.message);
+    return res.status(500).json({ status: false, message: 'Database error processing login.' });
+  }
+});
+
+// POST /api/auth/reset-password - Updates password in PostgreSQL
+router.post('/auth/reset-password', async (req, res) => {
+  try {
+    const { email, code, newPassword } = req.body;
+    if (!email || !code || !newPassword) {
+      return res.status(400).json({ status: false, message: 'Email, code, and new password are required.' });
+    }
+
+    const cleanEmail = String(email).trim().toLowerCase();
+    const cleanPassword = String(newPassword).trim();
+
+    if (cleanPassword.length < 6) {
+      return res.status(400).json({ status: false, message: 'New password must be at least 6 characters long.' });
+    }
+
+    // Verify OTP code
+    const otpRecord = await getOtpRecord(cleanEmail, 'password_reset');
+    if (!otpRecord) {
+      return res.status(400).json({ status: false, message: 'No active reset code found or code expired.' });
+    }
+
+    const isValid = verifyOtpHash(String(code).trim(), otpRecord.codeHash);
+    if (!isValid) {
+      return res.status(400).json({ status: false, message: 'Incorrect verification code.' });
+    }
+
+    await deleteOtpRecord(cleanEmail, 'password_reset');
+
+    const newHash = hashPassword(cleanPassword);
+    const updateRes = await dbQuery(
+      'UPDATE shopit_users SET password_hash = $1, updated_at = NOW() WHERE LOWER(email) = LOWER($2) RETURNING id',
+      [newHash, cleanEmail]
+    );
+
+    if (updateRes.rows.length === 0) {
+      return res.status(404).json({ status: false, message: 'No registered user found with this email address.' });
+    }
+
+    console.log(`[Password Reset] Successfully updated password in PostgreSQL for: ${cleanEmail}`);
+    return res.json({
+      status: true,
+      message: 'Password updated successfully in database.',
+    });
+  } catch (err: any) {
+    console.error('[Password Reset Error]:', err.message);
+    return res.status(500).json({ status: false, message: 'Database error updating password.' });
+  }
+});
+
+// GET /api/admin/users - Reads users directly from PostgreSQL, newest first, with search, pagination, and role filtering (STEP 2 ITEM 5)
+router.get('/admin/users', async (req, res) => {
+  try {
+    const q = req.query.q ? String(req.query.q).trim().toLowerCase() : '';
+    const role = req.query.role ? String(req.query.role).trim() : 'all';
+    const page = Math.max(1, parseInt(String(req.query.page || '1'), 10));
+    const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit || '15'), 10)));
+    const offset = (page - 1) * limit;
+
+    const conditions: string[] = [];
+    const params: any[] = [];
+    let paramIndex = 1;
+
+    if (q) {
+      conditions.push(`(LOWER(u.name) LIKE $${paramIndex} OR LOWER(u.email) LIKE $${paramIndex})`);
+      params.push(`%${q}%`);
+      paramIndex++;
+    }
+
+    if (role && role !== 'all') {
+      conditions.push(`u.role = $${paramIndex}`);
+      params.push(role);
+      paramIndex++;
+    }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    const countRes = await dbQuery(
+      `SELECT COUNT(*) as total FROM shopit_users u ${whereClause}`,
+      params
+    );
+    const total = parseInt(countRes.rows[0].total, 10);
+
+    const dataSql = `
+      SELECT
+        u.id,
+        u.email,
+        u.name,
+        u.role,
+        u.is_verified_email,
+        u.age,
+        u.has_guardian_consent,
+        u.guardian_name,
+        u.is_banned,
+        u.ban_reason,
+        u.last_login_at,
+        u.created_at,
+        s.id as seller_id,
+        s.shop_name,
+        s.verification_status,
+        s.is_verified_seller
+      FROM shopit_users u
+      LEFT JOIN shopit_sellers s ON u.id = s.user_id
+      ${whereClause}
+      ORDER BY u.created_at DESC
+      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
+    `;
+
+    const usersRes = await dbQuery(dataSql, [...params, limit, offset]);
+
+    const users = usersRes.rows.map((row: any) => ({
+      id: row.id,
+      email: row.email,
+      name: row.name,
+      role: row.role,
+      isVerifiedEmail: Boolean(row.is_verified_email),
+      age: row.age,
+      hasGuardianConsent: Boolean(row.has_guardian_consent),
+      guardianName: row.guardian_name,
+      isBanned: Boolean(row.is_banned),
+      banReason: row.ban_reason,
+      lastLoginAt: row.last_login_at,
+      createdAt: row.created_at,
+      shopName: row.shop_name,
+      verificationStatus: row.verification_status || (row.role === 'seller' ? 'not_started' : 'not_applicable'),
+      isVerifiedSeller: Boolean(row.is_verified_seller),
+    }));
+
+    return res.json({
+      status: true,
+      users,
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit) || 1,
+    });
+  } catch (err: any) {
+    console.error('[Admin Users Error]:', err.message);
+    return res.status(500).json({ status: false, message: 'Database error reading users.' });
+  }
+});
+
+// Admin User Actions: Delete, Ban, Reset Password directly in PostgreSQL
+router.delete('/admin/users/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await dbQuery('DELETE FROM shopit_users WHERE id = $1', [id]);
+    console.log(`[Admin User Governance] Deleted user ${id} from PostgreSQL.`);
+    return res.json({ status: true, message: 'User deleted from database.' });
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: err.message });
+  }
+});
+
+router.post('/admin/users/:id/ban', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { isBanned, banReason } = req.body;
+    await dbQuery(
+      'UPDATE shopit_users SET is_banned = $1, ban_reason = $2, updated_at = NOW() WHERE id = $3',
+      [Boolean(isBanned), banReason || null, id]
+    );
+    console.log(`[Admin User Governance] Updated ban status for user ${id}: ${isBanned}`);
+    return res.json({ status: true, message: `User ban status updated to ${isBanned}.` });
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: err.message });
+  }
+});
+
+router.post('/admin/users/:id/reset-password', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { newPassword } = req.body;
+    if (!newPassword || String(newPassword).trim().length < 6) {
+      return res.status(400).json({ status: false, message: 'New password must be at least 6 characters.' });
+    }
+    const hash = hashPassword(String(newPassword).trim());
+    await dbQuery('UPDATE shopit_users SET password_hash = $1, updated_at = NOW() WHERE id = $2', [hash, id]);
+    console.log(`[Admin User Governance] Reset password in PostgreSQL for user ${id}.`);
+    return res.json({ status: true, message: 'User password updated in database.' });
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: err.message });
+  }
+});
+
+router.post('/admin/sellers/:id/verify', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { isVerified } = req.body;
+    const status = isVerified ? 'verified' : 'rejected';
+    await dbQuery(
+      'UPDATE shopit_sellers SET is_verified_seller = $1, verification_status = $2, updated_at = NOW() WHERE id = $3 OR user_id = $3',
+      [Boolean(isVerified), status, id]
+    );
+    console.log(`[Admin Governance] Toggled seller verification for ${id}: ${isVerified}`);
+    return res.json({ status: true, message: `Seller verification updated to ${isVerified}.` });
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: err.message });
+  }
+});
+
+router.post('/admin/users/wipe-non-admins', async (_req, res) => {
+  try {
+    await dbQuery("DELETE FROM shopit_users WHERE role != 'admin' AND email != 'joeadeyinka12@gmail.com'");
+    console.log('[Admin Governance] Wiped non-admin accounts from PostgreSQL.');
+    return res.json({ status: true, message: 'All non-admin accounts wiped from database.' });
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: err.message });
+  }
+});
+
+// GET /api/admin/metrics - Live counts and database health (STEP 2 ITEM 6)
+router.get('/admin/metrics', async (_req, res) => {
+  try {
+    const [userStats, sellerStats, verifStats] = await Promise.all([
+      dbQuery(`
+        SELECT
+          COUNT(*) as total_users,
+          COUNT(CASE WHEN created_at >= CURRENT_DATE THEN 1 END) as new_today,
+          COUNT(CASE WHEN role = 'seller' THEN 1 END) as total_sellers,
+          COUNT(CASE WHEN role = 'buyer' THEN 1 END) as total_buyers
+        FROM shopit_users
+      `),
+      dbQuery(`
+        SELECT
+          COUNT(CASE WHEN verification_status = 'verified' THEN 1 END) as verified_sellers
+        FROM shopit_sellers
+      `),
+      dbQuery(`
+        SELECT
+          COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending_verifications
+        FROM shopit_verifications
+      `),
+    ]);
+
+    const pgPing = await pingPostgres();
+    const redisPing = await pingRedis();
+
+    return res.json({
+      status: true,
+      metrics: {
+        totalUsers: parseInt(userStats.rows[0].total_users || '0', 10),
+        newToday: parseInt(userStats.rows[0].new_today || '0', 10),
+        totalSellers: parseInt(userStats.rows[0].total_sellers || '0', 10),
+        totalBuyers: parseInt(userStats.rows[0].total_buyers || '0', 10),
+        verifiedSellers: parseInt(sellerStats.rows[0].verified_sellers || '0', 10),
+        pendingVerifications: parseInt(verifStats.rows[0].pending_verifications || '0', 10),
+      },
+      database: {
+        neon: pgPing.ok,
+        redis: redisPing.ok,
+        provider: pgPing.provider,
+        databaseUrlConfigured: Boolean(process.env.DATABASE_URL || process.env.POSTGRES_URL),
+        redisConfigured: Boolean(process.env.KV_REST_API_URL),
+      },
+    });
+  } catch (err: any) {
+    console.error('[Admin Metrics Error]:', err.message);
+    return res.status(500).json({ status: false, message: 'Database error reading metrics.' });
+  }
 });
 
 

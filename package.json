@@ -7,6 +7,7 @@
     "dev": "tsx server.ts",
     "start": "tsx server.ts",
     "build": "vite build",
+    "migrate": "tsx scripts/migrate.ts",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit"
@@ -21,6 +22,7 @@
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
     "pg": "^8.23.1",
+    "pg-mem": "^3.0.14",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
     "vite": "^8.3.0"

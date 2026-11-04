@@ -258,9 +258,77 @@ export const AdminPanel: React.FC = () => {
     }
   };
 
+  // STEP 2 ITEM 6: Live Metrics & Database Connection status
+  const [metricsData, setMetricsData] = useState<{
+    metrics: {
+      totalUsers: number;
+      newToday: number;
+      totalSellers: number;
+      totalBuyers: number;
+      verifiedSellers: number;
+      pendingVerifications: number;
+    };
+    database: {
+      neon: boolean;
+      redis: boolean;
+      provider: string;
+      databaseUrlConfigured: boolean;
+      redisConfigured: boolean;
+    };
+  } | null>(null);
+  const [loadingMetrics, setLoadingMetrics] = useState(false);
+
+  // STEP 2 ITEM 5: Database Users with search and pagination
+  const [dbUsers, setDbUsers] = useState<any[]>([]);
+  const [dbUsersTotal, setDbUsersTotal] = useState(0);
+  const [dbUsersPage, setDbUsersPage] = useState(1);
+  const [dbUsersTotalPages, setDbUsersTotalPages] = useState(1);
+  const [loadingDbUsers, setLoadingDbUsers] = useState(false);
+
+  const fetchMetrics = async () => {
+    setLoadingMetrics(true);
+    try {
+      const res = await fetch('/api/admin/metrics');
+      const data = await res.json();
+      if (data.status) {
+        setMetricsData(data);
+      }
+    } catch (e) {
+      console.error('Failed to load admin metrics:', e);
+    } finally {
+      setLoadingMetrics(false);
+    }
+  };
+
+  const fetchDbUsers = async (page = 1, q = searchUserQuery, role = filterUserRole) => {
+    setLoadingDbUsers(true);
+    try {
+      const params = new URLSearchParams({
+        page: String(page),
+        limit: '15',
+        q: q.trim(),
+        role: role,
+      });
+      const res = await fetch(`/api/admin/users?${params.toString()}`);
+      const data = await res.json();
+      if (data.status) {
+        setDbUsers(data.users || []);
+        setDbUsersTotal(data.total || 0);
+        setDbUsersPage(data.page || 1);
+        setDbUsersTotalPages(data.totalPages || 1);
+      }
+    } catch (e) {
+      console.error('Failed to load database users:', e);
+    } finally {
+      setLoadingDbUsers(false);
+    }
+  };
+
   React.useEffect(() => {
     fetchPayments();
     fetchReports();
+    fetchMetrics();
+    fetchDbUsers(1);
   }, []);
 
   // Calculate live financial figures
@@ -360,6 +428,94 @@ export const AdminPanel: React.FC = () => {
               <Trash2 className="w-4 h-4" />
               <span>Clear Database</span>
             </button>
+          </div>
+        </div>
+      </div>
+
+      {/* STEP 2 ITEM 6: DATABASE CONNECTED & PLATFORM METRICS DASHBOARD CARD */}
+      <div className="bg-white rounded-2xl border-2 border-stone-900 p-5 shadow-xs space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-stone-100 pb-3">
+          <div className="flex items-center gap-2.5 flex-wrap">
+            <span className="w-3 h-3 rounded-full bg-emerald-500 animate-pulse" />
+            <h2 className="text-base font-black text-stone-900 font-heading">
+              Platform Metrics &amp; Database Health
+            </h2>
+            {/* Database Connection Badges */}
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className={`px-2.5 py-1 rounded-full text-xs font-bold border flex items-center gap-1.5 ${
+                metricsData?.database?.neon
+                  ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
+                  : 'bg-red-50 text-red-800 border-red-300'
+              }`}>
+                <span className={`w-2 h-2 rounded-full ${metricsData?.database?.neon ? 'bg-emerald-500' : 'bg-red-500'}`} />
+                Neon Postgres: {metricsData?.database?.neon ? 'Connected (Live)' : 'Disconnected'}
+              </span>
+
+              <span className={`px-2.5 py-1 rounded-full text-xs font-bold border flex items-center gap-1.5 ${
+                metricsData?.database?.redis
+                  ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
+                  : 'bg-stone-100 text-stone-700 border-stone-300'
+              }`}>
+                <span className={`w-2 h-2 rounded-full ${metricsData?.database?.redis ? 'bg-emerald-500' : 'bg-stone-400'}`} />
+                Upstash Redis: {metricsData?.database?.redis ? 'Connected (Live)' : 'Standby / Local Cache'}
+              </span>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => {
+              fetchMetrics();
+              fetchDbUsers(dbUsersPage);
+            }}
+            disabled={loadingMetrics}
+            className="self-start sm:self-auto px-3 py-1.5 rounded-xl border border-stone-300 hover:bg-stone-100 text-xs font-bold text-stone-700 flex items-center gap-1.5 transition-colors cursor-pointer"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${loadingMetrics ? 'animate-spin' : ''}`} />
+            <span>Refresh Stats</span>
+          </button>
+        </div>
+
+        {/* 5 Core Metric Cards (Step 2 Item 6: total users, new today, sellers, verified sellers, pending verifications) */}
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+          <div className="bg-stone-50 rounded-xl p-3 border border-stone-200">
+            <span className="text-[11px] font-bold text-stone-500 uppercase tracking-wider">Total Users</span>
+            <p className="text-xl sm:text-2xl font-black text-stone-900 mt-0.5">
+              {metricsData ? metricsData.metrics.totalUsers : registeredUsers.length}
+            </p>
+            <span className="text-[10px] text-stone-500">In PostgreSQL</span>
+          </div>
+
+          <div className="bg-emerald-50 rounded-xl p-3 border border-emerald-200">
+            <span className="text-[11px] font-bold text-emerald-700 uppercase tracking-wider">New Today</span>
+            <p className="text-xl sm:text-2xl font-black text-emerald-900 mt-0.5">
+              {metricsData ? metricsData.metrics.newToday : 0}
+            </p>
+            <span className="text-[10px] text-emerald-600">Registered today</span>
+          </div>
+
+          <div className="bg-amber-50 rounded-xl p-3 border border-amber-200">
+            <span className="text-[11px] font-bold text-amber-800 uppercase tracking-wider">Sellers</span>
+            <p className="text-xl sm:text-2xl font-black text-amber-900 mt-0.5">
+              {metricsData ? metricsData.metrics.totalSellers : sellers.length}
+            </p>
+            <span className="text-[10px] text-amber-700">Artisan creators</span>
+          </div>
+
+          <div className="bg-blue-50 rounded-xl p-3 border border-blue-200">
+            <span className="text-[11px] font-bold text-blue-800 uppercase tracking-wider">Verified Sellers</span>
+            <p className="text-xl sm:text-2xl font-black text-blue-900 mt-0.5">
+              {metricsData ? metricsData.metrics.verifiedSellers : sellers.filter(s => s.isVerifiedSeller).length}
+            </p>
+            <span className="text-[10px] text-blue-700">NIN badge granted</span>
+          </div>
+
+          <div className="bg-purple-50 rounded-xl p-3 border border-purple-200 col-span-2 sm:col-span-1">
+            <span className="text-[11px] font-bold text-purple-800 uppercase tracking-wider">Pending Verifications</span>
+            <p className="text-xl sm:text-2xl font-black text-purple-900 mt-0.5">
+              {metricsData ? metricsData.metrics.pendingVerifications : verificationRequests.filter(v => v.status === 'pending').length}
+            </p>
+            <span className="text-[10px] text-purple-700">Awaiting review</span>
           </div>
         </div>
       </div>
@@ -751,25 +907,32 @@ export const AdminPanel: React.FC = () => {
                 </p>
               </div>
 
-              {/* Search & Role Filter */}
+              {/* Search & Role Filter (Step 2 Item 5) */}
               <div className="flex flex-wrap items-center gap-2">
                 <div className="relative">
                   <Search className="w-3.5 h-3.5 text-stone-400 absolute left-3 top-1/2 -translate-y-1/2" />
                   <input
                     type="text"
                     value={searchUserQuery}
-                    onChange={e => setSearchUserQuery(e.target.value)}
+                    onChange={e => {
+                      const val = e.target.value;
+                      setSearchUserQuery(val);
+                      fetchDbUsers(1, val, filterUserRole);
+                    }}
                     placeholder="Search name or email..."
                     className="pl-8 pr-3 py-1.5 rounded-xl border border-stone-300 text-xs bg-white focus:outline-hidden focus:border-[#FF6B00]"
                   />
                 </div>
 
                 <div className="flex items-center bg-stone-200/70 p-1 rounded-xl text-xs font-bold">
-                  {(['all', 'seller', 'buyer'] as const).map(role => (
+                  {(['all', 'seller', 'buyer', 'admin'] as const).map(role => (
                     <button
                       key={role}
-                      onClick={() => setFilterUserRole(role)}
-                      className={`px-2.5 py-1 rounded-lg capitalize transition-all ${
+                      onClick={() => {
+                        setFilterUserRole(role as any);
+                        fetchDbUsers(1, searchUserQuery, role as any);
+                      }}
+                      className={`px-2.5 py-1 rounded-lg capitalize transition-all cursor-pointer ${
                         filterUserRole === role
                           ? 'bg-white text-stone-900 shadow-xs'
                           : 'text-stone-600 hover:text-stone-900'
@@ -783,10 +946,22 @@ export const AdminPanel: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => {
+                    fetchDbUsers(dbUsersPage);
+                    fetchMetrics();
+                  }}
+                  className="p-1.5 rounded-xl border border-stone-300 hover:bg-stone-100 text-stone-600 transition-colors"
+                  title="Refresh users from PostgreSQL"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${loadingDbUsers ? 'animate-spin' : ''}`} />
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
                     setClearDbConfirmText('');
                     setIsClearDbModalOpen(true);
                   }}
-                  className="px-3 py-1.5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-black transition-all flex items-center gap-1.5 border border-red-700 shadow-2xs active:scale-95"
+                  className="px-3 py-1.5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-black transition-all flex items-center gap-1.5 border border-red-700 shadow-2xs active:scale-95 cursor-pointer"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
                   <span>Wipe All Other Accounts</span>
