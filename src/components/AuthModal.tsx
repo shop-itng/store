@@ -148,10 +148,10 @@ export const AuthModal: React.FC = () => {
   const handleResetPasswordSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const cleanEmail = forgotEmail.trim().toLowerCase();
+    const cleanCode = forgotOtpInput.trim().replace(/\D/g, '');
 
-    const verifyResult = await verifyEmailOtp(cleanEmail, 'password_reset', forgotOtpInput);
-    if (!verifyResult.success) {
-      notify(verifyResult.error || 'Invalid or expired reset code. Please request a new code.', 'error');
+    if (cleanCode.length !== 6) {
+      notify('Please enter the 6-digit code sent to your email.', 'error');
       return;
     }
 
@@ -165,26 +165,29 @@ export const AuthModal: React.FC = () => {
       return;
     }
 
-    // Update password in PostgreSQL via server API (STEP 2 ITEM 4)
+    // Direct atomic server-side verification and password update in PostgreSQL
     try {
       const resp = await fetch('/api/auth/reset-password', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           email: cleanEmail,
-          code: forgotOtpInput,
+          code: cleanCode,
           newPassword,
         }),
       });
       const data = await resp.json();
       if (!resp.ok || !data.status) {
-        notify(data.message || 'Database error updating password.', 'error');
+        notify(data.message || 'Error updating password. Please verify your code.', 'error');
         return;
       }
 
       notify('Password reset successfully in database! You can now sign in with your new password.', 'success');
       setLoginEmail(cleanEmail);
       setLoginPassword('');
+      setNewPassword('');
+      setConfirmPassword('');
+      setForgotOtpInput('');
       setForgotStep('email');
       setAuthTab('login');
     } catch (err: any) {

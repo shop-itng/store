@@ -28,12 +28,16 @@ export interface EmailRenderResult {
   html: string;
 }
 
-export const EMAIL_SIGNATURE_TEXT = `The Shop It Team. Never share your codes. Shop It will never ask for your password or code.`;
+export const EMAIL_SIGNATURE_TEXT = `The Shop It Team · Operated by TEEDS.
+Support: shopitverified@gmail.com (we reply within 3 working days).
+Never share your codes. Shop It will never ask for your password or code.`;
 
 export const EMAIL_SIGNATURE_HTML = `
-  <div style="margin-top: 24px; padding-top: 16px; border-top: 1px solid #e2e8f0; color: #64748b; font-size: 13px; line-height: 1.5;">
-    <p style="margin: 0; font-weight: 700; color: #1e293b;">The Shop It Team.</p>
-    <p style="margin: 4px 0 0; color: #475569;">Never share your codes. Shop It will never ask for your password or code.</p>
+  <div style="margin-top: 28px; padding-top: 18px; border-top: 1px solid #e2e8f0; color: #64748b; font-size: 13px; line-height: 1.6;">
+    <p style="margin: 0; font-weight: 800; color: #1e293b;">The Shop It Team</p>
+    <p style="margin: 3px 0 0; color: #64748b; font-size: 12px;">Operated by TEEDS · Nigerian Youth & Student Artisanal Marketplace</p>
+    <p style="margin: 4px 0 0; color: #475569; font-size: 12px;">Need help? Email <a href="mailto:shopitverified@gmail.com" style="color: #FF6B00; text-decoration: underline;">shopitverified@gmail.com</a> (we reply within 3 working days).</p>
+    <p style="margin: 6px 0 0; color: #dc2626; font-size: 11px; font-weight: 700;">Never share your codes. Shop It will never ask for your password or code.</p>
   </div>
 `;
 
@@ -52,7 +56,7 @@ export function renderTransactionalEmail(
   const last4 = (data.last4 || '••••').trim();
   const item = (data.item || 'your item').trim();
   const appUrl = (data.appUrl || (typeof window !== 'undefined' ? window.location.origin : '') || 'https://shop-itng-pied.vercel.app').replace(/\/$/, '');
-  const resetLink = (data.reset_link || data.resetLink || `${appUrl}/reset-password`).trim();
+  const resetLink = (data.reset_link || data.resetLink || `${appUrl}/reset-password?code=${code}&email=${encodeURIComponent(data.email || '')}`).trim();
   const decision = (data.decision || 'Refund processed').trim();
   const reason = (data.reason || 'Document was unreadable or selfie could not be verified').trim();
 
@@ -84,10 +88,41 @@ export function renderTransactionalEmail(
 
     case 'password_reset':
       subject = 'Reset your Shop It password';
-      bodyText = `Tap ${resetLink} to set a new password. Expires in 10 minutes. Ignore if you didn't ask.`;
+      bodyText = `We received a request to reset the password for your Shop It account.
+
+Your 6-digit reset code is: ${code}
+(Expires in 10 minutes · 3 attempts max)
+
+You can also reset your password directly using this link:
+${resetLink}
+
+If you didn't ask to reset your password, you can safely ignore this message. Your password will remain unchanged.`;
       bodyHtmlContent = `
         <p style="margin: 0 0 16px; font-size: 15px; color: #0f172a; line-height: 1.6;">
-          Tap <a href="${resetLink}" style="color: #FF6B00; font-weight: 700; text-decoration: underline;">${resetLink}</a> to set a new password. Expires in 10 minutes. Ignore if you didn't ask.
+          We received a request to reset the password for your Shop It account. Use the 6-digit code below to set a new password:
+        </p>
+
+        <div style="text-align: center; margin: 24px 0; background-color: #fff7ed; border: 2px dashed #FF6B00; border-radius: 14px; padding: 20px 16px;">
+          <span style="display: block; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 1.5px; color: #c2410c; margin-bottom: 8px;">
+            Your 6-Digit Reset Code
+          </span>
+          <div style="font-size: 36px; font-weight: 900; letter-spacing: 8px; font-family: 'Courier New', Courier, monospace; color: #111111; display: inline-block;">
+            ${code}
+          </div>
+          <span style="display: block; font-size: 12px; color: #78350f; font-weight: 600; margin-top: 8px;">
+            ⏱ Valid for 10 minutes · 3 wrong attempts max
+          </span>
+        </div>
+
+        <div style="text-align: center; margin: 24px 0 20px;">
+          <p style="font-size: 13px; color: #64748b; margin-bottom: 12px;">Or tap the button below to reset your password directly on the website:</p>
+          <a href="${resetLink}" style="display: inline-block; background-color: #FF6B00; color: #111111; font-weight: 900; font-size: 14px; text-decoration: none; padding: 13px 28px; border-radius: 12px; border: 2px solid #111111; box-shadow: 0 3px 0 #111111;">
+            Reset Password on Shop It &rarr;
+          </a>
+        </div>
+
+        <p style="margin: 20px 0 0; font-size: 13px; color: #64748b; line-height: 1.5; border-top: 1px solid #f1f5f9; padding-top: 16px;">
+          If you didn't ask to reset your password, you can safely ignore this email. Your account is still secure.
         </p>
       `;
       break;

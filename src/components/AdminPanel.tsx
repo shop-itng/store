@@ -1124,6 +1124,7 @@ export const AdminPanel: React.FC = () => {
                                   onClick={async () => {
                                     adminToggleSellerVerification(user.id, !user.isVerifiedSeller);
                                     await fetchDbUsers(dbUsersPage);
+                                    fetchMetrics();
                                   }}
                                   className={`px-2 py-1 rounded-lg text-[11px] font-bold border transition-colors flex items-center gap-1 cursor-pointer ${
                                     user.isVerifiedSeller

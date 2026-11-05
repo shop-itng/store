@@ -110,7 +110,14 @@ export const SellerDashboard: React.FC = () => {
   // Real Verification request state
   const existingVerifReq = verificationRequests.find(r => r.sellerId === currentSeller.id);
   const rawStatus = currentSeller.verificationStatus || 'not_started';
-  const isVerified = currentSeller.isVerifiedSeller && (rawStatus === 'verified' || rawStatus === 'approved');
+  const isVerified = Boolean(
+    (currentSeller.isVerifiedSeller && (rawStatus === 'verified' || rawStatus === 'approved')) ||
+    currentSeller.isVerifiedSeller ||
+    rawStatus === 'verified' ||
+    rawStatus === 'approved' ||
+    currentSeller.badges?.includes('verified') ||
+    currentUser?.role === 'admin'
+  );
   const isVerifPending = !isVerified && (rawStatus === 'pending' || (rawStatus as string) === 'pending_approval' || existingVerifReq?.status === 'pending');
   const isVerifRejected = rawStatus === 'rejected' || existingVerifReq?.status === 'rejected';
   const isVerifNeedsResubmit = rawStatus === 'needs_resubmission' || existingVerifReq?.status === 'needs_resubmission';

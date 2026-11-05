@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useMemo, useCallback } from 'react';
 import {
   User,
   AppView,
@@ -115,6 +115,7 @@ interface AppContextType {
     guardianName?: string;
     guardianPhone?: string;
   }) => void;
+  refreshCurrentUser: () => Promise<void>;
 
   // Catalog & Products
   products: Product[];
@@ -541,6 +542,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const getInitialView = (): AppView => {
     if (typeof window !== 'undefined') {
       const path = window.location.pathname.replace(/^\//, '').toLowerCase();
+      if (path === 'reset-password' || path === 'forgot-password' || window.location.search.includes('code=')) {
+        return 'reset-password';
+      }
       if (LEGAL_SLUGS.includes(path as AppView)) {
         return path as AppView;
       }
@@ -554,7 +558,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const setActiveView = (view: AppView) => {
     _setActiveView(view);
     if (typeof window !== 'undefined') {
-      if (LEGAL_SLUGS.includes(view)) {
+      if (view === 'reset-password') {
+        if (window.location.pathname !== '/reset-password') {
+          window.history.pushState({ view: 'reset-password' }, '', '/reset-password');
+        }
+      } else if (LEGAL_SLUGS.includes(view)) {
         if (window.location.pathname !== `/${view}`) {
           window.history.pushState({ view }, '', `/${view}`);
         }
@@ -569,7 +577,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   useEffect(() => {
     const onPopState = () => {
       const path = window.location.pathname.replace(/^\//, '').toLowerCase();
-      if (LEGAL_SLUGS.includes(path as AppView)) {
+      if (path === 'reset-password' || path === 'forgot-password') {
+        _setActiveView('reset-password');
+      } else if (LEGAL_SLUGS.includes(path as AppView)) {
         _setActiveView(path as AppView);
       } else if (path === '' || path === '/') {
         _setActiveView('catalog');
@@ -1360,7 +1370,103 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const getSellerById = (id: string) => sellers.find(s => s.id === id);
 
-  const currentSeller = currentUser?.sellerProfile || (currentUser?.role === 'seller' ? (sellers.find(s => s.id === currentUser.id) || sellers[0] || null) : null);
+  // Sync fresh user & seller verification profile directly from PostgreSQL
+  const refreshCurrentUser = useCallback(async () => {
+    if (!currentUser?.email && !currentUser?.id) return;
+    try {
+      const q = currentUser.email ? `email=${encodeURIComponent(currentUser.email)}` : `userId=${encodeURIComponent(currentUser.id)}`;
+      const res = await fetch(`/api/auth/me?${q}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.status && data.user) {
+        const serverUser = data.user;
+        setCurrentUser(prev => {
+          if (!prev) return serverUser;
+          const merged = {
+            ...prev,
+            ...serverUser,
+            sellerProfile: serverUser.sellerProfile ? {
+              ...(prev.sellerProfile || {}),
+              ...serverUser.sellerProfile,
+            } : prev.sellerProfile,
+          };
+          try {
+            localStorage.setItem('shopit_current_user', JSON.stringify(merged));
+          } catch {}
+          return merged;
+        });
+
+        if (data.isVerifiedSeller !== undefined) {
+          setSellers(prev =>
+            prev.map(s => {
+              if (s.id === serverUser.id || (s.email && s.email.toLowerCase() === serverUser.email.toLowerCase())) {
+                return {
+                  ...s,
+                  isVerifiedSeller: Boolean(data.isVerifiedSeller),
+                  verificationStatus: data.verificationStatus || (data.isVerifiedSeller ? 'verified' : s.verificationStatus),
+                  badges: data.isVerifiedSeller
+                    ? (Array.from(new Set([...s.badges, 'verified'])) as any)
+                    : s.badges,
+                };
+              }
+              return s;
+            })
+          );
+        }
+      }
+    } catch (err: any) {
+      console.warn('[Profile Sync Warning]', err.message);
+    }
+  }, [currentUser?.email, currentUser?.id]);
+
+  useEffect(() => {
+    refreshCurrentUser();
+  }, [currentUser?.id, currentUser?.email]);
+
+  const matchedSeller = currentUser
+    ? sellers.find(
+        s =>
+          s.id === currentUser.id ||
+          (s.email && s.email.toLowerCase() === currentUser.email?.toLowerCase()) ||
+          s.id === currentUser.sellerProfile?.id
+      )
+    : null;
+
+  const currentSeller: SellerProfile | null = useMemo(() => {
+    if (!currentUser && sellers.length === 0) return null;
+
+    const base = matchedSeller || currentUser?.sellerProfile;
+    if (base) {
+      const isVerified = Boolean(
+        matchedSeller?.isVerifiedSeller ||
+        currentUser?.sellerProfile?.isVerifiedSeller ||
+        matchedSeller?.verificationStatus === 'verified' ||
+        matchedSeller?.verificationStatus === 'approved' ||
+        currentUser?.sellerProfile?.verificationStatus === 'verified' ||
+        currentUser?.sellerProfile?.verificationStatus === 'approved' ||
+        currentUser?.role === 'admin'
+      );
+
+      const status = isVerified
+        ? 'verified'
+        : (matchedSeller?.verificationStatus || currentUser?.sellerProfile?.verificationStatus || 'not_started');
+
+      return {
+        ...base,
+        isVerifiedSeller: isVerified,
+        verificationStatus: status,
+        badges: isVerified
+          ? (Array.from(new Set([...(base.badges || []), 'verified'])) as any)
+          : (base.badges || []),
+      };
+    }
+
+    if (currentUser?.role === 'seller') {
+      return sellers[0] || null;
+    }
+
+    return null;
+  }, [currentUser, matchedSeller, sellers]);
 
   // Rule 5: All balances come from an append-only ledger (sale, fee, withdrawal, refund).
   // Rule 2: Sellers only have a wallet, with two balances: Pending and Available.
@@ -2310,6 +2416,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         name: sellerName,
       });
 
+      // Update in PostgreSQL on server
+      fetch(`/api/admin/sellers/${encodeURIComponent(targetReq.sellerId)}/verify`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ isVerified: true }),
+      }).catch(err => console.warn('Server verify seller warning:', err.message));
+
       setSellers(prev =>
         prev.map(s => {
           if (s.id === targetReq.sellerId) {
@@ -2327,6 +2440,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           return s;
         })
       );
+
+      // Immediately sync currentUser state and localStorage
+      setCurrentUser(prev => {
+        if (!prev) return prev;
+        if (prev.id === targetReq.sellerId || prev.sellerProfile?.id === targetReq.sellerId || (prev.email && prev.email.toLowerCase() === sellerEmail.toLowerCase())) {
+          const updated = {
+            ...prev,
+            sellerProfile: prev.sellerProfile
+              ? {
+                  ...prev.sellerProfile,
+                  isVerifiedSeller: true,
+                  verificationStatus: 'verified' as const,
+                  verifiedLegalName: targetReq.ownerName,
+                  verifiedNinLast4: targetReq.fullNinLast4,
+                  badges: Array.from(new Set([...(prev.sellerProfile.badges || []), 'verified'])) as any,
+                }
+              : undefined,
+          };
+          try {
+            localStorage.setItem('shopit_current_user', JSON.stringify(updated));
+          } catch {}
+          return updated;
+        }
+        return prev;
+      });
+
       addAdminAuditLog(
         'SELLER_IDENTITY_VERIFIED',
         `Approved NIN & live selfie verification for seller "${targetReq.shopName}" (${targetReq.ownerName}). NIN last 4: ${targetReq.fullNinLast4}. Real Verified Badge issued.`,
@@ -2401,6 +2540,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setVerificationRequests(prev => [newReq, ...prev.filter(r => r.sellerId !== data.sellerId)]);
 
+    // Persist verification submission to PostgreSQL
+    fetch('/api/sellers/verify/submit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sellerId: data.sellerId,
+        ownerName: data.ownerName,
+        shopName: data.shopName,
+        nin: data.fullNinLast4,
+        idType: data.idType,
+        idCardPhotoUrl: data.idCardPhotoUrl,
+        selfiePhotoUrl: data.selfiePhotoUrl,
+        under18: data.under18,
+        guardianName: data.guardianName,
+        guardianPhone: data.guardianPhone,
+        guardianConsent: data.guardianConsentSigned,
+      }),
+    }).catch(err => console.warn('Verification server submit warning:', err.message));
+
     setSellers(prev =>
       prev.map(s => {
         if (s.id === data.sellerId) {
@@ -2419,6 +2577,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return s;
       })
     );
+
+    setCurrentUser(prev => {
+      if (!prev) return prev;
+      if (prev.id === data.sellerId || prev.sellerProfile?.id === data.sellerId) {
+        const updated = {
+          ...prev,
+          sellerProfile: prev.sellerProfile
+            ? {
+                ...prev.sellerProfile,
+                verificationStatus: 'pending' as const,
+                isVerifiedSeller: false,
+                verifiedLegalName: data.ownerName,
+              }
+            : undefined,
+        };
+        try {
+          localStorage.setItem('shopit_current_user', JSON.stringify(updated));
+        } catch {}
+        return updated;
+      }
+      return prev;
+    });
 
     notify('ID & selfie submitted for review! Our moderator will review it within 24 hours.', 'success');
   };
@@ -2741,6 +2921,46 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return s;
       })
     );
+
+    setCurrentUser(prev => {
+      if (!prev) return prev;
+      if (prev.id === sellerId || prev.sellerProfile?.id === sellerId || (prev.email && prev.email.toLowerCase() === sellerId.toLowerCase())) {
+        const updated = {
+          ...prev,
+          sellerProfile: prev.sellerProfile
+            ? {
+                ...prev.sellerProfile,
+                isVerifiedSeller: isVerified,
+                verificationStatus: isVerified ? ('verified' as const) : ('pending' as const),
+                badges: isVerified
+                  ? (Array.from(new Set([...(prev.sellerProfile.badges || []), 'verified'])) as any)
+                  : (prev.sellerProfile.badges || []).filter(b => b !== 'verified') as any,
+              }
+            : {
+                id: prev.id,
+                shopName: `${prev.name}'s Shop`,
+                bio: '',
+                isVerifiedSeller: isVerified,
+                verificationStatus: isVerified ? ('verified' as const) : ('pending' as const),
+                badges: isVerified ? (['verified'] as any) : [],
+                under18: false,
+                guardianConsent: false,
+                level: 1,
+                rating: 5,
+                reviewCount: 0,
+                salesCount: 0,
+                viewsCount: 0,
+                vacationMode: false,
+                joinedDate: new Date().toISOString(),
+              },
+        };
+        try {
+          localStorage.setItem('shopit_current_user', JSON.stringify(updated));
+        } catch {}
+        return updated;
+      }
+      return prev;
+    });
     notify(
       isVerified
         ? `Seller verified with NIN Slip! Verified maker badge activated in database.`
@@ -3317,6 +3537,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setPendingAuthData,
         verifyOtp,
         submitSellerRegistration,
+        refreshCurrentUser,
         products,
         filteredProducts,
         addProduct,

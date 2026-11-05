@@ -76,7 +76,8 @@ export type AppView =
   | 'seller-guide'
   | 'buyer-protection'
   | 'faq'
-  | 'contact';
+  | 'contact'
+  | 'reset-password';
 
 export interface User {
   id: string;

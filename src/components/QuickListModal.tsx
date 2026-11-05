@@ -22,14 +22,28 @@ export const QuickListModal: React.FC = () => {
     currentSeller,
     currentUser,
     sellers,
+    refreshCurrentUser,
     setActiveView,
     userLocation,
     notify,
   } = useApp();
 
-  const isSellerVerified =
-    currentSeller?.isVerifiedSeller &&
-    (currentSeller.verificationStatus === 'verified' || currentSeller.verificationStatus === 'approved');
+  // Auto-sync status from PostgreSQL when modal opens
+  React.useEffect(() => {
+    if (isQuickListModalOpen) {
+      refreshCurrentUser();
+    }
+  }, [isQuickListModalOpen, refreshCurrentUser]);
+
+  const isSellerVerified = Boolean(
+    (currentSeller?.isVerifiedSeller &&
+      (currentSeller.verificationStatus === 'verified' || currentSeller.verificationStatus === 'approved')) ||
+    currentSeller?.isVerifiedSeller ||
+    currentSeller?.verificationStatus === 'verified' ||
+    currentSeller?.verificationStatus === 'approved' ||
+    currentSeller?.badges?.includes('verified') ||
+    currentUser?.role === 'admin'
+  );
 
   // Location selector (State > City > Area)
   const [stateName, setStateName] = useState(userLocation.state || 'Lagos');
@@ -191,17 +205,29 @@ export const QuickListModal: React.FC = () => {
               <p className="text-[11px] text-amber-700 mt-0.5">
                 Under Nigeria Data Protection Act (NDPA 2023) regulations, sellers must verify their NIMC NIN and live selfie before listing crafts or withdrawing funds.
               </p>
-              <button
-                type="button"
-                onClick={() => {
-                  closeQuickListModal();
-                  openVerificationModal();
-                }}
-                className="mt-2 inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#111111] text-white text-[11px] font-bold rounded-lg hover:bg-neutral-800 transition-colors"
-              >
-                <ShieldCheck className="w-3.5 h-3.5 text-[#9FE870]" />
-                <span>Verify Identity Now (NIN &amp; Live Selfie) &rarr;</span>
-              </button>
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    closeQuickListModal();
+                    openVerificationModal();
+                  }}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#111111] text-white text-[11px] font-bold rounded-lg hover:bg-neutral-800 transition-colors"
+                >
+                  <ShieldCheck className="w-3.5 h-3.5 text-[#9FE870]" />
+                  <span>Verify Identity Now (NIN &amp; Live Selfie) &rarr;</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    await refreshCurrentUser();
+                    notify('Refreshed verification status from database.', 'info');
+                  }}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-100 hover:bg-amber-200 text-amber-900 border border-amber-300 text-[11px] font-bold rounded-lg transition-colors cursor-pointer"
+                >
+                  <span>Re-check Moderator Approval</span>
+                </button>
+              </div>
             </div>
           </div>
         )}

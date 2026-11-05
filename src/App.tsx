@@ -27,6 +27,7 @@ import { Loading } from './components/Loading';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { TestModeBanner } from './components/TestModeBanner';
 import { NotFoundView } from './components/NotFoundView';
+import { ResetPasswordPage } from './components/ResetPasswordPage';
 import { Store, ShieldCheck, MapPin, Star, ArrowRight, PackageOpen, PlusCircle, ShoppingBag, ShieldAlert } from 'lucide-react';
 
 
@@ -413,6 +414,12 @@ const MarketplaceContent: React.FC = () => {
           activeView === 'faq' ||
           activeView === 'contact') && (
           <LegalAndHelpPages initialSlug={activeView as any} />
+        )}
+
+        {activeView === 'reset-password' && (
+          <div className="animate-fade-in-up">
+            <ResetPasswordPage />
+          </div>
         )}
       </main>
 
