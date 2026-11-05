@@ -969,184 +969,272 @@ export const AdminPanel: React.FC = () => {
               </div>
             </div>
 
-            {/* List of Users */}
-            {(() => {
-              const filteredUsers = registeredUsers.filter(u => {
-                if (filterUserRole !== 'all' && u.role !== filterUserRole) return false;
-                if (!searchUserQuery) return true;
-                const q = searchUserQuery.toLowerCase();
-                return (
-                  u.name.toLowerCase().includes(q) ||
-                  u.email.toLowerCase().includes(q) ||
-                  u.id.toLowerCase().includes(q)
-                );
-              });
+            {/* STEP 2 ITEM 5: Database User Management Table with Exact Columns */}
+            {loadingDbUsers ? (
+              <div className="p-12 text-center text-stone-500 space-y-2">
+                <RefreshCw className="w-6 h-6 text-stone-400 mx-auto animate-spin" />
+                <p className="text-xs font-bold">Querying PostgreSQL database...</p>
+              </div>
+            ) : dbUsers.length === 0 ? (
+              <div className="p-12 text-center text-stone-500 space-y-2">
+                <UserX className="w-8 h-8 text-stone-300 mx-auto" />
+                <p className="text-sm font-semibold">No registered accounts found in database matching your filters.</p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead>
+                    <tr className="border-b border-stone-200 bg-stone-100/70 text-stone-600 font-bold uppercase text-[10px] tracking-wider">
+                      <th className="py-3 px-4">User (Name &amp; Email)</th>
+                      <th className="py-3 px-3">Role</th>
+                      <th className="py-3 px-3">Seller Verification</th>
+                      <th className="py-3 px-3">Email Verified</th>
+                      <th className="py-3 px-3">Created Time</th>
+                      <th className="py-3 px-3">Last Login</th>
+                      <th className="py-3 px-4 text-right">Moderator Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-stone-100">
+                    {dbUsers.map(user => {
+                      const isMasterAdmin = user.role === 'admin' || user.email === 'joeadeyinka12@gmail.com';
 
-              if (filteredUsers.length === 0) {
-                return (
-                  <div className="p-12 text-center text-stone-500 space-y-2">
-                    <UserX className="w-8 h-8 text-stone-300 mx-auto" />
-                    <p className="text-sm font-semibold">No registered accounts found matching your filters.</p>
-                  </div>
-                );
-              }
+                      const formatDateTime = (dateStr?: string | null) => {
+                        if (!dateStr) return 'Never';
+                        try {
+                          const d = new Date(dateStr);
+                          return d.toLocaleString('en-GB', {
+                            day: '2-digit',
+                            month: 'short',
+                            year: 'numeric',
+                            hour: '2-digit',
+                            minute: '2-digit',
+                          });
+                        } catch {
+                          return String(dateStr);
+                        }
+                      };
 
-              return (
-                <div className="divide-y divide-stone-100">
-                  {filteredUsers.map(user => {
-                    const isMasterAdmin = user.id === 'admin_adeyinka_joseph';
-                    const sellerObj = sellers.find(s => s.id === user.id);
-                    const userProductsCount = products.filter(p => p.sellerId === user.id).length;
+                      return (
+                        <tr
+                          key={user.id}
+                          className={`hover:bg-stone-50/80 transition-colors ${
+                            user.isBanned ? 'bg-red-50/40' : ''
+                          }`}
+                        >
+                          {/* 1. User Name & Email */}
+                          <td className="py-3.5 px-4">
+                            <div className="flex items-center gap-3">
+                              <div
+                                className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold text-xs shrink-0 border ${
+                                  user.role === 'admin'
+                                    ? 'bg-black text-[#9FE870] border-black'
+                                    : user.role === 'seller'
+                                    ? 'bg-amber-100 text-[#FF6B00] border-amber-200'
+                                    : 'bg-blue-100 text-blue-700 border-blue-200'
+                                }`}
+                              >
+                                {user.name?.[0]?.toUpperCase() || 'U'}
+                              </div>
+                              <div>
+                                <div className="font-bold text-stone-900 flex items-center gap-1.5">
+                                  <span>{user.name}</span>
+                                  {user.isBanned && (
+                                    <span className="px-1.5 py-0.2 rounded text-[9px] font-black bg-red-100 text-red-800 border border-red-200">
+                                      BANNED
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="text-[11px] text-stone-500 font-mono">{user.email}</div>
+                              </div>
+                            </div>
+                          </td>
 
-                    return (
-                      <div
-                        key={user.id}
-                        className={`p-4 sm:p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4 transition-colors ${
-                          user.isBanned ? 'bg-red-50/50' : 'hover:bg-stone-50/50'
-                        }`}
-                      >
-                        <div className="flex items-start gap-3.5">
-                          <div className={`w-11 h-11 rounded-xl flex items-center justify-center font-bold text-sm shrink-0 border ${
-                            user.role === 'admin'
-                              ? 'bg-black text-[#9FE870] border-black'
-                              : user.role === 'seller'
-                              ? 'bg-amber-100 text-[#FF6B00] border-amber-200'
-                              : 'bg-blue-100 text-blue-700 border-blue-200'
-                          }`}>
-                            {user.name[0]?.toUpperCase() || 'U'}
-                          </div>
-
-                          <div className="space-y-1">
-                            <div className="flex items-center gap-2 flex-wrap">
-                              <h4 className="text-sm font-bold text-stone-900">{user.name}</h4>
-                              <span className="text-xs text-stone-500">({user.email})</span>
-
-                              {/* Role Badge */}
-                              <span className={`px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider border ${
+                          {/* 2. Role */}
+                          <td className="py-3.5 px-3">
+                            <span
+                              className={`px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider border ${
                                 user.role === 'admin'
                                   ? 'bg-black text-[#9FE870] border-black'
                                   : user.role === 'seller'
                                   ? 'bg-[#FF6B00] text-white border-[#FF6B00]'
                                   : 'bg-blue-100 text-blue-800 border-blue-200'
-                              }`}>
-                                {user.role === 'admin' ? 'MODERATOR' : user.role.toUpperCase()}
-                              </span>
-
-                              {/* Status Badge */}
-                              {user.isBanned ? (
-                                <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-red-100 text-red-800 border border-red-200">
-                                  SUSPENDED
-                                </span>
-                              ) : (
-                                <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-emerald-100 text-emerald-800 border border-emerald-200">
-                                  ACTIVE
-                                </span>
-                              )}
-
-                              {isMasterAdmin && (
-                                <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-stone-900 text-stone-200 border border-stone-700">
-                                  PROTECTED ROOT ADMIN
-                                </span>
-                              )}
-                            </div>
-
-                            <div className="flex items-center gap-3 text-xs text-stone-500 flex-wrap">
-                              <span>ID: <code className="text-stone-700 font-mono">{user.id}</code></span>
-                              {user.locationArea && <span>· Area: <strong className="text-stone-700">{user.locationArea}</strong></span>}
-                              {user.role === 'seller' && (
-                                <span className="text-[#FF6B00] font-semibold">
-                                  · Shop: "{sellerObj?.shopName || user.name}" ({userProductsCount} listings)
-                                </span>
-                              )}
-                            </div>
-
-                            {user.role === 'seller' && (
-                              <div className="pt-1 flex items-center gap-2 text-xs">
-                                <span className={`px-2 py-0.5 rounded-md text-[11px] font-bold ${
-                                  sellerObj?.isVerifiedSeller
-                                    ? 'bg-emerald-100 text-emerald-800'
-                                    : 'bg-stone-100 text-stone-600'
-                                }`}>
-                                  {sellerObj?.isVerifiedSeller ? '✓ NIN Verified Maker' : 'Unverified NIN'}
-                                </span>
-                              </div>
-                            )}
-                          </div>
-                        </div>
-
-                        {/* Moderator Action Buttons for this user */}
-                        <div className="flex items-center gap-2 flex-wrap shrink-0">
-                          {user.role === 'seller' && (
-                            <button
-                              type="button"
-                              onClick={() => adminToggleSellerVerification(user.id, !sellerObj?.isVerifiedSeller)}
-                              className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition-colors flex items-center gap-1 ${
-                                sellerObj?.isVerifiedSeller
-                                  ? 'border-stone-300 text-stone-700 hover:bg-stone-100'
-                                  : 'border-emerald-300 bg-emerald-50 text-emerald-800 hover:bg-emerald-100'
                               }`}
-                              title="Toggle NIN verified trust badge"
                             >
-                              <ShieldCheck className="w-3.5 h-3.5" />
-                              <span>{sellerObj?.isVerifiedSeller ? 'Revoke NIN' : 'Grant NIN Badge'}</span>
-                            </button>
-                          )}
+                              {user.role === 'admin' ? 'MODERATOR' : user.role.toUpperCase()}
+                            </span>
+                          </td>
 
-                          <button
-                            type="button"
-                            onClick={() => setResetPasswordModal({
-                              isOpen: true,
-                              userId: user.id,
-                              userName: user.name,
-                              newPassword: '',
-                            })}
-                            className="px-3 py-1.5 rounded-xl border border-stone-300 text-stone-700 hover:bg-stone-100 text-xs font-bold transition-colors flex items-center gap-1"
-                            title="Reset password for user"
-                          >
-                            <Key className="w-3.5 h-3.5" />
-                            <span>Reset Pass</span>
-                          </button>
-
-                          {!isMasterAdmin && (
-                            <>
-                              <button
-                                type="button"
-                                onClick={() => banUserAccount(user.id, !user.isBanned)}
-                                className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition-colors flex items-center gap-1 ${
-                                  user.isBanned
-                                    ? 'border-emerald-300 text-emerald-800 bg-emerald-50 hover:bg-emerald-100'
-                                    : 'border-amber-300 text-amber-800 bg-amber-50 hover:bg-amber-100'
+                          {/* 3. Seller Verification Status */}
+                          <td className="py-3.5 px-3">
+                            {user.role === 'seller' ? (
+                              <span
+                                className={`px-2 py-0.5 rounded-md text-[10px] font-bold border ${
+                                  user.isVerifiedSeller || user.verificationStatus === 'verified'
+                                    ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                                    : user.verificationStatus === 'pending'
+                                    ? 'bg-amber-50 text-amber-800 border-amber-200'
+                                    : 'bg-stone-100 text-stone-600 border-stone-200'
                                 }`}
-                                title={user.isBanned ? 'Unsuspend account' : 'Suspend account and freeze wallet'}
                               >
-                                <Ban className="w-3.5 h-3.5" />
-                                <span>{user.isBanned ? 'Unsuspend' : 'Suspend'}</span>
-                              </button>
+                                {user.isVerifiedSeller || user.verificationStatus === 'verified'
+                                  ? '✓ NIN Verified'
+                                  : user.verificationStatus === 'pending'
+                                  ? '⏳ Pending Review'
+                                  : 'Unverified'}
+                              </span>
+                            ) : (
+                              <span className="text-stone-400 text-[11px]">N/A (Buyer)</span>
+                            )}
+                          </td>
+
+                          {/* 4. Email Verified */}
+                          <td className="py-3.5 px-3">
+                            <span
+                              className={`px-2 py-0.5 rounded-full text-[10px] font-bold inline-flex items-center gap-1 ${
+                                user.isVerifiedEmail
+                                  ? 'bg-emerald-100 text-emerald-800'
+                                  : 'bg-amber-100 text-amber-800'
+                              }`}
+                            >
+                              <span
+                                className={`w-1.5 h-1.5 rounded-full ${
+                                  user.isVerifiedEmail ? 'bg-emerald-600' : 'bg-amber-600'
+                                }`}
+                              />
+                              {user.isVerifiedEmail ? 'Verified' : 'Unverified'}
+                            </span>
+                          </td>
+
+                          {/* 5. Created Time */}
+                          <td className="py-3.5 px-3 text-stone-600 text-[11px] whitespace-nowrap">
+                            {formatDateTime(user.createdAt)}
+                          </td>
+
+                          {/* 6. Last Login Time */}
+                          <td className="py-3.5 px-3 text-stone-600 text-[11px] whitespace-nowrap">
+                            {formatDateTime(user.lastLoginAt)}
+                          </td>
+
+                          {/* 7. Moderator Actions */}
+                          <td className="py-3.5 px-4 text-right">
+                            <div className="flex items-center justify-end gap-1.5">
+                              {user.role === 'seller' && (
+                                <button
+                                  type="button"
+                                  onClick={async () => {
+                                    adminToggleSellerVerification(user.id, !user.isVerifiedSeller);
+                                    await fetchDbUsers(dbUsersPage);
+                                  }}
+                                  className={`px-2 py-1 rounded-lg text-[11px] font-bold border transition-colors flex items-center gap-1 cursor-pointer ${
+                                    user.isVerifiedSeller
+                                      ? 'border-stone-300 text-stone-700 hover:bg-stone-100'
+                                      : 'border-emerald-300 bg-emerald-50 text-emerald-800 hover:bg-emerald-100'
+                                  }`}
+                                  title="Toggle NIN verified badge"
+                                >
+                                  <ShieldCheck className="w-3 h-3" />
+                                  <span>{user.isVerifiedSeller ? 'Revoke NIN' : 'Verify NIN'}</span>
+                                </button>
+                              )}
 
                               <button
                                 type="button"
-                                onClick={() => setDeleteConfirmModal({
-                                  isOpen: true,
-                                  userId: user.id,
-                                  userName: user.name,
-                                  userEmail: user.email,
-                                  role: user.role,
-                                })}
-                                className="px-3 py-1.5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-bold transition-all shadow-2xs flex items-center gap-1 active:translate-y-0.5"
-                                title="Permanently delete user account"
+                                onClick={() =>
+                                  setResetPasswordModal({
+                                    isOpen: true,
+                                    userId: user.id,
+                                    userName: user.name,
+                                    newPassword: '',
+                                  })
+                                }
+                                className="px-2 py-1 rounded-lg border border-stone-300 text-stone-700 hover:bg-stone-100 text-[11px] font-bold transition-colors flex items-center gap-1 cursor-pointer"
+                                title="Reset user password in PostgreSQL"
                               >
-                                <Trash2 className="w-3.5 h-3.5" />
-                                <span>Delete Account</span>
+                                <Key className="w-3 h-3" />
+                                <span>Reset</span>
                               </button>
-                            </>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              );
-            })()}
+
+                              {!isMasterAdmin && (
+                                <>
+                                  <button
+                                    type="button"
+                                    onClick={async () => {
+                                      banUserAccount(user.id, !user.isBanned);
+                                      await fetchDbUsers(dbUsersPage);
+                                      await fetchMetrics();
+                                    }}
+                                    className={`px-2 py-1 rounded-lg text-[11px] font-bold border transition-colors flex items-center gap-1 cursor-pointer ${
+                                      user.isBanned
+                                        ? 'border-emerald-300 text-emerald-800 bg-emerald-50 hover:bg-emerald-100'
+                                        : 'border-amber-300 text-amber-800 bg-amber-50 hover:bg-amber-100'
+                                    }`}
+                                    title={user.isBanned ? 'Unsuspend account' : 'Suspend account'}
+                                  >
+                                    <Ban className="w-3 h-3" />
+                                    <span>{user.isBanned ? 'Unsuspend' : 'Suspend'}</span>
+                                  </button>
+
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setDeleteConfirmModal({
+                                        isOpen: true,
+                                        userId: user.id,
+                                        userName: user.name,
+                                        userEmail: user.email,
+                                        role: user.role,
+                                      })
+                                    }
+                                    className="px-2 py-1 rounded-lg bg-red-600 hover:bg-red-700 text-white text-[11px] font-bold transition-all shadow-2xs flex items-center gap-1 cursor-pointer"
+                                    title="Permanently delete user from PostgreSQL"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                    <span>Delete</span>
+                                  </button>
+                                </>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {/* Pagination Controls (Step 2 Item 5) */}
+            <div className="p-3.5 sm:p-4 bg-stone-50 border-t border-stone-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-stone-600">
+              <div>
+                Showing <strong className="text-stone-900">{dbUsers.length}</strong> of{' '}
+                <strong className="text-stone-900">{dbUsersTotal}</strong> accounts in PostgreSQL
+                {dbUsersTotalPages > 1 && ` (Page ${dbUsersPage} of ${dbUsersTotalPages})`}
+              </div>
+
+              <div className="flex items-center gap-1.5 self-end sm:self-auto">
+                <button
+                  type="button"
+                  disabled={dbUsersPage <= 1 || loadingDbUsers}
+                  onClick={() => fetchDbUsers(dbUsersPage - 1)}
+                  className="px-3 py-1.5 rounded-xl border border-stone-300 bg-white font-bold text-stone-700 hover:bg-stone-100 disabled:opacity-40 disabled:cursor-not-allowed transition-all cursor-pointer"
+                >
+                  Previous
+                </button>
+
+                <span className="px-2.5 py-1 font-mono text-stone-700 font-bold">
+                  {dbUsersPage} / {dbUsersTotalPages}
+                </span>
+
+                <button
+                  type="button"
+                  disabled={dbUsersPage >= dbUsersTotalPages || loadingDbUsers}
+                  onClick={() => fetchDbUsers(dbUsersPage + 1)}
+                  className="px-3 py-1.5 rounded-xl border border-stone-300 bg-white font-bold text-stone-700 hover:bg-stone-100 disabled:opacity-40 disabled:cursor-not-allowed transition-all cursor-pointer"
+                >
+                  Next
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}
@@ -3002,11 +3090,13 @@ export const AdminPanel: React.FC = () => {
               </button>
               <button
                 type="button"
-                onClick={() => {
+                onClick={async () => {
                   deleteUserAccount(deleteConfirmModal.userId);
                   setDeleteConfirmModal(prev => ({ ...prev, isOpen: false }));
+                  await fetchDbUsers(dbUsersPage);
+                  await fetchMetrics();
                 }}
-                className="px-5 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white font-black text-xs transition-all shadow-md active:scale-95 flex items-center gap-1.5"
+                className="px-5 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white font-black text-xs transition-all shadow-md active:scale-95 flex items-center gap-1.5 cursor-pointer"
               >
                 <Trash2 className="w-4 h-4" />
                 <span>Permanently Delete</span>
@@ -3091,11 +3181,12 @@ export const AdminPanel: React.FC = () => {
               <button
                 type="button"
                 disabled={resetPasswordModal.newPassword.trim().length < 6}
-                onClick={() => {
+                onClick={async () => {
                   adminResetUserPassword(resetPasswordModal.userId, resetPasswordModal.newPassword.trim());
                   setResetPasswordModal(prev => ({ ...prev, isOpen: false }));
+                  await fetchDbUsers(dbUsersPage);
                 }}
-                className="px-5 py-2.5 rounded-xl bg-stone-900 hover:bg-black text-[#9FE870] font-black text-xs transition-all shadow-md disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
+                className="px-5 py-2.5 rounded-xl bg-stone-900 hover:bg-black text-[#9FE870] font-black text-xs transition-all shadow-md disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5 cursor-pointer"
               >
                 <Check className="w-4 h-4" />
                 <span>Update Password</span>
@@ -3165,11 +3256,13 @@ export const AdminPanel: React.FC = () => {
               </button>
               <button
                 type="button"
-                onClick={() => {
+                onClick={async () => {
                   clearMarketplaceDatabase();
                   setIsClearDbModalOpen(false);
+                  await fetchDbUsers(1);
+                  await fetchMetrics();
                 }}
-                className="px-5 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white font-black text-xs transition-all shadow-md active:scale-95 flex items-center gap-2"
+                className="px-5 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white font-black text-xs transition-all shadow-md active:scale-95 flex items-center gap-2 cursor-pointer"
               >
                 <Trash2 className="w-4 h-4" />
                 <span>Yes, Clear Everything Now</span>

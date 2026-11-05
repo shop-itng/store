@@ -666,15 +666,18 @@ router.post('/admin/users/wipe-non-admins', async (_req, res) => {
 // GET /api/admin/metrics - Live counts and database health (STEP 2 ITEM 6)
 router.get('/admin/metrics', async (_req, res) => {
   try {
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+
     const [userStats, sellerStats, verifStats] = await Promise.all([
       dbQuery(`
         SELECT
           COUNT(*) as total_users,
-          COUNT(CASE WHEN created_at >= CURRENT_DATE THEN 1 END) as new_today,
+          COUNT(CASE WHEN created_at >= $1 THEN 1 END) as new_today,
           COUNT(CASE WHEN role = 'seller' THEN 1 END) as total_sellers,
           COUNT(CASE WHEN role = 'buyer' THEN 1 END) as total_buyers
         FROM shopit_users
-      `),
+      `, [todayStart.toISOString()]),
       dbQuery(`
         SELECT
           COUNT(CASE WHEN verification_status = 'verified' THEN 1 END) as verified_sellers
