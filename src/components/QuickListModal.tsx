@@ -26,6 +26,7 @@ export const QuickListModal: React.FC = () => {
     setActiveView,
     userLocation,
     notify,
+    verificationRequests,
   } = useApp();
 
   // Auto-sync status from PostgreSQL when modal opens
@@ -47,6 +48,11 @@ export const QuickListModal: React.FC = () => {
     currentUser?.sellerProfile?.verificationStatus === 'approved' ||
     (currentUser as any)?.isVerifiedSeller ||
     (currentUser as any)?.verificationStatus === 'verified' ||
+    (currentUser as any)?.verificationStatus === 'approved' ||
+    verificationRequests?.some(r =>
+      (r.sellerId === currentSeller?.id || r.sellerId === currentUser?.id || r.sellerId === currentUser?.sellerProfile?.id) &&
+      (r.status === 'verified' || r.status === 'approved')
+    ) ||
     currentUser?.role === 'admin'
   );
 

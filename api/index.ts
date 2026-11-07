@@ -912,10 +912,11 @@ router.get('/auth/me', async (req, res) => {
     const query = `
       SELECT u.id, u.email, u.name, u.role, u.is_verified_email, u.is_banned, u.ban_reason,
              u.age, u.has_guardian_consent, u.guardian_name, u.created_at, u.last_login_at,
-             s.id as seller_id, s.shop_name, s.bio, s.campus, s.is_verified_seller, s.verification_status,
+             u.is_verified_seller as user_is_verified, u.verification_status as user_verification_status,
+             s.id as seller_id, s.shop_name, s.bio, s.campus, s.is_verified_seller as seller_is_verified, s.verification_status as seller_verification_status,
              s.verified_legal_name, s.verified_nin_last4, s.verified_at
       FROM shopit_users u
-      LEFT JOIN shopit_sellers s ON u.id = s.user_id OR u.id = s.id
+      LEFT JOIN shopit_sellers s ON u.id = s.user_id OR u.id = s.id OR LOWER(u.email) = LOWER(s.email)
       WHERE LOWER(u.email) = LOWER($1) OR u.id = $2
     `;
 
@@ -925,12 +926,28 @@ router.get('/auth/me', async (req, res) => {
     }
 
     const row = result.rows[0];
+
+    const isVerified = Boolean(
+      row.user_is_verified ||
+      row.seller_is_verified ||
+      row.user_verification_status === 'verified' ||
+      row.user_verification_status === 'approved' ||
+      row.seller_verification_status === 'verified' ||
+      row.seller_verification_status === 'approved'
+    );
+
+    const currentStatus = isVerified
+      ? 'verified'
+      : (row.seller_verification_status || row.user_verification_status || 'not_started');
+
     const sanitizedUser: any = {
       id: row.id,
       email: row.email,
       name: row.name,
-      role: row.role,
+      role: row.role === 'buyer' && isVerified ? 'seller' : row.role,
       isVerifiedEmail: Boolean(row.is_verified_email),
+      isVerifiedSeller: isVerified,
+      verificationStatus: currentStatus,
       isBanned: Boolean(row.is_banned),
       banReason: row.ban_reason,
       age: row.age,
@@ -940,25 +957,26 @@ router.get('/auth/me', async (req, res) => {
       lastLoginAt: row.last_login_at,
     };
 
-    if (row.role === 'seller' || row.seller_id) {
+    if (row.role === 'seller' || row.seller_id || isVerified) {
       sanitizedUser.sellerProfile = {
         id: row.seller_id || row.id,
         shopName: row.shop_name || `${row.name}'s Shop`,
-        verificationStatus: row.verification_status || 'not_started',
-        isVerifiedSeller: Boolean(row.is_verified_seller),
+        verificationStatus: currentStatus,
+        isVerifiedSeller: isVerified,
         bio: row.bio || '',
         campus: row.campus || 'Lagos Mainland',
         verifiedLegalName: row.verified_legal_name,
         verifiedNinLast4: row.verified_nin_last4,
         verifiedAt: row.verified_at,
+        badges: isVerified ? ['verified'] : [],
       };
     }
 
     return res.json({
       status: true,
       user: sanitizedUser,
-      isVerifiedSeller: Boolean(row.is_verified_seller),
-      verificationStatus: row.verification_status || 'not_started',
+      isVerifiedSeller: isVerified,
+      verificationStatus: currentStatus,
     });
   } catch (err: any) {
     console.error('[Auth Me Error]:', err.message);
@@ -1057,12 +1075,24 @@ router.post('/admin/sellers/:id/verify', async (req, res) => {
       );
     }
 
+    // Also update shopit_users so the user is marked verified in all lookups
+    await dbQuery(
+      `UPDATE shopit_users
+       SET is_verified_seller = $1,
+           verification_status = $2,
+           role = CASE WHEN $1 = true AND role = 'buyer' THEN 'seller' ELSE role END,
+           updated_at = NOW()
+       WHERE id = $3 OR LOWER(email) = LOWER($3)
+          OR id IN (SELECT user_id FROM shopit_sellers WHERE id = $3)`,
+      [Boolean(isVerified), status, id]
+    );
+
     // Also update shopit_verifications if any
     try {
       await dbQuery(
         `UPDATE shopit_verifications
-         SET status = $1, reviewed_at = NOW()
-         WHERE seller_id = $2`,
+         SET status = $1, reviewed_at = NOW(), updated_at = NOW()
+         WHERE seller_id = $2 OR user_id = $2 OR id = $2`,
         [status, id]
       );
     } catch {}
@@ -2641,60 +2671,150 @@ router.post('/verification/submit', async (req: any, res) => {
   }
 });
 
-// 10. GET /verification/status/:sellerId - Check current verification status for seller
-router.get('/verification/status/:sellerId', (req, res) => {
-  const { sellerId } = req.params;
-  const submission = verificationSubmissions.get(sellerId);
-  const attempts = failedVerificationAttempts.get(sellerId);
-  const isLocked = Boolean(attempts && Date.now() < attempts.lockedUntil);
+// 10. GET /verification/status/:sellerId - Check current verification status for seller (Neon PostgreSQL)
+router.get('/verification/status/:sellerId', async (req, res) => {
+  try {
+    const { sellerId } = req.params;
 
-  if (!submission) {
+    // 1. Query PostgreSQL shopit_sellers & shopit_users
+    const sellerRes = await dbQuery(`
+      SELECT s.is_verified_seller, s.verification_status, s.verification_rejection_reason,
+             s.verified_legal_name, s.verified_nin_last4, s.verified_at,
+             u.is_verified_seller as user_is_verified, u.verification_status as user_verification_status
+      FROM shopit_sellers s
+      LEFT JOIN shopit_users u ON s.user_id = u.id OR s.id = u.id
+      WHERE s.id = $1 OR s.user_id = $1 OR LOWER(s.email) = LOWER($1)
+    `, [sellerId]);
+
+    let userRow: any = null;
+    if (sellerRes.rows.length === 0) {
+      const uRes = await dbQuery(
+        'SELECT is_verified_seller, verification_status FROM shopit_users WHERE id = $1 OR LOWER(email) = LOWER($1)',
+        [sellerId]
+      );
+      if (uRes.rows.length > 0) userRow = uRes.rows[0];
+    }
+
+    const sellerRow = sellerRes.rows[0];
+    const isVerified = Boolean(
+      sellerRow?.is_verified_seller ||
+      sellerRow?.user_is_verified ||
+      sellerRow?.verification_status === 'verified' ||
+      sellerRow?.verification_status === 'approved' ||
+      sellerRow?.user_verification_status === 'verified' ||
+      userRow?.is_verified_seller ||
+      userRow?.verification_status === 'verified' ||
+      userRow?.verification_status === 'approved'
+    );
+
+    let verifStatus = isVerified
+      ? 'verified'
+      : (sellerRow?.verification_status || userRow?.verification_status || 'not_started');
+
+    // 2. Check shopit_verifications for any recent submission
+    const verifRes = await dbQuery(
+      'SELECT status, rejection_reason, admin_notes FROM shopit_verifications WHERE seller_id = $1 OR user_id = $1 ORDER BY submitted_at DESC LIMIT 1',
+      [sellerId]
+    );
+
+    if (verifRes.rows.length > 0) {
+      const vStatus = verifRes.rows[0].status;
+      if (isVerified || vStatus === 'approved' || vStatus === 'verified') {
+        verifStatus = 'verified';
+      } else if (vStatus === 'pending') {
+        verifStatus = 'pending';
+      } else if (vStatus === 'rejected') {
+        verifStatus = 'rejected';
+      } else if (vStatus === 'needs_resubmission') {
+        verifStatus = 'needs_resubmission';
+      }
+    }
+
+    const rejectionReason =
+      sellerRow?.verification_rejection_reason ||
+      verifRes.rows[0]?.rejection_reason ||
+      verifRes.rows[0]?.admin_notes;
+
     return res.json({
       status: true,
-      verificationStatus: 'not_started',
-      isVerified: false,
-      isLocked,
-      attemptsLeft: attempts ? Math.max(0, 3 - attempts.count) : 3,
+      verificationStatus: verifStatus,
+      isVerified,
+      maskedNin: sellerRow?.verified_nin_last4 ? `******${sellerRow.verified_nin_last4}` : undefined,
+      ownerName: sellerRow?.verified_legal_name,
+      verifiedAt: sellerRow?.verified_at,
+      rejectionReason,
+      isLocked: false,
+      attemptsLeft: 3,
     });
+  } catch (err: any) {
+    console.error('[Verification Status Error]:', err.message);
+    return res.status(500).json({ status: false, message: 'Database error retrieving verification status.' });
   }
-
-  return res.json({
-    status: true,
-    verificationStatus: submission.status,
-    isVerified: submission.status === 'verified',
-    maskedNin: submission.idNumber,
-    ownerName: submission.ownerName,
-    submittedAt: submission.submittedAt,
-    rejectionReason: submission.rejectionReason,
-    adminNotes: submission.adminNotes,
-    isLocked,
-    attemptsLeft: attempts ? Math.max(0, 3 - attempts.count) : 3,
-  });
 });
 
-// 11. GET /verification/admin/queue - Full review queue for Moderator Panel
-router.get('/verification/admin/queue', (_req, res) => {
-  const queue = Array.from(verificationSubmissions.values()).map(sub => {
-    // Generate fresh signed document links for admin inspection
-    const idDoc = generateDocToken(sub.idDocId);
-    const selfieDoc = generateDocToken(sub.selfieDocId);
-    const guardianDoc = sub.guardianDocId ? generateDocToken(sub.guardianDocId) : undefined;
 
-    return {
-      ...sub,
-      idCardPhotoUrl: idDoc.url,
-      selfiePhotoUrl: selfieDoc.url,
-      guardianIdCardPhotoUrl: guardianDoc?.url,
-    };
-  });
+// 11. GET /verification/admin/queue - Full review queue for Moderator Panel (Neon PostgreSQL)
+router.get('/verification/admin/queue', async (_req, res) => {
+  try {
+    const dbRes = await dbQuery(`
+      SELECT v.*, s.shop_name as seller_shop_name, s.owner_name as seller_owner_name, s.email as seller_email
+      FROM shopit_verifications v
+      LEFT JOIN shopit_sellers s ON v.seller_id = s.id OR v.user_id = s.user_id
+      ORDER BY v.submitted_at DESC
+      LIMIT 100
+    `);
 
-  res.json({
-    status: true,
-    totalCount: queue.length,
-    pendingCount: queue.filter(q => q.status === 'pending').length,
-    queue,
-    auditLogs: verificationAuditLogs.slice(0, 50),
-  });
+    const dbQueue = dbRes.rows.map((row: any) => ({
+      id: row.id,
+      sellerId: row.seller_id,
+      shopName: row.shop_name || row.seller_shop_name || 'Artisan Shop',
+      ownerName: row.owner_name || row.seller_owner_name || 'Seller',
+      idType: row.id_type || row.document_type || 'nin_slip',
+      fullNinLast4: row.id_number_masked || '****',
+      idNumber: row.id_number_masked || '****',
+      under18: Boolean(row.under_18),
+      guardianName: row.guardian_name,
+      guardianPhone: row.guardian_phone,
+      guardianConsent: Boolean(row.guardian_consent),
+      status: row.status,
+      rejectionReason: row.rejection_reason,
+      adminNotes: row.admin_notes || row.notes,
+      reviewedBy: row.reviewed_by,
+      reviewedAt: row.reviewed_at,
+      submittedAt: row.submitted_at || row.created_at || new Date().toISOString(),
+      idCardPhotoUrl: row.document_url || '/shopit-logo.png',
+      selfiePhotoUrl: row.selfie_url || '/shopit-logo.png',
+    }));
+
+    const memQueue = Array.from(verificationSubmissions.values()).map(sub => {
+      const idDoc = generateDocToken(sub.idDocId);
+      const selfieDoc = generateDocToken(sub.selfieDocId);
+      const guardianDoc = sub.guardianDocId ? generateDocToken(sub.guardianDocId) : undefined;
+      return {
+        ...sub,
+        idCardPhotoUrl: idDoc.url,
+        selfiePhotoUrl: selfieDoc.url,
+        guardianIdCardPhotoUrl: guardianDoc?.url,
+      };
+    });
+
+    const combinedQueue = [...dbQueue];
+    for (const mem of memQueue) {
+      if (!combinedQueue.some(q => q.id === mem.id || q.sellerId === mem.sellerId)) {
+        combinedQueue.push(mem);
+      }
+    }
+
+    return res.json({
+      status: true,
+      totalCount: combinedQueue.length,
+      pendingCount: combinedQueue.filter(q => q.status === 'pending').length,
+      queue: combinedQueue,
+      auditLogs: verificationAuditLogs.slice(0, 50),
+    });
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: err.message });
+  }
 });
 
 // 12. POST /verification/admin/review - Approve, reject, or request resubmission in PostgreSQL
@@ -2723,9 +2843,10 @@ router.post('/verification/admin/review', async (req: any, res) => {
        SET is_verified_seller = $1,
            verification_status = $2,
            verified_at = CASE WHEN $1 = true THEN NOW() ELSE NULL END,
+           verification_rejection_reason = $3,
            updated_at = NOW()
-       WHERE id = $3 OR user_id = $3 OR LOWER(email) = LOWER($3)`,
-      [isVerified, status, sellerTarget]
+       WHERE id = $4 OR user_id = $4 OR LOWER(email) = LOWER($4)`,
+      [isVerified, status, isVerified ? null : (reason || null), sellerTarget]
     );
 
     // If no row existed in shopit_sellers, create it from shopit_users
@@ -2742,10 +2863,28 @@ router.post('/verification/admin/review', async (req: any, res) => {
       );
     }
 
-    // 2. Update shopit_verifications in PostgreSQL if exists
+    // 2. Update shopit_users in PostgreSQL so the seller's account is verified everywhere
+    await dbQuery(
+      `UPDATE shopit_users
+       SET is_verified_seller = $1,
+           verification_status = $2,
+           role = CASE WHEN $1 = true AND role = 'buyer' THEN 'seller' ELSE role END,
+           updated_at = NOW()
+       WHERE id = $3 OR LOWER(email) = LOWER($3)
+          OR id IN (SELECT user_id FROM shopit_sellers WHERE id = $3)`,
+      [isVerified, status, sellerTarget]
+    );
+
+    // 3. Update shopit_verifications in PostgreSQL
     await dbQuery(
       `UPDATE shopit_verifications
-       SET status = $1, reviewed_by = $2, reviewed_at = NOW(), notes = $3, updated_at = NOW()
+       SET status = $1,
+           reviewed_by = $2,
+           reviewed_at = NOW(),
+           rejection_reason = $3,
+           admin_notes = $3,
+           notes = $3,
+           updated_at = NOW()
        WHERE seller_id = $4 OR user_id = $4 OR id = $4`,
       [status, adminName, reason || null, sellerTarget]
     );
@@ -2765,7 +2904,7 @@ router.post('/verification/admin/review', async (req: any, res) => {
       sellerId: sellerTarget,
       isVerifiedSeller: isVerified,
       verificationStatus: status,
-      message: `Seller verification status set to ${action} in PostgreSQL database.`,
+      message: `Seller verification status updated to '${action}' in PostgreSQL database.`,
     });
   } catch (err: any) {
     console.error('[Admin Review Error]:', err.message);

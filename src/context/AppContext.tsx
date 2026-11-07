@@ -806,12 +806,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }, [currentUser]);
 
-  // Neon PostgreSQL Single Source of Truth: Fetch products & sellers on app boot
+  // Neon PostgreSQL Single Source of Truth: Fetch products, sellers, and verification queue on app boot
   const fetchMarketplaceData = useCallback(async () => {
     try {
-      const [prodRes, sellRes] = await Promise.all([
+      const [prodRes, sellRes, verifRes] = await Promise.all([
         fetch('/api/products?limit=100', { credentials: 'include' }).catch(() => null),
         fetch('/api/sellers', { credentials: 'include' }).catch(() => null),
+        fetch('/api/verification/admin/queue', { credentials: 'include' }).catch(() => null),
       ]);
 
       if (prodRes && prodRes.ok) {
@@ -825,6 +826,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const sellData = await sellRes.json();
         if (sellData.status && Array.isArray(sellData.sellers)) {
           setSellers(sellData.sellers);
+        }
+      }
+
+      if (verifRes && verifRes.ok) {
+        const verifData = await verifRes.json();
+        if (verifData.status && Array.isArray(verifData.queue)) {
+          setVerificationRequests(verifData.queue);
         }
       }
     } catch (err: any) {
@@ -1332,6 +1340,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       currentUser?.sellerProfile?.verificationStatus === 'approved' ||
       (currentUser as any)?.isVerifiedSeller ||
       (currentUser as any)?.verificationStatus === 'verified' ||
+      (currentUser as any)?.verificationStatus === 'approved' ||
+      verificationRequests?.some(r =>
+        (r.sellerId === currentSeller?.id || r.sellerId === currentUser?.id || r.sellerId === currentUser?.sellerProfile?.id) &&
+        (r.status === 'verified' || r.status === 'approved')
+      ) ||
       currentUser?.role === 'admin'
     );
 
@@ -1528,16 +1541,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const isVerified = Boolean(
         matchedSeller?.isVerifiedSeller ||
         currentUser?.sellerProfile?.isVerifiedSeller ||
+        (currentUser as any)?.isVerifiedSeller ||
         matchedSeller?.verificationStatus === 'verified' ||
         matchedSeller?.verificationStatus === 'approved' ||
         currentUser?.sellerProfile?.verificationStatus === 'verified' ||
         currentUser?.sellerProfile?.verificationStatus === 'approved' ||
+        (currentUser as any)?.verificationStatus === 'verified' ||
+        (currentUser as any)?.verificationStatus === 'approved' ||
+        verificationRequests?.some(r =>
+          (r.sellerId === base.id || r.sellerId === currentUser?.id || r.id === base.id) &&
+          (r.status === 'verified' || r.status === 'approved')
+        ) ||
         currentUser?.role === 'admin'
       );
 
       const status = isVerified
         ? 'verified'
-        : (matchedSeller?.verificationStatus || currentUser?.sellerProfile?.verificationStatus || 'not_started');
+        : (matchedSeller?.verificationStatus || currentUser?.sellerProfile?.verificationStatus || (currentUser as any)?.verificationStatus || 'not_started');
 
       return {
         ...base,
@@ -1549,12 +1569,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
     }
 
-    if (currentUser?.role === 'seller') {
-      if (sellers.length > 0 && sellers[0]) return sellers[0];
+    if (currentUser && (currentUser.role === 'seller' || (currentUser as any).isVerifiedSeller)) {
       const isVerified = Boolean(
         (currentUser as any).isVerifiedSeller ||
         (currentUser as any).verificationStatus === 'verified' ||
-        (currentUser as any).verificationStatus === 'approved'
+        (currentUser as any).verificationStatus === 'approved' ||
+        verificationRequests?.some(r =>
+          (r.sellerId === currentUser.id) &&
+          (r.status === 'verified' || r.status === 'approved')
+        ) ||
+        currentUser.role === 'admin'
       );
       return {
         id: currentUser.id,
@@ -1579,7 +1603,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     return null;
-  }, [currentUser, matchedSeller, sellers]);
+  }, [currentUser, matchedSeller, sellers, verificationRequests]);
 
   // Rule 5: All balances come from an append-only ledger (sale, fee, withdrawal, refund).
   // Rule 2: Sellers only have a wallet, with two balances: Pending and Available.
@@ -2541,36 +2565,50 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
 
     const targetReq = verificationRequests.find(r => r.id === id);
-    if (!targetReq) return;
+    const targetSellerId = targetReq?.sellerId || id;
 
-    const targetSeller = sellers.find(s => s.id === targetReq.sellerId);
+    const targetSeller = sellers.find(s => s.id === targetSellerId);
     const sellerEmail = targetSeller?.email || (targetSeller?.ownerName
       ? `${targetSeller.ownerName.toLowerCase().replace(/[^a-z0-9]/g, '')}@campus.ng`
       : 'artisan@campus.ng');
-    const sellerName = targetReq.ownerName || targetReq.shopName;
+    const sellerName = targetReq?.ownerName || targetReq?.shopName || targetSeller?.shopName || 'Seller';
+
+    try {
+      await Promise.all([
+        fetch('/api/verification/admin/review', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            requestId: id,
+            sellerId: targetSellerId,
+            decision: canonicalStatus,
+            rejectionReason: notes,
+            adminName: reviewer,
+            adminRole: 'moderator',
+          }),
+        }).catch(err => console.warn('Server review call warning:', err.message)),
+        fetch(`/api/admin/sellers/${encodeURIComponent(targetSellerId)}/verify`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ isVerified: canonicalStatus === 'verified' }),
+        }).catch(err => console.warn('Server verify seller warning:', err.message)),
+      ]);
+    } catch {}
 
     if (canonicalStatus === 'verified') {
-      // 13. SELLER VERIFIED
       sendTransactionalEmail(sellerEmail, 'seller_verified', {
         name: sellerName,
       });
 
-      // Update in PostgreSQL on server
-      fetch(`/api/admin/sellers/${encodeURIComponent(targetReq.sellerId)}/verify`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ isVerified: true }),
-      }).catch(err => console.warn('Server verify seller warning:', err.message));
-
       setSellers(prev =>
         prev.map(s => {
-          if (s.id === targetReq.sellerId) {
+          if (s.id === targetSellerId || (s.email && s.email.toLowerCase() === sellerEmail.toLowerCase())) {
             return {
               ...s,
               isVerifiedSeller: true,
               verificationStatus: 'verified',
-              verifiedLegalName: targetReq.ownerName,
-              verifiedNinLast4: targetReq.fullNinLast4,
+              verifiedLegalName: targetReq?.ownerName || s.ownerName,
+              verifiedNinLast4: targetReq?.fullNinLast4 || s.verifiedNinLast4,
               verifiedAt: new Date().toISOString(),
               verificationRejectionReason: undefined,
               badges: Array.from(new Set([...s.badges, 'verified'])),
@@ -2580,22 +2618,43 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         })
       );
 
-      // Immediately sync currentUser state and localStorage
+      // Immediately sync currentUser state
       setCurrentUser(prev => {
         if (!prev) return prev;
-        if (prev.id === targetReq.sellerId || prev.sellerProfile?.id === targetReq.sellerId || (prev.email && prev.email.toLowerCase() === sellerEmail.toLowerCase())) {
-          const updated = {
+        if (
+          prev.id === targetSellerId ||
+          prev.sellerProfile?.id === targetSellerId ||
+          (prev.email && prev.email.toLowerCase() === sellerEmail.toLowerCase())
+        ) {
+          const updated: User = {
             ...prev,
             sellerProfile: prev.sellerProfile
               ? {
                   ...prev.sellerProfile,
                   isVerifiedSeller: true,
                   verificationStatus: 'verified' as const,
-                  verifiedLegalName: targetReq.ownerName,
-                  verifiedNinLast4: targetReq.fullNinLast4,
+                  verifiedLegalName: targetReq?.ownerName || prev.sellerProfile.verifiedLegalName,
+                  verifiedNinLast4: targetReq?.fullNinLast4 || prev.sellerProfile.verifiedNinLast4,
                   badges: Array.from(new Set([...(prev.sellerProfile.badges || []), 'verified'])) as any,
                 }
-              : undefined,
+              : {
+                  id: targetSellerId,
+                  shopName: targetReq?.shopName || `${prev.name}'s Shop`,
+                  isVerifiedSeller: true,
+                  verificationStatus: 'verified' as const,
+                  bio: 'Student artisan and maker.',
+                  campus: 'UNILAG (Akoka)',
+                  badges: ['verified' as any],
+                  level: 1,
+                  rating: 5.0,
+                  reviewCount: 0,
+                  salesCount: 0,
+                  viewsCount: 0,
+                  vacationMode: false,
+                  under18: false,
+                  guardianConsent: false,
+                  joinedDate: new Date().toISOString(),
+                },
           };
           try {
             localStorage.setItem('shopit_current_user', JSON.stringify(updated));
@@ -2607,12 +2666,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       addAdminAuditLog(
         'SELLER_IDENTITY_VERIFIED',
-        `Approved NIN & live selfie verification for seller "${targetReq.shopName}" (${targetReq.ownerName}). NIN last 4: ${targetReq.fullNinLast4}. Real Verified Badge issued.`,
-        targetReq.sellerId
+        `Approved NIN & live selfie verification for seller "${sellerName}". Real Verified Badge issued.`,
+        targetSellerId
       );
-      notify(`Seller "${targetReq.shopName}" verified! Verified badge granted.`, 'success');
+      notify(`Seller "${sellerName}" verified! Verified badge granted.`, 'success');
     } else if (canonicalStatus === 'rejected') {
-      // 14. VERIFICATION NOT APPROVED
       sendTransactionalEmail(sellerEmail, 'verification_not_approved', {
         name: sellerName,
         reason: notes || 'Document or selfie did not match identity verification criteria.',
@@ -2620,7 +2678,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       setSellers(prev =>
         prev.map(s => {
-          if (s.id === targetReq.sellerId) {
+          if (s.id === targetSellerId) {
             return {
               ...s,
               isVerifiedSeller: false,
@@ -2634,10 +2692,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       );
       addAdminAuditLog(
         'SELLER_IDENTITY_REJECTED',
-        `Rejected identity verification for "${targetReq.shopName}". Reason: ${notes || 'Verification failed'}`,
-        targetReq.sellerId
+        `Rejected identity verification for "${sellerName}". Reason: ${notes || 'Verification failed'}`,
+        targetSellerId
       );
-      notify(`Verification for "${targetReq.shopName}" rejected. Reason: ${notes || 'Failed criteria'}`, 'error');
+      notify(`Verification for "${sellerName}" rejected. Reason: ${notes || 'Failed criteria'}`, 'error');
     } else if (canonicalStatus === 'needs_resubmission') {
       // 14. VERIFICATION NOT APPROVED
       sendTransactionalEmail(sellerEmail, 'verification_not_approved', {
@@ -2647,7 +2705,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       setSellers(prev =>
         prev.map(s => {
-          if (s.id === targetReq.sellerId) {
+          if (s.id === targetSellerId) {
             return {
               ...s,
               isVerifiedSeller: false,
@@ -2661,10 +2719,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       );
       addAdminAuditLog(
         'SELLER_IDENTITY_RESUBMISSION_REQUESTED',
-        `Requested re-submission of documents for "${targetReq.shopName}". Reason: ${notes || 'Clearer document needed'}`,
-        targetReq.sellerId
+        `Requested re-submission of documents for "${sellerName}". Reason: ${notes || 'Clearer document needed'}`,
+        targetSellerId
       );
-      notify(`Requested resubmission for "${targetReq.shopName}". Seller prompted to upload clearer ID.`, 'info');
+      notify(`Requested resubmission for "${sellerName}". Seller prompted to upload clearer ID.`, 'info');
     }
   };
 

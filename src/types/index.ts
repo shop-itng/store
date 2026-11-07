@@ -414,6 +414,7 @@ export type VerificationStatus =
   | 'not_started'
   | 'pending'
   | 'verified'
+  | 'approved'
   | 'rejected'
   | 'needs_resubmission';
 

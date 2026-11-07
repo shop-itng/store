@@ -520,6 +520,22 @@ export async function runMigration(): Promise<void> {
     'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS grand_total_kobo BIGINT;',
     'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS service_fee_kobo BIGINT;',
     'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS delivery_fee_kobo BIGINT;',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS shipped_at TIMESTAMPTZ;',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ;',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;',
+    'ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS is_verified_seller BOOLEAN DEFAULT false;',
+    'ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS verification_status VARCHAR(50) DEFAULT \'not_started\';',
+    'ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS verified_legal_name VARCHAR(255);',
+    'ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS verified_nin_last4 VARCHAR(10);',
+    'ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS verified_at TIMESTAMPTZ;',
+    'ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS verification_rejection_reason TEXT;',
+    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS user_id VARCHAR(64);',
+    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS document_type VARCHAR(100);',
+    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS document_url TEXT;',
+    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS selfie_url TEXT;',
+    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS notes TEXT;',
+    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();',
+    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();',
   ];
   for (const stmt of alterStatements) {
     try {

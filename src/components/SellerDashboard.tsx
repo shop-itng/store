@@ -108,8 +108,7 @@ export const SellerDashboard: React.FC = () => {
   const availableEarnings = sellerWallet?.availableBalance ?? 0;
 
   // Verification request state
-  // Real Verification request state
-  const existingVerifReq = verificationRequests.find(r => r.sellerId === currentSeller.id);
+  const existingVerifReq = verificationRequests.find(r => r.sellerId === currentSeller.id || r.sellerId === currentUser?.id);
   const rawStatus = currentSeller.verificationStatus || 'not_started';
   const isVerified = Boolean(
     (currentSeller.isVerifiedSeller && (rawStatus === 'verified' || rawStatus === 'approved')) ||
@@ -117,6 +116,14 @@ export const SellerDashboard: React.FC = () => {
     rawStatus === 'verified' ||
     rawStatus === 'approved' ||
     currentSeller.badges?.includes('verified') ||
+    currentUser?.sellerProfile?.isVerifiedSeller ||
+    currentUser?.sellerProfile?.verificationStatus === 'verified' ||
+    currentUser?.sellerProfile?.verificationStatus === 'approved' ||
+    (currentUser as any)?.isVerifiedSeller ||
+    (currentUser as any)?.verificationStatus === 'verified' ||
+    (currentUser as any)?.verificationStatus === 'approved' ||
+    existingVerifReq?.status === 'verified' ||
+    existingVerifReq?.status === 'approved' ||
     currentUser?.role === 'admin'
   );
   const isVerifPending = !isVerified && (rawStatus === 'pending' || (rawStatus as string) === 'pending_approval' || existingVerifReq?.status === 'pending');
