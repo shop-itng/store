@@ -1,11 +1,7 @@
-import express from 'express';
-import crypto from 'crypto';
+import express, { Response } from 'express';
 import { query as dbQuery } from '../db/postgres.js';
 import {
   requireAuth,
-  requireRole,
-  requireAdmin,
-  optionalAuth,
   AuthenticatedRequest,
 } from '../auth/middleware.js';
 import { logAuditEvent } from '../auth/sessionStore.js';
@@ -105,11 +101,9 @@ router.get('/products', async (req, res) => {
     else if (sortBy === 'price_desc') orderClause = 'ORDER BY display_price DESC';
     else if (sortBy === 'top_rated') orderClause = 'ORDER BY rating DESC, review_count DESC';
 
-    // Total count query for pagination
     const countRes = await dbQuery(`SELECT COUNT(*) as count FROM shopit_products ${whereClause}`, params);
     const total = parseInt(countRes.rows[0].count, 10);
 
-    // Paginated fetch
     const querySql = `
       SELECT * FROM shopit_products
       ${whereClause}
@@ -118,7 +112,7 @@ router.get('/products', async (req, res) => {
     `;
     const rowsRes = await dbQuery(querySql, [...params, limit, offset]);
 
-    const products = rowsRes.rows.map(row => ({
+    const products = rowsRes.rows.map((row: any) => ({
       id: row.id,
       sellerId: row.seller_id,
       sellerShopName: row.seller_shop_name || 'Artisan Shop',
@@ -220,8 +214,9 @@ router.get('/products/:id', async (req, res) => {
 });
 
 // POST /api/products - Create a product (Protected)
-router.post('/products', requireAuth, async (req: AuthenticatedRequest, res) => {
+router.post('/products', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const user = req.user!;
     const {
       title,
       description,
@@ -245,13 +240,12 @@ router.post('/products', requireAuth, async (req: AuthenticatedRequest, res) => 
     const sellerPriceKobo = nairaToKobo(rawSellerPriceNaira);
     const pricing = calculatePricingInKobo(sellerPriceKobo);
 
-    const sellerId = req.user.role === 'seller' ? req.user.id : (req.body.sellerId || req.user.id);
+    const sellerId = user.role === 'seller' ? user.userId : (req.body.sellerId || user.userId);
 
-    // Fetch seller record to ensure verified status and correct shop name
     const sellerRes = await dbQuery('SELECT * FROM shopit_sellers WHERE id = $1 OR user_id = $1', [sellerId]);
     const seller = sellerRes.rows[0];
 
-    const shopName = seller?.shop_name || req.body.sellerShopName || `${req.user.name}'s Shop`;
+    const shopName = seller?.shop_name || req.body.sellerShopName || `${user.name}'s Shop`;
     const campus = seller?.campus || req.body.sellerCampus || 'Lagos Mainland';
     const isVerified = Boolean(seller?.is_verified_seller || seller?.verification_status === 'verified');
 
@@ -303,16 +297,12 @@ router.post('/products', requireAuth, async (req: AuthenticatedRequest, res) => 
       ]
     );
 
-    // Audit log
     await logAuditEvent({
       action: 'PRODUCT_CREATED',
-      actorId: req.user.id,
-      actorEmail: req.user.email,
-      actorRole: req.user.role,
-      targetType: 'product',
-      targetId: productId,
+      actor: { id: user.userId, email: user.email, role: user.role },
+      target: { type: 'product', id: productId },
       details: { title, sellerPriceNaira: pricing.sellerPriceNaira, displayPriceNaira: pricing.displayPriceNaira },
-      ipAddress: req.ip,
+      ip: req.ip,
       userAgent: req.get('user-agent'),
     });
 
@@ -328,8 +318,9 @@ router.post('/products', requireAuth, async (req: AuthenticatedRequest, res) => 
 });
 
 // PUT /api/products/:id - Update product
-router.put('/products/:id', requireAuth, async (req: AuthenticatedRequest, res) => {
+router.put('/products/:id', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const user = req.user!;
     const { id } = req.params;
     const existing = await dbQuery('SELECT * FROM shopit_products WHERE id = $1', [id]);
     if (existing.rows.length === 0) {
@@ -337,7 +328,7 @@ router.put('/products/:id', requireAuth, async (req: AuthenticatedRequest, res) 
     }
 
     const row = existing.rows[0];
-    if (row.seller_id !== req.user.id && req.user.role !== 'admin') {
+    if (row.seller_id !== user.userId && user.role !== 'admin') {
       return res.status(403).json({ status: false, message: 'You do not have permission to modify this product.' });
     }
 
@@ -375,8 +366,9 @@ router.put('/products/:id', requireAuth, async (req: AuthenticatedRequest, res) 
 });
 
 // DELETE /api/products/:id - Delete product
-router.delete('/products/:id', requireAuth, async (req: AuthenticatedRequest, res) => {
+router.delete('/products/:id', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const user = req.user!;
     const { id } = req.params;
     const existing = await dbQuery('SELECT * FROM shopit_products WHERE id = $1', [id]);
     if (existing.rows.length === 0) {
@@ -384,7 +376,7 @@ router.delete('/products/:id', requireAuth, async (req: AuthenticatedRequest, re
     }
 
     const row = existing.rows[0];
-    if (row.seller_id !== req.user.id && req.user.role !== 'admin') {
+    if (row.seller_id !== user.userId && user.role !== 'admin') {
       return res.status(403).json({ status: false, message: 'You do not have permission to delete this product.' });
     }
 
@@ -392,12 +384,9 @@ router.delete('/products/:id', requireAuth, async (req: AuthenticatedRequest, re
 
     await logAuditEvent({
       action: 'PRODUCT_DELETED',
-      actorId: req.user.id,
-      actorEmail: req.user.email,
-      actorRole: req.user.role,
-      targetType: 'product',
-      targetId: id,
-      ipAddress: req.ip,
+      actor: { id: user.userId, email: user.email, role: user.role },
+      target: { type: 'product', id },
+      ip: req.ip,
       userAgent: req.get('user-agent'),
     });
 
@@ -421,7 +410,7 @@ router.get('/sellers', async (_req, res) => {
       ORDER BY s.created_at DESC
     `);
 
-    const sellers = result.rows.map(row => ({
+    const sellers = result.rows.map((row: any) => ({
       id: row.id,
       shopName: row.shop_name,
       ownerName: row.owner_name,
@@ -511,10 +500,11 @@ router.get('/sellers/:id', async (req, res) => {
 });
 
 // PUT /api/sellers/:id - Update seller profile
-router.put('/sellers/:id', requireAuth, async (req: AuthenticatedRequest, res) => {
+router.put('/sellers/:id', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const user = req.user!;
     const { id } = req.params;
-    if (req.user.id !== id && req.user.role !== 'admin') {
+    if (user.userId !== id && user.role !== 'admin') {
       return res.status(403).json({ status: false, message: 'Forbidden.' });
     }
 
@@ -545,9 +535,10 @@ router.put('/sellers/:id', requireAuth, async (req: AuthenticatedRequest, res) =
 // ============================================================================
 
 // GET /api/cart
-router.get('/cart', requireAuth, async (req: AuthenticatedRequest, res) => {
+router.get('/cart', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const result = await dbQuery('SELECT items FROM shopit_carts WHERE user_id = $1', [req.user.id]);
+    const user = req.user!;
+    const result = await dbQuery('SELECT items FROM shopit_carts WHERE user_id = $1', [user.userId]);
     const items = result.rows.length > 0 && Array.isArray(result.rows[0].items) ? result.rows[0].items : [];
     return res.json({ status: true, items });
   } catch (err: any) {
@@ -556,14 +547,15 @@ router.get('/cart', requireAuth, async (req: AuthenticatedRequest, res) => {
 });
 
 // PUT /api/cart - Save cart items to PostgreSQL
-router.put('/cart', requireAuth, async (req: AuthenticatedRequest, res) => {
+router.put('/cart', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const user = req.user!;
     const { items = [] } = req.body;
     await dbQuery(
       `INSERT INTO shopit_carts (user_id, items, updated_at)
        VALUES ($1, $2, NOW())
        ON CONFLICT (user_id) DO UPDATE SET items = $2, updated_at = NOW()`,
-      [req.user.id, JSON.stringify(items)]
+      [user.userId, JSON.stringify(items)]
     );
     return res.json({ status: true, message: 'Cart saved to database.' });
   } catch (err: any) {
@@ -572,9 +564,10 @@ router.put('/cart', requireAuth, async (req: AuthenticatedRequest, res) => {
 });
 
 // GET /api/wishlist
-router.get('/wishlist', requireAuth, async (req: AuthenticatedRequest, res) => {
+router.get('/wishlist', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const result = await dbQuery('SELECT product_ids FROM shopit_wishlists WHERE user_id = $1', [req.user.id]);
+    const user = req.user!;
+    const result = await dbQuery('SELECT product_ids FROM shopit_wishlists WHERE user_id = $1', [user.userId]);
     const productIds = result.rows.length > 0 && Array.isArray(result.rows[0].product_ids) ? result.rows[0].product_ids : [];
     return res.json({ status: true, productIds });
   } catch (err: any) {
@@ -583,14 +576,15 @@ router.get('/wishlist', requireAuth, async (req: AuthenticatedRequest, res) => {
 });
 
 // PUT /api/wishlist - Save wishlist to PostgreSQL
-router.put('/wishlist', requireAuth, async (req: AuthenticatedRequest, res) => {
+router.put('/wishlist', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const user = req.user!;
     const { productIds = [] } = req.body;
     await dbQuery(
       `INSERT INTO shopit_wishlists (user_id, product_ids, updated_at)
        VALUES ($1, $2, NOW())
        ON CONFLICT (user_id) DO UPDATE SET product_ids = $2, updated_at = NOW()`,
-      [req.user.id, JSON.stringify(productIds)]
+      [user.userId, JSON.stringify(productIds)]
     );
     return res.json({ status: true, message: 'Wishlist saved to database.' });
   } catch (err: any) {
@@ -603,8 +597,9 @@ router.put('/wishlist', requireAuth, async (req: AuthenticatedRequest, res) => {
 // ============================================================================
 
 // GET /api/orders - List user orders or all orders for admin
-router.get('/orders', requireAuth, async (req: AuthenticatedRequest, res) => {
+router.get('/orders', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const user = req.user!;
     const page = Math.max(1, parseInt(String(req.query.page || '1'), 10));
     const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit || '50'), 10)));
     const offset = (page - 1) * limit;
@@ -613,20 +608,18 @@ router.get('/orders', requireAuth, async (req: AuthenticatedRequest, res) => {
     let countSql = '';
     let params: any[] = [];
 
-    if (req.user.role === 'admin') {
+    if (user.role === 'admin') {
       countSql = 'SELECT COUNT(*) as count FROM shopit_orders';
       querySql = 'SELECT * FROM shopit_orders ORDER BY created_at DESC LIMIT $1 OFFSET $2';
       params = [limit, offset];
-    } else if (req.user.role === 'seller') {
-      // Seller sees orders they sold or bought
+    } else if (user.role === 'seller') {
       countSql = `SELECT COUNT(*) as count FROM shopit_orders WHERE buyer_id = $1 OR items::text LIKE $2`;
       querySql = `SELECT * FROM shopit_orders WHERE buyer_id = $1 OR items::text LIKE $2 ORDER BY created_at DESC LIMIT $3 OFFSET $4`;
-      params = [req.user.id, `%"sellerId":"${req.user.id}"%`, limit, offset];
+      params = [user.userId, `%"sellerId":"${user.userId}"%`, limit, offset];
     } else {
-      // Buyer sees only their own orders
       countSql = 'SELECT COUNT(*) as count FROM shopit_orders WHERE buyer_id = $1';
       querySql = 'SELECT * FROM shopit_orders WHERE buyer_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3';
-      params = [req.user.id, limit, offset];
+      params = [user.userId, limit, offset];
     }
 
     const countRes = await dbQuery(countSql, params.slice(0, countSql.includes('$2') ? 2 : (countSql.includes('$1') ? 1 : 0)));
@@ -634,12 +627,12 @@ router.get('/orders', requireAuth, async (req: AuthenticatedRequest, res) => {
 
     const rowsRes = await dbQuery(querySql, params);
 
-    const orders = rowsRes.rows.map(row => ({
+    const orders = rowsRes.rows.map((row: any) => ({
       id: row.id,
       buyerId: row.buyer_id,
       buyerMaskedId: row.buyer_masked_id || `Buyer #${row.id.slice(-4)}`,
-      buyerName: req.user.role === 'admin' ? row.buyer_name : undefined,
-      buyerEmail: req.user.role === 'admin' ? row.buyer_email : undefined,
+      buyerName: user.role === 'admin' ? row.buyer_name : undefined,
+      buyerEmail: user.role === 'admin' ? row.buyer_email : undefined,
       deliveryArea: row.delivery_area || 'Yaba',
       pickupPoint: row.pickup_point,
       items: Array.isArray(row.items) ? row.items : [],
@@ -675,8 +668,9 @@ router.get('/orders', requireAuth, async (req: AuthenticatedRequest, res) => {
 });
 
 // POST /api/orders - Create an order with integer kobo & status history
-router.post('/orders', requireAuth, async (req: AuthenticatedRequest, res) => {
+router.post('/orders', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const user = req.user!;
     const {
       id: requestedId,
       items = [],
@@ -699,7 +693,7 @@ router.post('/orders', requireAuth, async (req: AuthenticatedRequest, res) => {
     const discountKobo = nairaToKobo(discountTotal);
     const grandTotalKobo = nairaToKobo(grandTotal);
 
-    const autoReleaseDate = new Date(Date.now() + 5 * 24 * 60 * 60 * 1000); // 5-day escrow
+    const autoReleaseDate = new Date(Date.now() + 5 * 24 * 60 * 60 * 1000);
     const handshakeOtp = String(Math.floor(1000 + Math.random() * 9000));
     const buyerMaskedId = `Buyer #${orderId.slice(-4)}`;
 
@@ -719,9 +713,9 @@ router.post('/orders', requireAuth, async (req: AuthenticatedRequest, res) => {
       )`,
       [
         orderId,
-        req.user.id,
-        req.user.name,
-        req.user.email,
+        user.userId,
+        user.name,
+        user.email,
         buyerMaskedId,
         JSON.stringify(items),
         koboToNaira(subtotalKobo),
@@ -742,16 +736,14 @@ router.post('/orders', requireAuth, async (req: AuthenticatedRequest, res) => {
       ]
     );
 
-    // Initial Status History Entry
     const historyId = `osh_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
     await dbQuery(
       `INSERT INTO shopit_order_status_history (
         id, order_id, previous_status, new_status, changed_by, notes, created_at
       ) VALUES ($1, $2, NULL, 'paid', $3, 'Order created and paid via Paystack escrow.', NOW())`,
-      [historyId, orderId, req.user.id]
+      [historyId, orderId, user.userId]
     );
 
-    // Group items by seller and credit each seller's pending wallet ledger
     const sellerTotals: Record<string, number> = {};
     for (const item of items) {
       const sId = item.sellerId;
@@ -762,7 +754,6 @@ router.post('/orders', requireAuth, async (req: AuthenticatedRequest, res) => {
     }
 
     for (const [sId, sellerEarningsKobo] of Object.entries(sellerTotals)) {
-      // Ensure wallet row exists
       await dbQuery(
         `INSERT INTO shopit_wallets (seller_id, pending_balance, available_balance, total_withdrawn, is_frozen, pending_balance_kobo, available_balance_kobo, total_withdrawn_kobo, created_at, updated_at)
          VALUES ($1, 0, 0, 0, false, 0, 0, 0, NOW(), NOW())
@@ -770,12 +761,10 @@ router.post('/orders', requireAuth, async (req: AuthenticatedRequest, res) => {
         [sId]
       );
 
-      // Fetch current balance
       const wRes = await dbQuery('SELECT pending_balance_kobo, available_balance_kobo FROM shopit_wallets WHERE seller_id = $1', [sId]);
       const currentPendingKobo = parseInt(wRes.rows[0]?.pending_balance_kobo || '0', 10);
       const newPendingKobo = currentPendingKobo + sellerEarningsKobo;
 
-      // Update wallet pending balance
       await dbQuery(
         `UPDATE shopit_wallets
          SET pending_balance_kobo = $1,
@@ -785,7 +774,6 @@ router.post('/orders', requireAuth, async (req: AuthenticatedRequest, res) => {
         [newPendingKobo, koboToNaira(newPendingKobo), sId]
       );
 
-      // Append immutable double-entry ledger entry
       const ledgerId = `LEDGER-${orderId}-${sId.slice(-4)}`;
       await dbQuery(
         `INSERT INTO shopit_ledger_entries (
@@ -808,8 +796,7 @@ router.post('/orders', requireAuth, async (req: AuthenticatedRequest, res) => {
       );
     }
 
-    // Clear user's server cart after successful order creation
-    await dbQuery('DELETE FROM shopit_carts WHERE user_id = $1', [req.user.id]);
+    await dbQuery('DELETE FROM shopit_carts WHERE user_id = $1', [user.userId]);
 
     return res.status(201).json({
       status: true,
@@ -823,9 +810,10 @@ router.post('/orders', requireAuth, async (req: AuthenticatedRequest, res) => {
   }
 });
 
-// PATCH /api/orders/:id/status - Update order status (with escrow release & status history)
-router.patch('/orders/:id/status', requireAuth, async (req: AuthenticatedRequest, res) => {
+// PATCH /api/orders/:id/status - Update order status
+router.patch('/orders/:id/status', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const user = req.user!;
     const { id } = req.params;
     const { status: newStatus, notes, handshakeOtp } = req.body;
 
@@ -837,7 +825,6 @@ router.patch('/orders/:id/status', requireAuth, async (req: AuthenticatedRequest
     const order = existing.rows[0];
     const prevStatus = order.status;
 
-    // Handshake verification if delivered
     let handshakeVerified = order.handshake_verified;
     if (newStatus === 'delivered' && handshakeOtp) {
       if (order.handshake_otp && String(handshakeOtp).trim() === String(order.handshake_otp).trim()) {
@@ -845,7 +832,6 @@ router.patch('/orders/:id/status', requireAuth, async (req: AuthenticatedRequest
       }
     }
 
-    // Update order status
     await dbQuery(
       `UPDATE shopit_orders
        SET status = $1,
@@ -853,22 +839,20 @@ router.patch('/orders/:id/status', requireAuth, async (req: AuthenticatedRequest
            packed_at = CASE WHEN $1 = 'packed' THEN NOW() ELSE packed_at END,
            shipped_at = CASE WHEN $1 = 'shipped' THEN NOW() ELSE shipped_at END,
            delivered_at = CASE WHEN $1 = 'delivered' THEN NOW() ELSE delivered_at END,
-           completedAt = CASE WHEN $1 = 'completed' THEN NOW() ELSE completed_at END,
+           completed_at = CASE WHEN $1 = 'completed' THEN NOW() ELSE completed_at END,
            updated_at = NOW()
        WHERE id = $3`,
       [newStatus, handshakeVerified, id]
     );
 
-    // Record Status History
     const historyId = `osh_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
     await dbQuery(
       `INSERT INTO shopit_order_status_history (
         id, order_id, previous_status, new_status, changed_by, notes, created_at
       ) VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
-      [historyId, id, prevStatus, newStatus, req.user.id, notes || `Status updated from ${prevStatus} to ${newStatus}`]
+      [historyId, id, prevStatus, newStatus, user.userId, notes || `Status updated from ${prevStatus} to ${newStatus}`]
     );
 
-    // Double-Entry Ledger Escrow Release if status is delivered or completed
     if ((newStatus === 'delivered' || newStatus === 'completed') && prevStatus !== 'delivered' && prevStatus !== 'completed') {
       const items = Array.isArray(order.items) ? order.items : [];
       const sellerTotals: Record<string, number> = {};
@@ -900,7 +884,6 @@ router.patch('/orders/:id/status', requireAuth, async (req: AuthenticatedRequest
             [newPending, newAvailable, koboToNaira(newPending), koboToNaira(newAvailable), sId]
           );
 
-          // Append escrow release entry
           const releaseId = `ESCROW-REL-${id}-${sId.slice(-4)}`;
           await dbQuery(
             `INSERT INTO shopit_ledger_entries (
@@ -932,19 +915,19 @@ router.patch('/orders/:id/status', requireAuth, async (req: AuthenticatedRequest
 });
 
 // ============================================================================
-// 5. WALLET & DOUBLE-ENTRY LEDGER API (Integer Kobo single source of truth)
+// 5. WALLET & DOUBLE-ENTRY LEDGER API
 // ============================================================================
 
 // GET /api/wallet - Get seller wallet calculated strictly from append-only ledger
-router.get('/wallet', requireAuth, async (req: AuthenticatedRequest, res) => {
+router.get('/wallet', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const sellerId = req.query.sellerId ? String(req.query.sellerId).trim() : req.user.id;
+    const user = req.user!;
+    const sellerId = req.query.sellerId ? String(req.query.sellerId).trim() : user.userId;
 
-    if (sellerId !== req.user.id && req.user.role !== 'admin') {
+    if (sellerId !== user.userId && user.role !== 'admin') {
       return res.status(403).json({ status: false, message: 'Forbidden.' });
     }
 
-    // Ensure wallet exists
     await dbQuery(
       `INSERT INTO shopit_wallets (seller_id, pending_balance, available_balance, total_withdrawn, is_frozen, pending_balance_kobo, available_balance_kobo, total_withdrawn_kobo, created_at, updated_at)
        VALUES ($1, 0, 0, 0, false, 0, 0, 0, NOW(), NOW())
@@ -955,13 +938,11 @@ router.get('/wallet', requireAuth, async (req: AuthenticatedRequest, res) => {
     const walletRes = await dbQuery('SELECT * FROM shopit_wallets WHERE seller_id = $1', [sellerId]);
     const walletRow = walletRes.rows[0];
 
-    // Fetch ledger entries
     const ledgerRes = await dbQuery(
       'SELECT * FROM shopit_ledger_entries WHERE wallet_id = $1 ORDER BY created_at DESC LIMIT 100',
       [sellerId]
     );
 
-    // Compute balance from ledger rows for double-entry validation
     let computedPendingKobo = 0;
     let computedAvailableKobo = 0;
     let computedWithdrawnKobo = 0;
@@ -986,7 +967,7 @@ router.get('/wallet', requireAuth, async (req: AuthenticatedRequest, res) => {
     computedPendingKobo = Math.max(0, computedPendingKobo);
     computedAvailableKobo = Math.max(0, computedAvailableKobo);
 
-    const ledgerEntries = ledgerRes.rows.map(row => ({
+    const ledgerEntries = ledgerRes.rows.map((row: any) => ({
       id: row.id,
       walletId: row.wallet_id,
       type: row.type,
@@ -1023,16 +1004,17 @@ router.get('/wallet', requireAuth, async (req: AuthenticatedRequest, res) => {
   }
 });
 
-// POST /api/wallet/payout-account - Add payout bank account with 24-hr cooling period
-router.post('/wallet/payout-account', requireAuth, async (req: AuthenticatedRequest, res) => {
+// POST /api/wallet/payout-account - Add payout bank account
+router.post('/wallet/payout-account', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const user = req.user!;
     const { bankCode, bankName, accountNumber, accountName } = req.body;
 
     if (!bankName || !accountNumber || !accountName) {
       return res.status(400).json({ status: false, message: 'Bank name, account number, and account name are required.' });
     }
 
-    const sellerId = req.user.id;
+    const sellerId = user.userId;
     const wRes = await dbQuery('SELECT payout_accounts FROM shopit_wallets WHERE seller_id = $1', [sellerId]);
     const currentAccounts = wRes.rows.length > 0 && Array.isArray(wRes.rows[0].payout_accounts) ? wRes.rows[0].payout_accounts : [];
 
@@ -1065,20 +1047,21 @@ router.post('/wallet/payout-account', requireAuth, async (req: AuthenticatedRequ
 });
 
 // ============================================================================
-// 6. CHAT & CONVERSATIONS API (PostgreSQL: shopit_chat_conversations, shopit_chat_messages)
+// 6. CHAT & CONVERSATIONS API
 // ============================================================================
 
 // GET /api/chat/conversations
-router.get('/chat/conversations', requireAuth, async (req: AuthenticatedRequest, res) => {
+router.get('/chat/conversations', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const user = req.user!;
     const result = await dbQuery(
       `SELECT * FROM shopit_chat_conversations
        WHERE buyer_id = $1 OR seller_id = $1
        ORDER BY last_message_at DESC NULLS LAST, created_at DESC`,
-      [req.user.id]
+      [user.userId]
     );
 
-    const conversations = result.rows.map(row => ({
+    const conversations = result.rows.map((row: any) => ({
       id: row.id,
       orderId: row.order_id,
       productId: row.product_id,
@@ -1102,26 +1085,25 @@ router.get('/chat/conversations', requireAuth, async (req: AuthenticatedRequest,
 });
 
 // POST /api/chat/conversations - Create or find conversation
-router.post('/chat/conversations', requireAuth, async (req: AuthenticatedRequest, res) => {
+router.post('/chat/conversations', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const user = req.user!;
     const { sellerId, productId, productTitle, productImage, orderId } = req.body;
     if (!sellerId) {
       return res.status(400).json({ status: false, message: 'sellerId is required.' });
     }
 
-    // Check existing conversation
     const existing = await dbQuery(
       `SELECT * FROM shopit_chat_conversations
        WHERE (buyer_id = $1 AND seller_id = $2)
           OR (buyer_id = $2 AND seller_id = $1)`,
-      [req.user.id, sellerId]
+      [user.userId, sellerId]
     );
 
     if (existing.rows.length > 0) {
       return res.json({ status: true, conversation: existing.rows[0] });
     }
 
-    // Fetch seller shop name
     const sellerRes = await dbQuery('SELECT shop_name FROM shopit_sellers WHERE id = $1', [sellerId]);
     const shopName = sellerRes.rows[0]?.shop_name || 'Artisan';
 
@@ -1135,7 +1117,7 @@ router.post('/chat/conversations', requireAuth, async (req: AuthenticatedRequest
         last_message, last_message_at, created_at
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'Chat started', NOW(), NOW())
       RETURNING *`,
-      [convId, orderId || null, productId || null, productTitle || null, productImage || null, req.user.id, buyerMaskedId, sellerId, shopName]
+      [convId, orderId || null, productId || null, productTitle || null, productImage || null, user.userId, buyerMaskedId, sellerId, shopName]
     );
 
     return res.status(201).json({ status: true, conversation: insertRes.rows[0] });
@@ -1145,7 +1127,7 @@ router.post('/chat/conversations', requireAuth, async (req: AuthenticatedRequest
 });
 
 // GET /api/chat/conversations/:id/messages
-router.get('/chat/conversations/:id/messages', requireAuth, async (req: AuthenticatedRequest, res) => {
+router.get('/chat/conversations/:id/messages', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { id } = req.params;
     const result = await dbQuery(
@@ -1153,7 +1135,7 @@ router.get('/chat/conversations/:id/messages', requireAuth, async (req: Authenti
       [id]
     );
 
-    const messages = result.rows.map(row => ({
+    const messages = result.rows.map((row: any) => ({
       id: row.id,
       conversationId: row.conversation_id,
       senderId: row.sender_id,
@@ -1172,8 +1154,9 @@ router.get('/chat/conversations/:id/messages', requireAuth, async (req: Authenti
 });
 
 // POST /api/chat/conversations/:id/messages - Send message with Anti-Bypass Guard
-router.post('/chat/conversations/:id/messages', requireAuth, async (req: AuthenticatedRequest, res) => {
+router.post('/chat/conversations/:id/messages', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const user = req.user!;
     const { id } = req.params;
     const { content, presetOffer } = req.body;
 
@@ -1183,7 +1166,6 @@ router.post('/chat/conversations/:id/messages', requireAuth, async (req: Authent
 
     const cleanContent = content.trim();
 
-    // Anti-Bypass Check: Phone numbers, account numbers, external payment links
     const phoneRegex = /(\+?234|0)[789][01]\d{8}/;
     const bankRegex = /\b\d{10}\b/;
     const whatsappRegex = /(wa\.me|whatsapp|dm me on ig|call me)/i;
@@ -1191,8 +1173,8 @@ router.post('/chat/conversations/:id/messages', requireAuth, async (req: Authent
     const isBypass = phoneRegex.test(cleanContent) || bankRegex.test(cleanContent) || whatsappRegex.test(cleanContent);
 
     const msgId = `msg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-    const role = req.user.role === 'seller' ? 'seller' : 'buyer';
-    const senderMaskedName = role === 'seller' ? 'Artisan' : `Buyer #${req.user.id.slice(-4)}`;
+    const role = user.role === 'seller' ? 'seller' : 'buyer';
+    const senderMaskedName = role === 'seller' ? 'Artisan' : `Buyer #${user.userId.slice(-4)}`;
 
     const savedContent = isBypass
       ? '[Security Notice: Direct phone numbers, account numbers, and off-platform payments are prohibited to protect your Paystack escrow security.]'
@@ -1203,10 +1185,9 @@ router.post('/chat/conversations/:id/messages', requireAuth, async (req: Authent
         id, conversation_id, sender_id, sender_role, sender_masked_name,
         content, is_blocked_bypass, preset_offer, created_at
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())`,
-      [msgId, id, req.user.id, role, senderMaskedName, savedContent, isBypass, presetOffer ? JSON.stringify(presetOffer) : null]
+      [msgId, id, user.userId, role, senderMaskedName, savedContent, isBypass, presetOffer ? JSON.stringify(presetOffer) : null]
     );
 
-    // Update conversation last message
     await dbQuery(
       `UPDATE shopit_chat_conversations
        SET last_message = $1, last_message_at = NOW()
@@ -1219,7 +1200,7 @@ router.post('/chat/conversations/:id/messages', requireAuth, async (req: Authent
       message: {
         id: msgId,
         conversationId: id,
-        senderId: req.user.id,
+        senderId: user.userId,
         senderRole: role,
         senderMaskedName,
         content: savedContent,
@@ -1238,19 +1219,20 @@ router.post('/chat/conversations/:id/messages', requireAuth, async (req: Authent
 // ============================================================================
 
 // GET /api/disputes
-router.get('/disputes', requireAuth, async (req: AuthenticatedRequest, res) => {
+router.get('/disputes', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const user = req.user!;
     let result;
-    if (req.user.role === 'admin') {
+    if (user.role === 'admin') {
       result = await dbQuery('SELECT * FROM shopit_disputes ORDER BY created_at DESC');
     } else {
       result = await dbQuery(
         'SELECT * FROM shopit_disputes WHERE buyer_id = $1 OR seller_id = $1 ORDER BY created_at DESC',
-        [req.user.id]
+        [user.userId]
       );
     }
 
-    const disputes = result.rows.map(row => ({
+    const disputes = result.rows.map((row: any) => ({
       id: row.id,
       orderId: row.order_id,
       sellerId: row.seller_id,
@@ -1274,8 +1256,9 @@ router.get('/disputes', requireAuth, async (req: AuthenticatedRequest, res) => {
 });
 
 // POST /api/disputes - Open a dispute ticket
-router.post('/disputes', requireAuth, async (req: AuthenticatedRequest, res) => {
+router.post('/disputes', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const user = req.user!;
     const { orderId, reason, description, evidencePhotoUrl } = req.body;
     if (!orderId || !reason) {
       return res.status(400).json({ status: false, message: 'orderId and reason are required.' });
@@ -1303,7 +1286,7 @@ router.post('/disputes', requireAuth, async (req: AuthenticatedRequest, res) => 
         disputeId,
         orderId,
         sellerId,
-        req.user.id,
+        user.userId,
         `Buyer #${orderId.slice(-4)}`,
         sellerShopName,
         reason,
@@ -1314,14 +1297,12 @@ router.post('/disputes', requireAuth, async (req: AuthenticatedRequest, res) => 
       ]
     );
 
-    // Update order status to disputed
     await dbQuery('UPDATE shopit_orders SET status = \'disputed\', updated_at = NOW() WHERE id = $1', [orderId]);
 
-    // Record status history
     await dbQuery(
       `INSERT INTO shopit_order_status_history (id, order_id, previous_status, new_status, changed_by, notes, created_at)
        VALUES ($1, $2, $3, 'disputed', $4, $5, NOW())`,
-      [`osh_${Date.now()}`, orderId, order.status, req.user.id, `Dispute filed: ${reason}`]
+      [`osh_${Date.now()}`, orderId, order.status, user.userId, `Dispute filed: ${reason}`]
     );
 
     return res.status(201).json({ status: true, disputeId, message: 'Dispute opened. Funds held securely in escrow.' });
@@ -1335,14 +1316,15 @@ router.post('/disputes', requireAuth, async (req: AuthenticatedRequest, res) => 
 // ============================================================================
 
 // GET /api/notifications
-router.get('/notifications', requireAuth, async (req: AuthenticatedRequest, res) => {
+router.get('/notifications', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const user = req.user!;
     const result = await dbQuery(
       'SELECT * FROM shopit_notifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50',
-      [req.user.id]
+      [user.userId]
     );
 
-    const notifications = result.rows.map(row => ({
+    const notifications = result.rows.map((row: any) => ({
       id: row.id,
       userId: row.user_id,
       title: row.title,
@@ -1360,10 +1342,11 @@ router.get('/notifications', requireAuth, async (req: AuthenticatedRequest, res)
 });
 
 // PATCH /api/notifications/:id/read
-router.patch('/notifications/:id/read', requireAuth, async (req: AuthenticatedRequest, res) => {
+router.patch('/notifications/:id/read', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const user = req.user!;
     const { id } = req.params;
-    await dbQuery('UPDATE shopit_notifications SET is_read = true WHERE id = $1 AND user_id = $2', [id, req.user.id]);
+    await dbQuery('UPDATE shopit_notifications SET is_read = true WHERE id = $1 AND user_id = $2', [id, user.userId]);
     return res.json({ status: true, message: 'Notification marked as read.' });
   } catch (err: any) {
     return res.status(500).json({ status: false, message: err.message });
@@ -1375,16 +1358,17 @@ router.patch('/notifications/:id/read', requireAuth, async (req: AuthenticatedRe
 // ============================================================================
 
 // GET /api/commissions
-router.get('/commissions', requireAuth, async (req: AuthenticatedRequest, res) => {
+router.get('/commissions', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const user = req.user!;
     const result = await dbQuery(
       `SELECT * FROM shopit_commissions
        WHERE buyer_id = $1 OR seller_id = $1
        ORDER BY created_at DESC`,
-      [req.user.id]
+      [user.userId]
     );
 
-    const commissions = result.rows.map(row => ({
+    const commissions = result.rows.map((row: any) => ({
       id: row.id,
       buyerId: row.buyer_id,
       buyerName: row.buyer_name,
@@ -1407,8 +1391,9 @@ router.get('/commissions', requireAuth, async (req: AuthenticatedRequest, res) =
 });
 
 // POST /api/commissions
-router.post('/commissions', requireAuth, async (req: AuthenticatedRequest, res) => {
+router.post('/commissions', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const user = req.user!;
     const { sellerId, title, description, budget } = req.body;
     if (!sellerId || !title || !budget) {
       return res.status(400).json({ status: false, message: 'sellerId, title, and budget are required.' });
@@ -1425,7 +1410,7 @@ router.post('/commissions', requireAuth, async (req: AuthenticatedRequest, res) 
         id, buyer_id, buyer_name, seller_id, seller_shop_name,
         title, description, budget_kobo, budget_naira, status, created_at, updated_at
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', NOW(), NOW())`,
-      [commId, req.user.id, req.user.name, sellerId, shopName, title.trim(), description || '', budgetKobo, koboToNaira(budgetKobo)]
+      [commId, user.userId, user.name, sellerId, shopName, title.trim(), description || '', budgetKobo, koboToNaira(budgetKobo)]
     );
 
     return res.status(201).json({ status: true, commissionId: commId, message: 'Commission request submitted.' });

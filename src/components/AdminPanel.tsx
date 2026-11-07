@@ -51,6 +51,7 @@ import { EscrowReceiptModal } from './EscrowReceiptModal';
 
 export const AdminPanel: React.FC = () => {
   const {
+    currentUser,
     adminSubRole,
     setAdminSubRole,
     verificationRequests,
