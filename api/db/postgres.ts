@@ -276,6 +276,9 @@ export async function runMigration(): Promise<void> {
       delivery_area VARCHAR(255),
       pickup_point VARCHAR(255),
       auto_release_at TIMESTAMPTZ,
+      shipped_at TIMESTAMPTZ,
+      delivered_at TIMESTAMPTZ,
+      completed_at TIMESTAMPTZ,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );

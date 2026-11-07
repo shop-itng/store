@@ -914,6 +914,118 @@ router.patch('/orders/:id/status', requireAuth, async (req: AuthenticatedRequest
   }
 });
 
+/**
+ * Escrow Auto-Release Routine:
+ * Inspects all paid orders where the 5-day inspection window has elapsed (auto_release_at <= NOW()).
+ * Ensures no unresolved disputes are blocking the funds, then releases the pending funds to the sellers'
+ * available balances and marks the order completed in the double-entry ledger.
+ */
+export async function processEscrowAutoRelease(): Promise<{ releasedCount: number; orderIds: string[] }> {
+  try {
+    const eligibleOrders = await dbQuery(`
+      SELECT o.* FROM shopit_orders o
+      LEFT JOIN shopit_disputes d ON d.order_id = o.id AND d.status IN ('open', 'investigating')
+      WHERE o.status = 'paid'
+        AND o.auto_release_at IS NOT NULL
+        AND o.auto_release_at <= NOW()
+        AND d.id IS NULL
+    `);
+
+    const releasedIds: string[] = [];
+
+    for (const order of eligibleOrders.rows) {
+      const items = Array.isArray(order.items) ? order.items : [];
+      const sellerTotals: Record<string, number> = {};
+
+      for (const item of items) {
+        if (item.sellerId) {
+          const itemKobo = nairaToKobo(item.sellerPrice * item.quantity);
+          sellerTotals[item.sellerId] = (sellerTotals[item.sellerId] || 0) + itemKobo;
+        }
+      }
+
+      for (const [sId, amountKobo] of Object.entries(sellerTotals)) {
+        const wRes = await dbQuery('SELECT pending_balance_kobo, available_balance_kobo FROM shopit_wallets WHERE seller_id = $1', [sId]);
+        if (wRes.rows.length > 0) {
+          const currentPending = parseInt(wRes.rows[0].pending_balance_kobo || '0', 10);
+          const currentAvailable = parseInt(wRes.rows[0].available_balance_kobo || '0', 10);
+
+          const newPending = Math.max(0, currentPending - amountKobo);
+          const newAvailable = currentAvailable + amountKobo;
+
+          await dbQuery(
+            `UPDATE shopit_wallets
+             SET pending_balance_kobo = $1,
+                 available_balance_kobo = $2,
+                 pending_balance = $3,
+                 available_balance = $4,
+                 updated_at = NOW()
+             WHERE seller_id = $5`,
+            [newPending, newAvailable, koboToNaira(newPending), koboToNaira(newAvailable), sId]
+          );
+
+          const releaseId = `ESCROW-AUTO-${order.id}-${sId.slice(-4)}`;
+          await dbQuery(
+            `INSERT INTO shopit_ledger_entries (
+              id, wallet_id, type, amount, fee, balance_after, balance_type,
+              amount_kobo, fee_kobo, balance_after_kobo, description, reference, created_at
+            ) VALUES (
+              $1, $2, 'escrow_release', $3, 0, $4, 'available',
+              $5, 0, $6, $7, $8, NOW()
+            )`,
+            [
+              releaseId,
+              sId,
+              koboToNaira(amountKobo),
+              koboToNaira(newAvailable),
+              amountKobo,
+              newAvailable,
+              `5-Day Escrow auto-released for Order #${order.id}`,
+              order.payment_reference || order.id,
+            ]
+          );
+        }
+      }
+
+      // Mark order delivered / completed and clear auto_release_at
+      await dbQuery(
+        `UPDATE shopit_orders
+         SET status = 'completed',
+             auto_release_at = NULL,
+             completed_at = NOW(),
+             updated_at = NOW()
+         WHERE id = $1`,
+        [order.id]
+      );
+
+      const historyId = `osh_auto_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+      await dbQuery(
+        `INSERT INTO shopit_order_status_history (
+          id, order_id, previous_status, new_status, changed_by, notes, created_at
+        ) VALUES ($1, $2, 'paid', 'completed', 'escrow_auto_release_cron', 'Funds auto-released to seller after 5-day inspection period without dispute.', NOW())`,
+        [historyId, order.id]
+      );
+
+      releasedIds.push(order.id);
+    }
+
+    return { releasedCount: releasedIds.length, orderIds: releasedIds };
+  } catch (err: any) {
+    console.warn('[Escrow Auto-Release Error]:', err.message);
+    return { releasedCount: 0, orderIds: [] };
+  }
+}
+
+// POST /api/escrow/auto-release - Trigger auto-release scan (Admin or internal cron)
+router.post('/escrow/auto-release', async (_req, res) => {
+  const result = await processEscrowAutoRelease();
+  return res.json({
+    status: true,
+    message: `Escrow scan completed. ${result.releasedCount} orders auto-released.`,
+    ...result,
+  });
+});
+
 // ============================================================================
 // 5. WALLET & DOUBLE-ENTRY LEDGER API
 // ============================================================================

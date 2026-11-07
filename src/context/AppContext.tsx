@@ -2164,33 +2164,35 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return false;
     }
 
-    // Rule 4 & 6: Execute Paystack Transfers API (Test Mode)
-    const transferResult = executePaystackTransfer(payoutAccount, amount);
+    // Call server Paystack transfer endpoint with double-entry ledger synchronization
+    try {
+      const resp = await fetch('/api/paystack/transfer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          amount,
+          payoutAccountId: payoutAccount.id,
+          otpCode,
+          bankName: payoutAccount.bankName,
+          accountNumber: payoutAccount.accountNumber,
+          sellerId: currentSeller.id,
+        }),
+      });
 
-    // Rule 5: Append-only ledger debit
-    const now = new Date().toISOString();
-    const newTxn: LedgerEntry = {
-      id: `LEDGER-${Math.floor(100000 + Math.random() * 900000)}`,
-      walletId: currentSeller.id,
-      type: 'withdrawal',
-      amount,
-      fee,
-      balanceType: 'available',
-      balanceAfter: balances.availableBalance - totalDeduction,
-      description: `Paystack Transfer Payout · ${payoutAccount.bankName} (${payoutAccount.accountNumber})`,
-      reference: transferResult.transferCode,
-      payoutBank: payoutAccount.bankName,
-      payoutAccountNumber: payoutAccount.accountNumber,
-      payoutAccountName: payoutAccount.accountName,
-      transferCode: transferResult.transferCode,
-      createdAt: now,
-    };
+      const data = await resp.json();
+      if (!resp.ok || !data.status) {
+        notify(data.message || 'Withdrawal failed.', 'error');
+        return false;
+      }
 
-    setLedgerEntries(prev => [newTxn, ...prev]);
-    setActiveWithdrawalOtp(null);
-
-    notify(transferResult.message, 'success');
-    return true;
+      await fetchMarketplaceData();
+      setActiveWithdrawalOtp(null);
+      notify(data.message || `Transfer of ₦${amount.toLocaleString()} dispatched.`, 'success');
+      return true;
+    } catch (err: any) {
+      notify(`Transfer network error: ${err.message}`, 'error');
+      return false;
+    }
   };
 
   // Rule 4: Add Payout Account (Opay or Nigerian bank with Email Authorization OTP)
@@ -2233,43 +2235,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return false;
     }
 
-    // Rule 4: A new payout account waits 24 hours before it can be used
-    const coolingEndsAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
-    const newAccount: PayoutAccount = {
-      id: `payout_${Date.now()}`,
-      bankCode,
-      bankName,
-      accountNumber: accountNumber.trim(),
-      accountName: accountName.trim().toUpperCase(),
-      isVerified: true,
-      coolingPeriodEndsAt: coolingEndsAt,
-      createdAt: new Date().toISOString(),
-    };
+    try {
+      const resp = await fetch('/api/wallet/payout-account', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          bankCode,
+          bankName,
+          accountNumber: accountNumber.trim(),
+          accountName: accountName.trim().toUpperCase(),
+        }),
+      });
 
-    setWallets(prev => {
-      const currentW = prev[currentSeller.id] || {
-        sellerId: currentSeller.id,
-        pendingBalance: 0,
-        availableBalance: 0,
-        totalWithdrawn: 0,
-        isFrozen: false,
-        payoutAccounts: [],
-        ledger: [],
-        transactions: [],
-      };
+      const data = await resp.json();
+      if (!resp.ok || !data.status) {
+        notify(data.message || 'Failed to save payout account.', 'error');
+        return false;
+      }
 
-      return {
-        ...prev,
-        [currentSeller.id]: {
-          ...currentW,
-          payoutAccounts: [...currentW.payoutAccounts, newAccount],
-          activePayoutAccountId: newAccount.id,
-        },
-      };
-    });
-
-    notify(`Payout account ${bankName} (${accountNumber}) linked! 24-hr security cooling period active until tomorrow.`, 'success');
-    return true;
+      await fetchMarketplaceData();
+      notify(`Payout account ${bankName} (${accountNumber}) linked! 24-hr security cooling period active until tomorrow.`, 'success');
+      return true;
+    } catch (err: any) {
+      notify(`Failed to link payout account: ${err.message}`, 'error');
+      return false;
+    }
   };
 
   // Rule 5: Admin can freeze a wallet

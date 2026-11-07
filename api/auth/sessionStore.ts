@@ -24,19 +24,31 @@ const memoryLockouts = new Map<string, { count: number; lockedUntil: number }>()
 
 async function runKvCommand(command: string, ...args: any[]): Promise<any> {
   if (!KV_URL || !KV_TOKEN) return null;
-  const encodedArgs = args.map(a =>
-    encodeURIComponent(typeof a === 'object' ? JSON.stringify(a) : String(a))
-  );
-  const url = `${KV_URL.replace(/\/$/, '')}/${command}/${encodedArgs.join('/')}`;
-  const res = await fetch(url, {
-    method: 'GET',
-    headers: { Authorization: `Bearer ${KV_TOKEN}` },
-  });
-  if (!res.ok) {
-    throw new Error(`KV command failed with status ${res.status}`);
+  try {
+    const encodedArgs = args.map(a =>
+      encodeURIComponent(typeof a === 'object' ? JSON.stringify(a) : String(a))
+    );
+    const url = `${KV_URL.replace(/\/$/, '')}/${command}/${encodedArgs.join('/')}`;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 4000);
+
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${KV_TOKEN}` },
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+
+    if (!res.ok) {
+      console.warn(`[Upstash Redis] Command ${command} returned HTTP ${res.status}. Falling back to memory.`);
+      return null;
+    }
+    const json: any = await res.json();
+    return json.result;
+  } catch (err: any) {
+    console.warn(`[Upstash Redis Connection Warning] ${command} failed: ${err.message}. Safely falling back to memory.`);
+    return null;
   }
-  const json: any = await res.json();
-  return json.result;
 }
 
 const SESSION_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 days

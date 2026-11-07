@@ -50,16 +50,28 @@ const memoryReports = new Map<string, any>();
 // KV / Redis REST command helper
 async function runKvCommand(command: string, ...args: any[]): Promise<any> {
   if (!KV_URL || !KV_TOKEN) return null;
-  const url = `${KV_URL.replace(/\/$/, '')}/${command}/${args.map(a => encodeURIComponent(typeof a === 'object' ? JSON.stringify(a) : String(a))).join('/')}`;
-  const res = await fetch(url, {
-    method: 'GET',
-    headers: { Authorization: `Bearer ${KV_TOKEN}` },
-  });
-  if (!res.ok) {
-    throw new Error(`KV command failed with status ${res.status}`);
+  try {
+    const url = `${KV_URL.replace(/\/$/, '')}/${command}/${args.map(a => encodeURIComponent(typeof a === 'object' ? JSON.stringify(a) : String(a))).join('/')}`;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 4000);
+
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${KV_TOKEN}` },
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+
+    if (!res.ok) {
+      console.warn(`[Upstash Redis OTP] ${command} returned HTTP ${res.status}. Falling back gracefully.`);
+      return null;
+    }
+    const json: any = await res.json();
+    return json.result;
+  } catch (err: any) {
+    console.warn(`[Upstash Redis OTP Error] ${command}: ${err.message}. Safely falling back to memory/db.`);
+    return null;
   }
-  const json: any = await res.json();
-  return json.result;
 }
 
 // PostgreSQL Client Pool (lazy initialized if PG_URL is present)
