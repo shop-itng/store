@@ -46,26 +46,6 @@ export const INITIAL_PRODUCTS: Product[] = [];
 // Zero preset craft templates - sellers must take and upload their own product photos
 export const PRESET_CRAFT_TEMPLATES: any[] = [];
 
-// Designated Admin Moderator account for Adeyinka Joseph
-export const ADMIN_CREDENTIALS = {
-  name: 'Adeyinka Joseph',
-  email: 'joeadeyinka12@gmail.com',
-  password: 'shopitislit',
-  role: 'admin' as const,
-  adminSubRole: 'moderator' as const,
-};
-
-export const ROOT_MODERATOR_USER: User = {
-  id: 'admin_adeyinka_joseph',
-  name: 'Adeyinka Joseph',
-  email: 'joeadeyinka12@gmail.com',
-  role: 'admin',
-  adminSubRole: 'moderator',
-  isVerifiedEmail: true,
-  password: 'shopitislit',
-  savedDeliveryArea: 'Yaba',
-};
-
 export const VALID_COUPONS: Coupon[] = [
   {
     code: 'TEEDS',

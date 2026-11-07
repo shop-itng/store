@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
 import { UserRole } from '../types';
-import { ADMIN_CREDENTIALS } from '../data/mockData';
 import { NIGERIAN_STATES } from '../data/nigerianLocations';
 import {
   X,
@@ -214,42 +213,12 @@ export const AuthModal: React.FC = () => {
       if (res.ok && data.status && data.user) {
         matchedUser = data.user;
       } else {
-        // Fallback check for root admin in mock credentials if offline or migration delay
-        if (
-          cleanEmail === ADMIN_CREDENTIALS.email.toLowerCase() &&
-          cleanPass === ADMIN_CREDENTIALS.password
-        ) {
-          matchedUser = {
-            id: 'admin_adeyinka_joseph',
-            name: ADMIN_CREDENTIALS.name,
-            email: ADMIN_CREDENTIALS.email,
-            role: 'admin',
-            adminSubRole: 'moderator',
-            isVerifiedEmail: true,
-          };
-        } else {
-          notify(data.message || 'Invalid login credentials. Please check your email and password.', 'error');
-          return;
-        }
-      }
-    } catch (err: any) {
-      // Local fallback if offline
-      if (
-        cleanEmail === ADMIN_CREDENTIALS.email.toLowerCase() &&
-        cleanPass === ADMIN_CREDENTIALS.password
-      ) {
-        matchedUser = {
-          id: 'admin_adeyinka_joseph',
-          name: ADMIN_CREDENTIALS.name,
-          email: ADMIN_CREDENTIALS.email,
-          role: 'admin',
-          adminSubRole: 'moderator',
-          isVerifiedEmail: true,
-        };
-      } else {
-        notify('Unable to connect to database server. Please check your network.', 'error');
+        notify(data.message || 'Invalid login credentials. Please check your email and password.', 'error');
         return;
       }
+    } catch (err: any) {
+      notify('Unable to connect to authentication server. Please check your network.', 'error');
+      return;
     }
 
     if (!matchedUser) {
@@ -275,7 +244,7 @@ export const AuthModal: React.FC = () => {
     }
 
     // Known device - complete login
-    if (matchedUser.role === 'admin' || matchedUser.email?.toLowerCase() === ADMIN_CREDENTIALS.email.toLowerCase()) {
+    if (matchedUser.role === 'admin') {
       localStorage.setItem('shopit_admin_session_active', 'true');
     } else {
       localStorage.removeItem('shopit_admin_session_active');
@@ -296,7 +265,7 @@ export const AuthModal: React.FC = () => {
     }
 
     recordKnownDevice(cleanEmail, getDeviceId());
-    if (pendingNewDeviceUser.role === 'admin' || pendingNewDeviceUser.email?.toLowerCase() === ADMIN_CREDENTIALS.email.toLowerCase()) {
+    if (pendingNewDeviceUser.role === 'admin') {
       localStorage.setItem('shopit_admin_session_active', 'true');
     } else {
       localStorage.removeItem('shopit_admin_session_active');

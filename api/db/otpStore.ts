@@ -1,6 +1,4 @@
 import crypto from 'crypto';
-import fs from 'fs';
-import path from 'path';
 
 export interface StoredOtpRecord {
   email: string;
@@ -37,58 +35,17 @@ export function verifyOtpHash(enteredCode: string, storedHash: string): boolean 
 }
 
 // -------------------------------------------------------------
-// Database Adapters: Vercel KV / Upstash Redis, PostgreSQL, and Persistent File Store
+// Database Adapters: Vercel KV / Upstash Redis and PostgreSQL (Zero File System Dependencies)
 // -------------------------------------------------------------
 const KV_URL = (process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || '').trim();
 const KV_TOKEN = (process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || '').trim();
 const PG_URL = (process.env.POSTGRES_URL || process.env.DATABASE_URL || '').trim();
 
-// File store path for local development & warm serverless fallback
-const FILE_STORE_PATH = process.env.VERCEL
-  ? '/tmp/shopit_otp_db.json'
-  : path.resolve(process.cwd(), '.data', 'otp_db.json');
-
-function ensureFileStoreDir() {
-  try {
-    const dir = path.dirname(FILE_STORE_PATH);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-  } catch {}
-}
-
-export interface FileStoreSchema {
-  otps: Record<string, StoredOtpRecord>;
-  rateLimits: Record<string, number[]>;
-  payments: Record<string, any>;
-  reports: Record<string, any>;
-}
-
-function readFileStore(): FileStoreSchema {
-  try {
-    ensureFileStoreDir();
-    if (fs.existsSync(FILE_STORE_PATH)) {
-      const raw = fs.readFileSync(FILE_STORE_PATH, 'utf-8');
-      const parsed = JSON.parse(raw);
-      return {
-        otps: parsed.otps || {},
-        rateLimits: parsed.rateLimits || {},
-        payments: parsed.payments || {},
-        reports: parsed.reports || {},
-      };
-    }
-  } catch {}
-  return { otps: {}, rateLimits: {}, payments: {}, reports: {} };
-}
-
-function writeFileStore(data: FileStoreSchema) {
-  try {
-    ensureFileStoreDir();
-    fs.writeFileSync(FILE_STORE_PATH, JSON.stringify(data), 'utf-8');
-  } catch (err: any) {
-    console.warn('[OTP Store] Persistent file write warning:', err.message);
-  }
-}
+// In-memory ephemeral fallback maps for local development/test execution
+const memoryOtps = new Map<string, StoredOtpRecord>();
+const memoryRateLimits = new Map<string, number[]>();
+const memoryPayments = new Map<string, any>();
+const memoryReports = new Map<string, any>();
 
 // KV / Redis REST command helper
 async function runKvCommand(command: string, ...args: any[]): Promise<any> {
@@ -250,9 +207,8 @@ export async function checkRateLimit(
     }
   }
 
-  // 3. Fallback: Persistent File Store
-  const store = readFileStore();
-  const emailTimes = (store.rateLimits[emailKey] || []).filter(t => now - t < RATE_LIMIT_WINDOW_MS);
+  // 3. Fallback: In-memory store for local dev
+  const emailTimes = (memoryRateLimits.get(emailKey) || []).filter(t => now - t < RATE_LIMIT_WINDOW_MS);
   if (emailTimes.length >= MAX_EMAIL_REQUESTS) {
     return {
       allowed: false,
@@ -261,7 +217,7 @@ export async function checkRateLimit(
   }
 
   if (cleanDevice !== 'dev_unknown') {
-    const devTimes = (store.rateLimits[devKey] || []).filter(t => now - t < RATE_LIMIT_WINDOW_MS);
+    const devTimes = (memoryRateLimits.get(devKey) || []).filter(t => now - t < RATE_LIMIT_WINDOW_MS);
     if (devTimes.length >= MAX_DEVICE_REQUESTS) {
       return {
         allowed: false,
@@ -335,18 +291,16 @@ export async function recordRateLimit(email: string, deviceId?: string): Promise
     } catch {}
   }
 
-  // 3. Fallback
-  const store = readFileStore();
-  const emailTimes = (store.rateLimits[emailKey] || []).filter(t => now - t < RATE_LIMIT_WINDOW_MS);
+  // 3. Fallback: In-memory store
+  const emailTimes = (memoryRateLimits.get(emailKey) || []).filter(t => now - t < RATE_LIMIT_WINDOW_MS);
   emailTimes.push(now);
-  store.rateLimits[emailKey] = emailTimes;
+  memoryRateLimits.set(emailKey, emailTimes);
 
   if (cleanDevice !== 'dev_unknown') {
-    const devTimes = (store.rateLimits[devKey] || []).filter(t => now - t < RATE_LIMIT_WINDOW_MS);
+    const devTimes = (memoryRateLimits.get(devKey) || []).filter(t => now - t < RATE_LIMIT_WINDOW_MS);
     devTimes.push(now);
-    store.rateLimits[devKey] = devTimes;
+    memoryRateLimits.set(devKey, devTimes);
   }
-  writeFileStore(store);
 }
 
 /**
@@ -419,10 +373,8 @@ export async function saveHashedOtp(
     }
   }
 
-  // 3. Fallback
-  const store = readFileStore();
-  store.otps[key] = record;
-  writeFileStore(store);
+  // 3. Fallback: In-memory store
+  memoryOtps.set(key, record);
   return record;
 }
 
@@ -455,9 +407,8 @@ export async function getOtpRecord(email: string, purpose: string): Promise<Stor
     } catch {}
   }
 
-  // 3. Fallback
-  const store = readFileStore();
-  return store.otps[key] || null;
+  // 3. Fallback: In-memory store
+  return memoryOtps.get(key) || null;
 }
 
 /**
@@ -484,9 +435,7 @@ export async function updateOtpRecord(record: StoredOtpRecord): Promise<void> {
     } catch {}
   }
 
-  const store = readFileStore();
-  store.otps[key] = record;
-  writeFileStore(store);
+  memoryOtps.set(key, record);
 }
 
 /**
@@ -510,9 +459,7 @@ export async function deleteOtpRecord(email: string, purpose: string): Promise<v
     } catch {}
   }
 
-  const store = readFileStore();
-  delete store.otps[key];
-  writeFileStore(store);
+  memoryOtps.delete(key);
 }
 
 // -------------------------------------------------------------
@@ -573,9 +520,7 @@ export async function savePaymentRecord(record: PaymentRecord): Promise<void> {
     } catch {}
   }
 
-  const store = readFileStore();
-  store.payments[record.reference] = record;
-  writeFileStore(store);
+  memoryPayments.set(record.reference, record);
 }
 
 export async function getPaymentRecord(reference: string): Promise<PaymentRecord | null> {
@@ -610,8 +555,7 @@ export async function getPaymentRecord(reference: string): Promise<PaymentRecord
     } catch {}
   }
 
-  const store = readFileStore();
-  return store.payments[reference] || null;
+  return memoryPayments.get(reference) || null;
 }
 
 export async function getAllPaymentRecords(): Promise<PaymentRecord[]> {
@@ -638,8 +582,7 @@ export async function getAllPaymentRecords(): Promise<PaymentRecord[]> {
     } catch {}
   }
 
-  const store = readFileStore();
-  return Object.values(store.payments).sort(
+  return Array.from(memoryPayments.values()).sort(
     (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
   );
 }
@@ -687,9 +630,7 @@ export async function saveReportRecord(report: ReportRecord): Promise<void> {
     }
   }
 
-  const store = readFileStore();
-  store.reports[report.id] = report;
-  writeFileStore(store);
+  memoryReports.set(report.id, report);
 }
 
 export async function getAllReportRecords(): Promise<ReportRecord[]> {
@@ -714,8 +655,7 @@ export async function getAllReportRecords(): Promise<ReportRecord[]> {
     } catch {}
   }
 
-  const store = readFileStore();
-  return Object.values(store.reports).sort(
+  return Array.from(memoryReports.values()).sort(
     (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
   );
 }
@@ -742,18 +682,17 @@ export async function updateReportStatus(
     } catch {}
   }
 
-  const store = readFileStore();
-  if (store.reports[reportId]) {
-    store.reports[reportId].status = status;
+  const existingReport = memoryReports.get(reportId);
+  if (existingReport) {
+    existingReport.status = status;
     if (actionNote) {
-      store.reports[reportId].actionLogs = store.reports[reportId].actionLogs || [];
-      store.reports[reportId].actionLogs.push({
+      existingReport.actionLogs = existingReport.actionLogs || [];
+      existingReport.actionLogs.push({
         action: `Status changed to ${status}`,
         note: actionNote,
         timestamp: new Date().toISOString(),
       });
     }
-    writeFileStore(store);
   }
 }
 

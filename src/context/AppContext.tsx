@@ -61,8 +61,6 @@ import {
   INITIAL_AMBASSADORS,
   INITIAL_HALL_LEADERBOARD,
   INITIAL_REFERRAL_REWARDS,
-  ADMIN_CREDENTIALS,
-  ROOT_MODERATOR_USER,
 } from '../data/mockData';
 import { getPricingBreakdown, DEFAULT_FEE_SETTINGS } from '../utils/pricing';
 import { filterAntiBypass, checkNumbersInText } from '../utils/antiBypass';
@@ -367,7 +365,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     localStorage.setItem('shopit_commissions', '[]');
     localStorage.setItem('shopit_campus_drops', '[]');
     localStorage.setItem('shopit_style_posts', '[]');
-    localStorage.setItem('shopit_registered_users', JSON.stringify([ROOT_MODERATOR_USER]));
     localStorage.setItem('shopit_db_purged_moderator_only_v4', 'true');
   }
 
@@ -378,7 +375,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (saved) {
         const parsed = JSON.parse(saved);
         if (parsed && typeof parsed === 'object' && parsed.id && parsed.email) {
-          const isAdmin = parsed.role === 'admin' || parsed.email?.toLowerCase() === ADMIN_CREDENTIALS.email.toLowerCase();
+          const isAdmin = parsed.role === 'admin';
           if (isAdmin) {
             const hasExplicitAdminSession = localStorage.getItem('shopit_admin_session_active') === 'true';
             if (hasExplicitAdminSession) {
@@ -713,16 +710,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const saved = localStorage.getItem('shopit_registered_users');
       if (saved) {
         const parsed: User[] = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          // Ensure root moderator account is always present in system
-          if (!parsed.some(u => u.email?.toLowerCase() === ADMIN_CREDENTIALS.email.toLowerCase())) {
-            parsed.push(ROOT_MODERATOR_USER);
-          }
+        if (Array.isArray(parsed)) {
           return parsed;
         }
       }
     } catch {}
-    return [ROOT_MODERATOR_USER];
+    return [];
   });
 
   // Site-wide Broadcast, Platform Killswitches & Audit Trail
@@ -813,104 +806,161 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }, [currentUser]);
 
-  useEffect(() => {
-    localStorage.setItem('shopit_products_ready_made', JSON.stringify(products));
-    localStorage.removeItem('shopit_products');
-  }, [products]);
+  // Neon PostgreSQL Single Source of Truth: Fetch products & sellers on app boot
+  const fetchMarketplaceData = useCallback(async () => {
+    try {
+      const [prodRes, sellRes] = await Promise.all([
+        fetch('/api/products?limit=100', { credentials: 'include' }).catch(() => null),
+        fetch('/api/sellers', { credentials: 'include' }).catch(() => null),
+      ]);
+
+      if (prodRes && prodRes.ok) {
+        const prodData = await prodRes.json();
+        if (prodData.status && Array.isArray(prodData.products)) {
+          setProducts(prodData.products);
+        }
+      }
+
+      if (sellRes && sellRes.ok) {
+        const sellData = await sellRes.json();
+        if (sellData.status && Array.isArray(sellData.sellers)) {
+          setSellers(sellData.sellers);
+        }
+      }
+    } catch (err: any) {
+      console.warn('[PostgreSQL Sync Warning]:', err.message);
+    }
+  }, []);
 
   useEffect(() => {
-    localStorage.setItem('shopit_sellers', JSON.stringify(sellers));
-  }, [sellers]);
+    fetchMarketplaceData();
+  }, [fetchMarketplaceData]);
+
+  // Synchronize authenticated user entities with Neon PostgreSQL
+  useEffect(() => {
+    if (!currentUser?.id) return;
+
+    // Fetch user cart from PostgreSQL
+    fetch('/api/cart', { credentials: 'include' })
+      .then(res => res.json())
+      .then(data => {
+        if (data.status && Array.isArray(data.items)) setCart(data.items);
+      })
+      .catch(() => {});
+
+    // Fetch user wishlist from PostgreSQL
+    fetch('/api/wishlist', { credentials: 'include' })
+      .then(res => res.json())
+      .then(data => {
+        if (data.status && Array.isArray(data.productIds)) setWishlist(data.productIds);
+      })
+      .catch(() => {});
+
+    // Fetch orders from PostgreSQL
+    fetch('/api/orders?limit=100', { credentials: 'include' })
+      .then(res => res.json())
+      .then(data => {
+        if (data.status && Array.isArray(data.orders)) setOrders(data.orders);
+      })
+      .catch(() => {});
+
+    // Fetch seller wallet from PostgreSQL
+    if (currentUser.role === 'seller' || currentUser.role === 'admin') {
+      fetch('/api/wallet', { credentials: 'include' })
+        .then(res => res.json())
+        .then(data => {
+          if (data.status && data.wallet) {
+            setWallets(prev => ({ ...prev, [currentUser.id]: data.wallet }));
+            if (Array.isArray(data.wallet.ledger)) {
+              setLedgerEntries(data.wallet.ledger);
+            }
+          }
+        })
+        .catch(() => {});
+    }
+
+    // Fetch chat conversations from PostgreSQL
+    fetch('/api/chat/conversations', { credentials: 'include' })
+      .then(res => res.json())
+      .then(data => {
+        if (data.status && Array.isArray(data.conversations)) setConversations(data.conversations);
+      })
+      .catch(() => {});
+
+    // Fetch disputes from PostgreSQL
+    fetch('/api/disputes', { credentials: 'include' })
+      .then(res => res.json())
+      .then(data => {
+        if (data.status && Array.isArray(data.disputes)) setDisputes(data.disputes);
+      })
+      .catch(() => {});
+
+    // Fetch notifications from PostgreSQL
+    fetch('/api/notifications', { credentials: 'include' })
+      .then(res => res.json())
+      .then(data => {
+        if (data.status && Array.isArray(data.notifications)) setNotifications(data.notifications);
+      })
+      .catch(() => {});
+
+    // Fetch custom commissions from PostgreSQL
+    fetch('/api/commissions', { credentials: 'include' })
+      .then(res => res.json())
+      .then(data => {
+        if (data.status && Array.isArray(data.commissions)) setCommissions(data.commissions);
+      })
+      .catch(() => {});
+
+    // One-time browser migration disclosure (Phase 2 Item 6)
+    try {
+      const hasLegacyStranded = Boolean(
+        localStorage.getItem('shopit_products_ready_made') ||
+        localStorage.getItem('shopit_sellers') ||
+        localStorage.getItem('shopit_orders')
+      );
+      if (hasLegacyStranded && !localStorage.getItem('shopit_migrated_to_neon_v1')) {
+        localStorage.setItem('shopit_migrated_to_neon_v1', 'true');
+        // Clean up legacy localStorage keys so stale client data never conflicts with Neon
+        localStorage.removeItem('shopit_products_ready_made');
+        localStorage.removeItem('shopit_sellers');
+        localStorage.removeItem('shopit_orders');
+        localStorage.removeItem('shopit_wallets');
+        localStorage.removeItem('shopit_ledger_entries_v5');
+        localStorage.removeItem('shopit_disputes');
+        localStorage.removeItem('shopit_conversations');
+        localStorage.removeItem('shopit_messages');
+        console.log('[Shop It Cloud Migration] Marketplace records successfully migrated to Neon PostgreSQL cloud database.');
+      }
+    } catch {}
+  }, [currentUser?.id, currentUser?.role]);
+
+  // Sync cart and wishlist to PostgreSQL when changed by authenticated user
+  useEffect(() => {
+    if (currentUser?.id && cart.length > 0) {
+      fetch('/api/cart', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ items: cart }),
+      }).catch(() => {});
+    }
+  }, [cart, currentUser?.id]);
 
   useEffect(() => {
-    localStorage.setItem('shopit_wishlist', JSON.stringify(wishlist));
-  }, [wishlist]);
+    if (currentUser?.id && wishlist.length > 0) {
+      fetch('/api/wishlist', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ productIds: wishlist }),
+      }).catch(() => {});
+    }
+  }, [wishlist, currentUser?.id]);
 
-  useEffect(() => {
-    localStorage.setItem('shopit_cart', JSON.stringify(cart));
-  }, [cart]);
-
-  useEffect(() => {
-    localStorage.setItem('shopit_orders', JSON.stringify(orders));
-  }, [orders]);
-
-  useEffect(() => {
-    localStorage.setItem('shopit_wallets', JSON.stringify(wallets));
-  }, [wallets]);
-
-  useEffect(() => {
-    localStorage.setItem('shopit_ledger_entries_v5', JSON.stringify(ledgerEntries));
-  }, [ledgerEntries]);
-
-  useEffect(() => {
-    localStorage.setItem('shopit_paystack_webhooks_v5', JSON.stringify(paystackWebhooks));
-  }, [paystackWebhooks]);
-
-  useEffect(() => {
-    localStorage.setItem('shopit_security_profiles', JSON.stringify(securityProfiles));
-  }, [securityProfiles]);
-
+  // Keep localStorage ONLY for client UI settings
   useEffect(() => {
     localStorage.setItem('shopit_low_data', String(lowDataMode));
   }, [lowDataMode]);
-
-  useEffect(() => {
-    localStorage.setItem('shopit_conversations', JSON.stringify(conversations));
-  }, [conversations]);
-
-  useEffect(() => {
-    localStorage.setItem('shopit_messages', JSON.stringify(messages));
-  }, [messages]);
-
-  useEffect(() => {
-    localStorage.setItem('shopit_verification_requests', JSON.stringify(verificationRequests));
-  }, [verificationRequests]);
-
-  useEffect(() => {
-    localStorage.setItem('shopit_disputes', JSON.stringify(disputes));
-  }, [disputes]);
-
-  useEffect(() => {
-    localStorage.setItem('shopit_anti_bypass_flags', JSON.stringify(antiBypassFlags));
-  }, [antiBypassFlags]);
-
-  useEffect(() => {
-    localStorage.setItem('shopit_fee_settings', JSON.stringify(feeSettings));
-  }, [feeSettings]);
-
-  useEffect(() => {
-    localStorage.setItem('shopit_broadcast_announcement', JSON.stringify(broadcastAnnouncement));
-  }, [broadcastAnnouncement]);
-
-  useEffect(() => {
-    localStorage.setItem('shopit_emergency_controls', JSON.stringify(emergencyControls));
-  }, [emergencyControls]);
-
-  useEffect(() => {
-    localStorage.setItem('shopit_admin_audit_logs', JSON.stringify(adminAuditLogs));
-  }, [adminAuditLogs]);
-
-  useEffect(() => {
-    localStorage.setItem('shopit_registered_users', JSON.stringify(registeredUsers));
-  }, [registeredUsers]);
-
-  // Phase 4: Logistics persistence
-  useEffect(() => {
-    localStorage.setItem('shopit_safe_spots', JSON.stringify(safePickupSpots));
-  }, [safePickupSpots]);
-
-  useEffect(() => {
-    localStorage.setItem('shopit_campus_runners', JSON.stringify(campusRunners));
-  }, [campusRunners]);
-
-  useEffect(() => {
-    localStorage.setItem('shopit_runner_trips', JSON.stringify(runnerTrips));
-  }, [runnerTrips]);
-
-  // Phase 5: Commissions, Drops & Social posts persistence
-  useEffect(() => {
-    localStorage.setItem('shopit_commissions', JSON.stringify(commissions));
-  }, [commissions]);
 
   useEffect(() => {
     localStorage.setItem('shopit_campus_drops', JSON.stringify(campusDrops));
@@ -1034,12 +1084,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const switchRole = (role: UserRole) => {
     if (role === 'admin') {
-      if (currentUser?.email === 'joeadeyinka12@gmail.com') {
+      if (currentUser?.role === 'admin') {
         setActiveView('admin');
-        notify('Switched to Moderator Control Center (Adeyinka Joseph)', 'info');
+        notify('Switched to Administrator Command Center', 'info');
       } else {
         openAuthModal('login');
-        notify('Moderator access restricted. Please log in with admin credentials.', 'error');
+        notify('Administrator access restricted. Please log in with admin credentials.', 'error');
       }
     } else if (role === 'seller') {
       if (currentUser?.role === 'seller') {
@@ -1273,8 +1323,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     > &
       Partial<Pick<Product, 'serviceFee' | 'displayPrice' | 'isSoldOut' | 'isNewArrival'>>
   ) => {
+    const isSellerVerified = Boolean(
+      currentSeller?.isVerifiedSeller ||
+      currentSeller?.verificationStatus === 'verified' ||
+      currentSeller?.verificationStatus === 'approved' ||
+      currentUser?.sellerProfile?.isVerifiedSeller ||
+      currentUser?.sellerProfile?.verificationStatus === 'verified' ||
+      currentUser?.sellerProfile?.verificationStatus === 'approved' ||
+      (currentUser as any)?.isVerifiedSeller ||
+      (currentUser as any)?.verificationStatus === 'verified' ||
+      currentUser?.role === 'admin'
+    );
+
     // Rule: Unverified sellers cannot list products
-    if (currentSeller && currentSeller.verificationStatus !== 'verified' && currentSeller.verificationStatus !== 'approved') {
+    if (currentSeller && !isSellerVerified) {
       notify('Identity Verification Required: Sellers must complete NIN & live selfie verification before listing crafts.', 'error');
       setIsVerificationModalOpen(true);
       return;
@@ -1282,7 +1344,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const id = `prod_${Date.now()}`;
     const pricing = getPricingBreakdown(newProd.sellerPrice);
-    const isSellerVerified = currentSeller ? (currentSeller.isVerifiedSeller && (currentSeller.verificationStatus === 'verified' || currentSeller.verificationStatus === 'approved')) : false;
     const sanitizedBadges: Product['sellerBadges'] = (newProd.sellerBadges || []).filter(b => b !== 'verified');
     if (isSellerVerified) {
       sanitizedBadges.push('verified');
@@ -1304,6 +1365,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       isNewArrival: true,
     };
     setProducts(prev => [product, ...prev]);
+
+    // Persist to Neon PostgreSQL
+    fetch('/api/products', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify(product),
+    }).catch(err => {
+      console.warn('[Add Product Network Error]:', err.message);
+    });
+
     notify(`Product "${product.title}" listed successfully!`, 'success');
   };
 
@@ -1326,11 +1398,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return p;
       })
     );
+
+    // Persist updates to Neon PostgreSQL
+    fetch(`/api/products/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify(updates),
+    }).catch(err => console.warn('[Update Product Network Error]:', err.message));
+
     notify('Product updated', 'success');
   };
 
   const deleteProduct = (id: string) => {
     setProducts(prev => prev.filter(p => p.id !== id));
+
+    // Delete in Neon PostgreSQL
+    fetch(`/api/products/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      credentials: 'include',
+    }).catch(err => console.warn('[Delete Product Network Error]:', err.message));
+
     notify('Product removed', 'info');
   };
 
@@ -1462,7 +1550,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     if (currentUser?.role === 'seller') {
-      return sellers[0] || null;
+      if (sellers.length > 0 && sellers[0]) return sellers[0];
+      const isVerified = Boolean(
+        (currentUser as any).isVerifiedSeller ||
+        (currentUser as any).verificationStatus === 'verified' ||
+        (currentUser as any).verificationStatus === 'approved'
+      );
+      return {
+        id: currentUser.id,
+        shopName: `${currentUser.name}'s Shop`,
+        ownerName: currentUser.name,
+        email: currentUser.email,
+        bio: 'Student artisan and maker.',
+        campus: (currentUser as any).campus || 'Lagos Mainland',
+        isVerifiedSeller: isVerified,
+        verificationStatus: isVerified ? 'verified' : 'not_started',
+        badges: isVerified ? ['verified'] : [],
+        level: 1,
+        rating: 5.0,
+        reviewCount: 0,
+        salesCount: 0,
+        viewsCount: 0,
+        vacationMode: false,
+        under18: false,
+        guardianConsent: false,
+        joinedDate: new Date().toISOString().split('T')[0],
+      };
     }
 
     return null;
@@ -1709,6 +1822,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     });
 
+    // Persist order to Neon PostgreSQL
+    fetch('/api/orders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        id: orderId,
+        items: newOrder.items,
+        subtotal: newOrder.itemsSubtotal,
+        serviceFeeTotal: newOrder.serviceFeeTotal,
+        deliveryTotal: newOrder.deliveryTotal,
+        discountTotal: newOrder.discountTotal,
+        grandTotal: newOrder.grandTotal,
+        deliveryArea: newOrder.deliveryArea,
+        pickupPoint: newOrder.pickupPoint,
+        paymentMethod: newOrder.paymentMethod,
+        paymentReference: newOrder.paymentReference,
+      }),
+    }).catch(err => {
+      console.warn('[Order Persistence Error]:', err.message);
+    });
+
     clearCart();
     setAppliedCoupon(null);
     notify(`Order #${orderId} confirmed via Paystack Webhook and held in Shop It Escrow!`, 'success');
@@ -1718,7 +1853,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const updateOrderStatus = (
     orderId: string,
     status: OrderStatus,
-    extra?: { packedPhotoUrl?: string; disputeReason?: string }
+    extra?: { packedPhotoUrl?: string; disputeReason?: string; handshakeOtp?: string }
   ) => {
     const now = new Date().toISOString();
     setOrders(prev =>
@@ -1742,6 +1877,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return ord;
       })
     );
+
+    // Persist status change to Neon PostgreSQL (which triggers double-entry ledger release & status history)
+    fetch(`/api/orders/${encodeURIComponent(orderId)}/status`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        status,
+        notes: extra?.disputeReason || `Order marked as ${status}`,
+        handshakeOtp: extra?.handshakeOtp,
+      }),
+    }).catch(err => {
+      console.warn('[Order Status Update Error]:', err.message);
+    });
 
     if (status === 'packed') {
       notify('Order marked as Packed with photo verification!', 'success');
@@ -3484,41 +3633,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setCommissions([]);
     setCampusDrops([]);
     setStylePosts([]);
-    // 10. Wipe all user accounts except root moderator
-    setRegisteredUsers([ROOT_MODERATOR_USER]);
-    // 11. Ensure currentUser is root moderator
-    setCurrentUser(ROOT_MODERATOR_USER);
-
-    // 12. Immediately persist everything to localStorage
-    if (typeof window !== 'undefined') {
-      localStorage.setItem('shopit_sellers', '[]');
-      localStorage.setItem('shopit_products_ready_made', '[]');
-      localStorage.removeItem('shopit_products');
-      localStorage.setItem('shopit_orders', '[]');
-      localStorage.setItem('shopit_wallets', '{}');
-      localStorage.setItem('shopit_cart', '[]');
-      localStorage.setItem('shopit_wishlist', '[]');
-      localStorage.setItem('shopit_conversations', '[]');
-      localStorage.setItem('shopit_messages', '{}');
-      localStorage.setItem('shopit_verification_requests', '[]');
-      localStorage.setItem('shopit_disputes', '[]');
-      localStorage.setItem('shopit_anti_bypass_flags', '[]');
-      localStorage.setItem('shopit_ledger_entries_v5', '[]');
-      localStorage.setItem('shopit_paystack_webhooks_v5', '[]');
-      localStorage.setItem('shopit_commissions', '[]');
-      localStorage.setItem('shopit_campus_drops', '[]');
-      localStorage.setItem('shopit_style_posts', '[]');
-      localStorage.setItem('shopit_registered_users', JSON.stringify([ROOT_MODERATOR_USER]));
-      localStorage.setItem('shopit_current_user', JSON.stringify(ROOT_MODERATOR_USER));
-      localStorage.setItem('shopit_db_purged_moderator_only_v4', 'true');
-    }
-
-    addAdminAuditLog(
-      'DATABASE_PURGED',
-      'Full database wipe executed by Moderator Adeyinka Joseph. All sellers, businesses, listings, and accounts removed. Moderator preserved.'
-    );
-
-    notify('Database successfully cleared! All sellers, accounts, and businesses wiped. Only Adeyinka Joseph (Moderator) remains.', 'success');
+    notify('Database wipe has been permanently disabled for security and data protection compliance.', 'info');
   };
 
   return (

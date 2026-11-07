@@ -32,6 +32,31 @@ import {
   DATABASE_URL_ENV_NAME,
 } from './db/postgres.js';
 
+import cookieParser from 'cookie-parser';
+import {
+  createSession,
+  getSession,
+  destroySession,
+  rotateSession,
+  recordLoginFailure,
+  isAccountLocked,
+  clearLoginFailures,
+  logAuditEvent,
+  SESSION_COOKIE_NAME,
+} from './auth/sessionStore.js';
+import {
+  requireAuth,
+  requireRole,
+  requireAdmin,
+  requireModerator,
+  requireFinance,
+  requireSeller,
+  optionalAuth,
+  extractToken,
+  AuthenticatedRequest,
+} from './auth/middleware.js';
+import marketplaceRouter from './routes/marketplace.js';
+
 // Run database migrations on server boot
 runMigration().catch(err => {
   console.error('[PostgreSQL Startup Migration Error]:', err.message);
@@ -39,7 +64,10 @@ runMigration().catch(err => {
 
 const app = express();
 
-// Security headers middleware (Part 2 Item 9: CSP, HSTS, Permissions-Policy without breaking Paystack)
+// Enable cookie parser for httpOnly session cookies
+app.use(cookieParser());
+
+// Security headers middleware (CSP, HSTS, Permissions-Policy without breaking Paystack)
 app.use((_req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'SAMEORIGIN');
@@ -63,6 +91,28 @@ app.use(
     },
   })
 );
+
+// Strict CORS middleware ensuring credentials and allowed origins
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  const allowedOrigins = [
+    APP_URL,
+    'https://shop-itng-pied.vercel.app',
+    'http://localhost:3000',
+    'http://127.0.0.1:3000',
+  ];
+  const isAllowed = !origin || allowedOrigins.includes(origin) || origin.endsWith('.run.app') || origin.endsWith('.vercel.app');
+  if (isAllowed && origin) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+  }
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-session-token, x-paystack-signature');
+  if (req.method === 'OPTIONS') {
+    return res.status(204).end();
+  }
+  next();
+});
 
 // Backend secrets - loaded strictly from server environment secrets
 const PAYSTACK_SECRET_KEY = (process.env.PAYSTACK_SECRET_KEY || '').trim().replace(/^["']|["']$/g, '');
@@ -218,6 +268,9 @@ function calculateServerPrice(params: {
 // Router for all API routes - mounted at both /api and / to handle Vercel rewrite variations
 const router = express.Router();
 
+// Mount PostgreSQL marketplace domain routes (products, sellers, carts, wishlists, orders, wallets, chat, disputes, notifications, commissions)
+router.use(marketplaceRouter);
+
 // Health check endpoint (STEP 2 Item 7: checks Neon & Upstash, returns only OK or failing service, no secrets)
 router.get(['/health', '/api/health'], async (_req, res) => {
   const pgPing = await pingPostgres();
@@ -347,10 +400,29 @@ router.post(['/auth/register', '/auth/signup'], async (req, res) => {
       );
     }
 
+    // Create real server session
+    const { token } = await createSession({
+      userId,
+      email: cleanEmail,
+      name: cleanName,
+      role: userRole,
+      isVerifiedSeller: false,
+      mustChangePassword: false,
+    });
+
+    res.cookie(SESSION_COOKIE_NAME, token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production' || !!process.env.VERCEL,
+      sameSite: 'lax',
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+      path: '/',
+    });
+
     console.log(`[User Registration] Successfully created user in PostgreSQL: ${cleanEmail} (ID: ${userId}, Role: ${userRole})`);
 
     return res.status(201).json({
       status: true,
+      sessionToken: token,
       user: {
         id: savedUser.id,
         email: savedUser.email,
@@ -374,7 +446,7 @@ router.post(['/auth/register', '/auth/signup'], async (req, res) => {
   }
 });
 
-// POST /api/auth/login - Reads and verifies credentials from PostgreSQL
+// POST /api/auth/login - Reads and verifies credentials from PostgreSQL with lockout & session creation
 router.post('/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -385,6 +457,18 @@ router.post('/auth/login', async (req, res) => {
     const cleanEmail = String(email).trim().toLowerCase();
     const cleanPassword = String(password).trim();
 
+    // 1. Account Lockout Check
+    const lockout = await isAccountLocked(cleanEmail);
+    if (lockout.locked) {
+      return res.status(429).json({
+        status: false,
+        error: 'ACCOUNT_LOCKED',
+        message: `Account temporarily locked due to repeated failed logins. Please wait ${lockout.remainingSeconds} seconds before trying again.`,
+        lockoutRemainingSeconds: lockout.remainingSeconds,
+      });
+    }
+
+    // 2. Fetch user from PostgreSQL
     const userRes = await dbQuery(
       `SELECT u.*, s.id as seller_id, s.shop_name, s.verification_status, s.is_verified_seller, s.bio, s.campus
        FROM shopit_users u
@@ -394,27 +478,84 @@ router.post('/auth/login', async (req, res) => {
     );
 
     if (userRes.rows.length === 0) {
-      return res.status(401).json({ status: false, message: 'Invalid email or password.' });
+      const fail = await recordLoginFailure(cleanEmail);
+      if (fail.locked) {
+        return res.status(429).json({
+          status: false,
+          error: 'ACCOUNT_LOCKED',
+          message: 'Too many failed login attempts. Account temporarily locked for 15 minutes.',
+        });
+      }
+      return res.status(401).json({
+        status: false,
+        message: `Invalid email or password. ${fail.remainingAttempts} attempts remaining.`,
+      });
     }
 
     const userRow = userRes.rows[0];
 
-    // Verify password hash
+    // 3. Verify password hash using PBKDF2
     const isPasswordValid = verifyPassword(cleanPassword, userRow.password_hash);
     if (!isPasswordValid) {
-      return res.status(401).json({ status: false, message: 'Invalid email or password.' });
+      const fail = await recordLoginFailure(cleanEmail);
+      if (fail.locked) {
+        return res.status(429).json({
+          status: false,
+          error: 'ACCOUNT_LOCKED',
+          message: 'Too many failed login attempts. Account temporarily locked for 15 minutes.',
+        });
+      }
+      return res.status(401).json({
+        status: false,
+        message: `Invalid email or password. ${fail.remainingAttempts} attempts remaining.`,
+      });
     }
 
-    // Check account ban/suspension
+    // 4. Check account ban/suspension
     if (userRow.is_banned) {
       return res.status(403).json({
         status: false,
+        error: 'ACCOUNT_BANNED',
         message: userRow.ban_reason || 'This account has been suspended by an administrator.',
       });
     }
 
-    // Update last login in PostgreSQL
-    await dbQuery('UPDATE shopit_users SET last_login_at = NOW(), updated_at = NOW() WHERE id = $1', [userRow.id]);
+    // 5. Successful login: clear lockout tracking
+    await clearLoginFailures(cleanEmail);
+
+    // 6. Update last login in PostgreSQL
+    await dbQuery('UPDATE shopit_users SET last_login_at = NOW(), failed_login_attempts = 0, updated_at = NOW() WHERE id = $1', [userRow.id]);
+
+    // 7. Create server-side session in Redis
+    const { token } = await createSession({
+      userId: userRow.id,
+      email: userRow.email,
+      name: userRow.name,
+      role: userRow.role,
+      subRole: userRow.sub_role || 'superadmin',
+      sellerId: userRow.seller_id || undefined,
+      isVerifiedSeller: Boolean(userRow.is_verified_seller),
+      mustChangePassword: Boolean(userRow.must_change_password),
+    });
+
+    // 8. Set signed httpOnly secure cookie
+    res.cookie(SESSION_COOKIE_NAME, token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production' || !!process.env.VERCEL,
+      sameSite: 'lax',
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+      path: '/',
+    });
+
+    // 9. Log immutable security audit event
+    await logAuditEvent({
+      action: 'USER_LOGIN',
+      actor: { id: userRow.id, email: userRow.email, role: userRow.role },
+      target: { type: 'session', id: token.slice(-8) },
+      details: { role: userRow.role, mustChangePassword: userRow.must_change_password },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
 
     console.log(`[User Login] Verified login for user: ${cleanEmail} (Role: ${userRow.role})`);
 
@@ -444,12 +585,77 @@ router.post('/auth/login', async (req, res) => {
 
     return res.json({
       status: true,
+      sessionToken: token,
       user: sanitizedUser,
+      mustChangePassword: Boolean(userRow.must_change_password),
       message: 'Login successful.',
     });
   } catch (err: any) {
     console.error('[User Login Error]:', err.message);
     return res.status(500).json({ status: false, message: 'Database error processing login.' });
+  }
+});
+
+// POST /api/auth/logout - Destroys session in Redis & clears cookie
+router.post('/auth/logout', async (req: AuthenticatedRequest, res) => {
+  const token = req.cookies?.[SESSION_COOKIE_NAME] || req.headers.authorization?.replace(/^Bearer\s+/i, '') || req.headers['x-session-token'];
+  if (token && typeof token === 'string') {
+    await destroySession(token);
+  }
+  res.clearCookie(SESSION_COOKIE_NAME, { path: '/' });
+  return res.json({ status: true, message: 'Logged out successfully.' });
+});
+
+// POST /api/auth/change-password - Protected password change & initial admin password force change
+router.post('/auth/change-password', requireAuth, async (req: AuthenticatedRequest, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    if (!newPassword || String(newPassword).trim().length < 8) {
+      return res.status(400).json({ status: false, message: 'New password must be at least 8 characters long.' });
+    }
+
+    const cleanNew = String(newPassword).trim();
+    const userId = req.user!.userId;
+
+    const userRes = await dbQuery('SELECT password_hash, must_change_password FROM shopit_users WHERE id = $1', [userId]);
+    if (userRes.rows.length === 0) {
+      return res.status(404).json({ status: false, message: 'User not found.' });
+    }
+
+    const userRow = userRes.rows[0];
+
+    // If not initial forced change, verify existing password
+    if (!userRow.must_change_password) {
+      if (!currentPassword || !verifyPassword(String(currentPassword).trim(), userRow.password_hash)) {
+        return res.status(401).json({ status: false, message: 'Current password is incorrect.' });
+      }
+    }
+
+    const newHash = hashPassword(cleanNew);
+    await dbQuery(
+      'UPDATE shopit_users SET password_hash = $1, must_change_password = false, updated_at = NOW() WHERE id = $2',
+      [newHash, userId]
+    );
+
+    // Rotate session
+    if (req.sessionToken) {
+      await rotateSession(req.sessionToken, { mustChangePassword: false });
+    }
+
+    await logAuditEvent({
+      action: 'PASSWORD_CHANGED',
+      actor: { id: req.user!.userId, email: req.user!.email, role: req.user!.role },
+      target: { type: 'user', id: userId },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
+
+    return res.json({
+      status: true,
+      message: 'Password changed successfully.',
+    });
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: err.message });
   }
 });
 
@@ -685,11 +891,22 @@ router.post('/admin/users/:id/reset-password', async (req, res) => {
 // GET /api/auth/me - Syncs fresh user & seller verification profile directly from PostgreSQL
 router.get('/auth/me', async (req, res) => {
   try {
-    const email = req.query.email ? String(req.query.email).trim().toLowerCase() : '';
-    const userId = req.query.userId ? String(req.query.userId).trim() : '';
+    let email = req.query.email ? String(req.query.email).trim().toLowerCase() : '';
+    let userId = req.query.userId ? String(req.query.userId).trim() : '';
 
     if (!email && !userId) {
-      return res.status(400).json({ status: false, message: 'email or userId is required' });
+      const token = extractToken(req);
+      if (token) {
+        const session = await getSession(token);
+        if (session) {
+          userId = session.userId;
+          email = session.email.toLowerCase();
+        }
+      }
+    }
+
+    if (!email && !userId) {
+      return res.status(401).json({ status: false, message: 'Authentication required or email/userId required.' });
     }
 
     const query = `
@@ -841,12 +1058,14 @@ router.post('/admin/sellers/:id/verify', async (req, res) => {
     }
 
     // Also update shopit_verifications if any
-    await dbQuery(
-      `UPDATE shopit_verifications
-       SET status = $1, reviewed_at = NOW(), updated_at = NOW()
-       WHERE seller_id = $2 OR user_id = $2`,
-      [status, id]
-    );
+    try {
+      await dbQuery(
+        `UPDATE shopit_verifications
+         SET status = $1, reviewed_at = NOW()
+         WHERE seller_id = $2`,
+        [status, id]
+      );
+    } catch {}
 
     console.log(`[Admin Governance] Toggled seller verification in PostgreSQL for ${id}: ${isVerified}`);
     return res.json({
@@ -860,14 +1079,12 @@ router.post('/admin/sellers/:id/verify', async (req, res) => {
   }
 });
 
-router.post('/admin/users/wipe-non-admins', async (_req, res) => {
-  try {
-    await dbQuery("DELETE FROM shopit_users WHERE role != 'admin' AND email != 'joeadeyinka12@gmail.com'");
-    console.log('[Admin Governance] Wiped non-admin accounts from PostgreSQL.');
-    return res.json({ status: true, message: 'All non-admin accounts wiped from database.' });
-  } catch (err: any) {
-    return res.status(500).json({ status: false, message: err.message });
-  }
+router.all('/admin/users/wipe-non-admins', (_req, res) => {
+  return res.status(410).json({
+    status: false,
+    error: 'ENDPOINT_DISABLED',
+    message: 'This destructive endpoint has been permanently disabled for safety and security.',
+  });
 });
 
 // GET /api/admin/metrics - Live counts and database health (STEP 2 ITEM 6)

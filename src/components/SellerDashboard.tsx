@@ -49,6 +49,7 @@ export const SellerDashboard: React.FC = () => {
     closeVerificationModal,
     updateOrderStatus,
     notify,
+    currentUser,
   } = useApp();
 
   const [dashboardTab, setDashboardTab] = useState<'inventory' | 'orders' | 'wallet'>('inventory');

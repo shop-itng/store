@@ -352,7 +352,7 @@ export const AdminPanel: React.FC = () => {
               Moderator Command Center
             </span>
             <span className="px-2.5 py-0.5 rounded-md bg-[#18181B] text-[#9FE870] border border-[#27272A] text-[11px] font-bold">
-              Adeyinka Joseph (Admin)
+              {currentUser?.name || 'Administrator'} ({currentUser?.role === 'admin' ? 'Admin' : 'Staff'})
             </span>
           </div>
           <h1 className="text-xl sm:text-2xl font-black text-white mt-2">
@@ -996,7 +996,7 @@ export const AdminPanel: React.FC = () => {
                   </thead>
                   <tbody className="divide-y divide-stone-100">
                     {dbUsers.map(user => {
-                      const isMasterAdmin = user.role === 'admin' || user.email === 'joeadeyinka12@gmail.com';
+                      const isMasterAdmin = user.role === 'admin';
 
                       const formatDateTime = (dateStr?: string | null) => {
                         if (!dateStr) return 'Never';
@@ -2297,7 +2297,7 @@ export const AdminPanel: React.FC = () => {
                     <span className="truncate opacity-90">{broadcastForm.message || 'Broadcast message description will appear here.'}</span>
                   </div>
                   <span className="text-[10px] opacity-75 shrink-0 hidden md:inline">
-                    By Adeyinka Joseph (Moderator)
+                    By {currentUser?.name || 'System Moderator'}
                   </span>
                 </div>
               </div>
@@ -2432,26 +2432,19 @@ export const AdminPanel: React.FC = () => {
               </div>
 
               {/* Killswitch 4: Nuclear Database Wipe */}
-              <div className="p-4 rounded-2xl border-2 border-red-300 bg-red-50/60 space-y-3">
+              <div className="p-4 rounded-2xl border border-stone-200 bg-stone-50/80 space-y-3">
                 <div className="flex items-center justify-between">
-                  <div className="w-9 h-9 rounded-xl bg-red-600 text-white flex items-center justify-center">
-                    <Trash2 className="w-5 h-5" />
+                  <div className="w-9 h-9 rounded-xl bg-emerald-600 text-white flex items-center justify-center">
+                    <ShieldCheck className="w-5 h-5" />
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setClearDbConfirmText('');
-                      setIsClearDbModalOpen(true);
-                    }}
-                    className="px-3 py-1 rounded-xl text-xs font-black transition-all border bg-red-600 hover:bg-red-700 text-white border-red-700 shadow-xs active:scale-95"
-                  >
-                    WIPE DB
-                  </button>
+                  <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-emerald-100 text-emerald-800 border border-emerald-200">
+                    PROTECTED
+                  </span>
                 </div>
                 <div>
-                  <h4 className="text-sm font-bold text-red-950">Nuclear Database Wipe</h4>
-                  <p className="text-[11px] text-red-700 mt-1 leading-relaxed">
-                    Instantly wipes all sellers, shops, products, and buyer accounts, leaving only Adeyinka Joseph (Moderator).
+                  <h4 className="text-sm font-bold text-stone-900">PostgreSQL Data Protection</h4>
+                  <p className="text-[11px] text-stone-600 mt-1 leading-relaxed">
+                    Production data integrity enforced. Destructive purge operations are permanently disabled. All transactions are logged to PostgreSQL audit records.
                   </p>
                 </div>
               </div>
@@ -2467,7 +2460,7 @@ export const AdminPanel: React.FC = () => {
                   <span>Moderator Action Security Audit Trail</span>
                 </h3>
                 <p className="text-xs text-stone-500 mt-0.5">
-                  Chronological, non-editable audit trail of high-power actions executed by Adeyinka Joseph.
+                  Chronological, non-editable audit trail of high-power actions executed by system administrators.
                 </p>
               </div>
               <span className="text-xs font-mono font-semibold text-emerald-800 bg-emerald-50 px-2.5 py-1 rounded-lg border border-emerald-200">
@@ -3242,7 +3235,7 @@ export const AdminPanel: React.FC = () => {
                 <li><strong className="text-stone-800 dark:text-stone-200">User Accounts:</strong> All non-moderator accounts removed.</li>
                 <li><strong className="text-stone-800 dark:text-stone-200">Orders & Wallets:</strong> All transactions, escrows, and balances cleared.</li>
                 <li className="text-emerald-700 dark:text-emerald-400 font-bold">
-                  ✓ Protected: Adeyinka Joseph (joeadeyinka12@gmail.com) is preserved as the sole Moderator.
+                  ✓ Protected: System Administrator accounts configured in PostgreSQL are preserved.
                 </li>
               </ul>
             </div>

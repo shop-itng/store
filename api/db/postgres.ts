@@ -12,20 +12,37 @@ let activePool: any = null;
 let isPgMem = false;
 let migrationCompleted = false;
 
-// Password Hashing using PBKDF2 with SHA-512 and unique salt
+// Password Hashing using PBKDF2 with SHA-256 and 600,000 iterations + 32-byte unique salt
 export function hashPassword(password: string): string {
-  const salt = crypto.randomBytes(16).toString('hex');
-  const hash = crypto.pbkdf2Sync(password, salt, 100000, 64, 'sha512').toString('hex');
-  return `${salt}:${hash}`;
+  const salt = crypto.randomBytes(32).toString('hex');
+  const hash = crypto.pbkdf2Sync(password, salt, 600000, 32, 'sha256').toString('hex');
+  return `pbkdf2_sha256$600000$${salt}$${hash}`;
 }
 
 export function verifyPassword(password: string, storedHash: string): boolean {
   try {
-    const parts = storedHash.split(':');
-    if (parts.length !== 2) return false;
-    const [salt, expectedHash] = parts;
-    const computed = crypto.pbkdf2Sync(password, salt, 100000, 64, 'sha512').toString('hex');
-    return crypto.timingSafeEqual(Buffer.from(computed), Buffer.from(expectedHash));
+    if (!storedHash || typeof storedHash !== 'string') return false;
+
+    // Standard PBKDF2-SHA256 format: pbkdf2_sha256$iterations$salt$hash
+    if (storedHash.startsWith('pbkdf2_sha256$')) {
+      const parts = storedHash.split('$');
+      if (parts.length !== 4) return false;
+      const iterations = parseInt(parts[1], 10);
+      const salt = parts[2];
+      const expectedHash = parts[3];
+      const computed = crypto.pbkdf2Sync(password, salt, iterations, 32, 'sha256').toString('hex');
+      return crypto.timingSafeEqual(Buffer.from(computed), Buffer.from(expectedHash));
+    }
+
+    // Backward compatibility for legacy salt:hash (PBKDF2 SHA-512, 100,000 iterations)
+    const legacyParts = storedHash.split(':');
+    if (legacyParts.length === 2) {
+      const [salt, expectedHash] = legacyParts;
+      const computed = crypto.pbkdf2Sync(password, salt, 100000, 64, 'sha512').toString('hex');
+      return crypto.timingSafeEqual(Buffer.from(computed), Buffer.from(expectedHash));
+    }
+
+    return false;
   } catch {
     return false;
   }
@@ -386,9 +403,90 @@ export async function runMigration(): Promise<void> {
     );
 
     CREATE INDEX IF NOT EXISTS idx_shopit_chat_conv ON shopit_chat_messages (conversation_id, created_at ASC);
+
+    -- 13. Audit Logs Table (Immutable security event logging)
+    CREATE TABLE IF NOT EXISTS shopit_audit_logs (
+      id VARCHAR(64) PRIMARY KEY,
+      action VARCHAR(100) NOT NULL,
+      actor_id VARCHAR(64),
+      actor_email VARCHAR(255),
+      actor_role VARCHAR(50),
+      target_type VARCHAR(100),
+      target_id VARCHAR(255),
+      details JSONB DEFAULT '{}'::jsonb,
+      ip_address VARCHAR(100),
+      user_agent TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_shopit_audit_action ON shopit_audit_logs (action);
+    CREATE INDEX IF NOT EXISTS idx_shopit_audit_actor ON shopit_audit_logs (actor_email);
+    CREATE INDEX IF NOT EXISTS idx_shopit_audit_created ON shopit_audit_logs (created_at DESC);
+
+    -- 14. Order Status History Table
+    CREATE TABLE IF NOT EXISTS shopit_order_status_history (
+      id VARCHAR(64) PRIMARY KEY,
+      order_id VARCHAR(64) NOT NULL,
+      previous_status VARCHAR(50),
+      new_status VARCHAR(50) NOT NULL,
+      changed_by VARCHAR(64),
+      notes TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_shopit_osh_order ON shopit_order_status_history (order_id, created_at ASC);
+
+    -- 15. User Carts Table
+    CREATE TABLE IF NOT EXISTS shopit_carts (
+      user_id VARCHAR(64) PRIMARY KEY,
+      items JSONB NOT NULL DEFAULT '[]'::jsonb,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    -- 16. User Wishlists Table
+    CREATE TABLE IF NOT EXISTS shopit_wishlists (
+      user_id VARCHAR(64) PRIMARY KEY,
+      product_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    -- 17. Notifications Table
+    CREATE TABLE IF NOT EXISTS shopit_notifications (
+      id VARCHAR(64) PRIMARY KEY,
+      user_id VARCHAR(64) NOT NULL,
+      title VARCHAR(255) NOT NULL,
+      message TEXT NOT NULL,
+      type VARCHAR(50) DEFAULT 'info',
+      is_read BOOLEAN NOT NULL DEFAULT false,
+      link VARCHAR(255),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_shopit_notif_user ON shopit_notifications (user_id, created_at DESC);
+
+    -- 18. Custom Craft Commissions Table
+    CREATE TABLE IF NOT EXISTS shopit_commissions (
+      id VARCHAR(64) PRIMARY KEY,
+      buyer_id VARCHAR(64) NOT NULL,
+      buyer_name VARCHAR(255),
+      seller_id VARCHAR(64) NOT NULL,
+      seller_shop_name VARCHAR(255),
+      title VARCHAR(255) NOT NULL,
+      description TEXT,
+      budget_kobo BIGINT NOT NULL,
+      budget_naira NUMERIC(12,2) NOT NULL,
+      status VARCHAR(50) NOT NULL DEFAULT 'pending',
+      milestones JSONB DEFAULT '[]'::jsonb,
+      reference VARCHAR(255),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_shopit_comm_buyer ON shopit_commissions (buyer_id);
+    CREATE INDEX IF NOT EXISTS idx_shopit_comm_seller ON shopit_commissions (seller_id);
   `;
 
-  // Execute migration in separate statements or batch
+  // Execute migration statements
   const statements = migrationSql
     .split(';')
     .map(s => s.trim())
@@ -402,32 +500,73 @@ export async function runMigration(): Promise<void> {
     }
   }
 
-  // Ensure Root Admin Account exists in PostgreSQL
-  const adminEmail = 'joeadeyinka12@gmail.com';
-  const existingAdmin = await pool.query(
-    'SELECT id, email FROM shopit_users WHERE LOWER(email) = LOWER($1)',
-    [adminEmail]
-  );
+  // Gracefully alter existing tables to ensure security & integer kobo columns exist
+  const alterStatements = [
+    'ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT false;',
+    'ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS sub_role VARCHAR(50) DEFAULT \'superadmin\';',
+    'ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS failed_login_attempts INTEGER DEFAULT 0;',
+    'ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS locked_until TIMESTAMPTZ;',
+    'ALTER TABLE shopit_wallets ADD COLUMN IF NOT EXISTS pending_balance_kobo BIGINT NOT NULL DEFAULT 0;',
+    'ALTER TABLE shopit_wallets ADD COLUMN IF NOT EXISTS available_balance_kobo BIGINT NOT NULL DEFAULT 0;',
+    'ALTER TABLE shopit_wallets ADD COLUMN IF NOT EXISTS total_withdrawn_kobo BIGINT NOT NULL DEFAULT 0;',
+    'ALTER TABLE shopit_ledger_entries ADD COLUMN IF NOT EXISTS amount_kobo BIGINT;',
+    'ALTER TABLE shopit_ledger_entries ADD COLUMN IF NOT EXISTS fee_kobo BIGINT DEFAULT 0;',
+    'ALTER TABLE shopit_ledger_entries ADD COLUMN IF NOT EXISTS balance_after_kobo BIGINT;',
+    'ALTER TABLE shopit_ledger_entries ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(255);',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS subtotal_kobo BIGINT;',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS grand_total_kobo BIGINT;',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS service_fee_kobo BIGINT;',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS delivery_fee_kobo BIGINT;',
+  ];
+  for (const stmt of alterStatements) {
+    try {
+      await pool.query(stmt);
+    } catch {}
+  }
 
-  if (existingAdmin.rows.length === 0) {
-    const defaultAdminPass = 'Moderator2026!';
-    const passwordHash = hashPassword(defaultAdminPass);
-    await pool.query(
-      `INSERT INTO shopit_users (
-        id, email, name, password_hash, role, is_verified_email, created_at, updated_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())`,
-      [
-        'admin_root_adeyinka',
-        adminEmail,
-        'Adeyinka Joseph (Admin)',
-        passwordHash,
-        'admin',
-        true,
-      ]
-    );
-    console.log(`[Database Migration] Root Admin user created in PostgreSQL: ${adminEmail}`);
+  // Create First Administrator strictly from server environment secrets
+  const adminEmail = (process.env.ADMIN_EMAIL || '').trim().toLowerCase();
+  const adminInitialPassword = (process.env.ADMIN_INITIAL_PASSWORD || '').trim();
+
+  if (adminEmail && adminInitialPassword) {
+    try {
+      const existingAdmin = await pool.query(
+        'SELECT id, email, role FROM shopit_users WHERE LOWER(email) = LOWER($1)',
+        [adminEmail]
+      );
+
+      if (existingAdmin.rows.length === 0) {
+        const passwordHash = hashPassword(adminInitialPassword);
+        const adminId = 'admin_' + crypto.randomBytes(8).toString('hex');
+        await pool.query(
+          `INSERT INTO shopit_users (
+            id, email, name, password_hash, role, sub_role, is_verified_email, must_change_password, created_at, updated_at
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())`,
+          [
+            adminId,
+            adminEmail,
+            'Administrator',
+            passwordHash,
+            'admin',
+            'superadmin',
+            true,
+            true, // Force password change at first login
+          ]
+        );
+        console.log(`[Admin Setup] Initial administrator account provisioned in PostgreSQL from ADMIN_EMAIL.`);
+      } else {
+        // Ensure role is admin
+        if (existingAdmin.rows[0].role !== 'admin') {
+          await pool.query('UPDATE shopit_users SET role = $1 WHERE id = $2', ['admin', existingAdmin.rows[0].id]);
+        }
+      }
+    } catch (adminErr: any) {
+      console.error('[Admin Setup Error]:', adminErr.message);
+    }
+  } else {
+    console.log('[Admin Setup] Notice: ADMIN_EMAIL and ADMIN_INITIAL_PASSWORD environment variables are not set in environment.');
   }
 
   migrationCompleted = true;
-  console.log('[Database Migration] All tables and indexes successfully created in PostgreSQL.');
+  console.log('[Database Migration] All tables, audit logs, and security schemas successfully verified in PostgreSQL.');
 }

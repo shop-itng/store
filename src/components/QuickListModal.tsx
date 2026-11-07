@@ -42,6 +42,11 @@ export const QuickListModal: React.FC = () => {
     currentSeller?.verificationStatus === 'verified' ||
     currentSeller?.verificationStatus === 'approved' ||
     currentSeller?.badges?.includes('verified') ||
+    currentUser?.sellerProfile?.isVerifiedSeller ||
+    currentUser?.sellerProfile?.verificationStatus === 'verified' ||
+    currentUser?.sellerProfile?.verificationStatus === 'approved' ||
+    (currentUser as any)?.isVerifiedSeller ||
+    (currentUser as any)?.verificationStatus === 'verified' ||
     currentUser?.role === 'admin'
   );
 
