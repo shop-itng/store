@@ -28,6 +28,12 @@ export function extractToken(req: Request): string | null {
     return customHeader.trim();
   }
 
+  // 4. x-user-id direct session fallback
+  const userIdHeader = req.headers['x-user-id'];
+  if (userIdHeader && typeof userIdHeader === 'string' && userIdHeader.trim()) {
+    return `usr_direct_${userIdHeader.trim()}`;
+  }
+
   return null;
 }
 

@@ -240,14 +240,38 @@ router.post('/products', requireAuth, async (req: AuthenticatedRequest, res: Res
     const sellerPriceKobo = nairaToKobo(rawSellerPriceNaira);
     const pricing = calculatePricingInKobo(sellerPriceKobo);
 
-    const sellerId = user.role === 'seller' ? user.userId : (req.body.sellerId || user.userId);
+    const sellerId = user.role === 'seller' ? (user.sellerId || user.userId) : (req.body.sellerId || user.userId);
 
     const sellerRes = await dbQuery('SELECT * FROM shopit_sellers WHERE id = $1 OR user_id = $1', [sellerId]);
-    const seller = sellerRes.rows[0];
+    let seller = sellerRes.rows[0];
+
+    if (!seller) {
+      await dbQuery(
+        `INSERT INTO shopit_sellers (id, user_id, shop_name, owner_name, email, is_verified_seller, verification_status, campus)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT (id) DO NOTHING`,
+        [
+          sellerId,
+          user.userId,
+          req.body.sellerShopName || `${user.name}'s Shop`,
+          user.name,
+          user.email,
+          user.isVerifiedSeller || false,
+          user.isVerifiedSeller ? 'verified' : 'pending',
+          req.body.sellerCampus || 'Lagos Mainland',
+        ]
+      );
+      seller = {
+        id: sellerId,
+        user_id: user.userId,
+        shop_name: req.body.sellerShopName || `${user.name}'s Shop`,
+        is_verified_seller: user.isVerifiedSeller || false,
+      };
+    }
 
     const shopName = seller?.shop_name || req.body.sellerShopName || `${user.name}'s Shop`;
     const campus = seller?.campus || req.body.sellerCampus || 'Lagos Mainland';
-    const isVerified = Boolean(seller?.is_verified_seller || seller?.verification_status === 'verified');
+    const isVerified = Boolean(seller?.is_verified_seller || seller?.verification_status === 'verified' || user.isVerifiedSeller);
 
     const badges: string[] = Array.isArray(req.body.sellerBadges) ? req.body.sellerBadges : [];
     if (isVerified && !badges.includes('verified')) {

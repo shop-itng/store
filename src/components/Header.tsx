@@ -145,35 +145,43 @@ export const Header: React.FC = () => {
             <ShieldCheck className="w-4 h-4 text-[#9FE870] stroke-[2.5]" />
             <span>Track Orders</span>
           </button>
+
+          {/* Sell a Product Menu Link */}
+          <button
+            onClick={() => {
+              if (!currentUser) {
+                openAuthModal('seller_register');
+              } else {
+                openQuickListModal();
+              }
+            }}
+            className="flex items-center gap-1.5 transition-colors hover:text-[#FF6B00] dark:hover:text-[#FF6B00] text-sm font-bold text-[#FF6B00]"
+            title="List handmade crafts in 60 seconds"
+          >
+            <span className="w-2 h-2 rounded-full bg-[#FF6B00] animate-pulse" />
+            <span>Sell a Product</span>
+          </button>
         </nav>
 
         {/* Zone 3: Actions (Responsive for mobile & desktop) */}
         <div className="flex items-center gap-1.5 sm:gap-3 shrink-0">
-          {/* Quick List Button (Only for registered sellers) or Buy Items Button for Shoppers (Tablet & Desktop) */}
-          {currentUser?.role === 'seller' ? (
-            <button
-              onClick={openQuickListModal}
-              className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 sm:px-3.5 sm:py-2 bg-[#FF6B00] hover:bg-[#FF7A1A] text-[#111111] border-2 border-[#111111] dark:border-stone-800 text-xs sm:text-sm font-black rounded-xl shadow-[0_2.5px_0_#111111] dark:shadow-none transition-all active:translate-y-0.5"
-              title="List an item in 60 seconds"
-            >
-              <span className="w-4 h-4 rounded-full bg-[#9FE870] text-[#111111] flex items-center justify-center text-xs font-black">
-                +
-              </span>
-              <span>Sell Product</span>
-            </button>
-          ) : (
-            <button
-              onClick={() => {
-                setActiveView('catalog');
-                window.scrollTo({ top: 0, behavior: 'smooth' });
-              }}
-              className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 sm:px-3.5 sm:py-2 bg-[#9FE870] hover:bg-[#AEF083] text-[#111111] border-2 border-[#111111] dark:border-stone-800 text-xs sm:text-sm font-black rounded-xl shadow-[0_2.5px_0_#111111] dark:shadow-none transition-all active:translate-y-0.5"
-              title="Browse and buy crafts"
-            >
-              <ShoppingBag className="w-4 h-4 text-[#111111]" />
-              <span>Buy Items</span>
-            </button>
-          )}
+          {/* Universal Sell Product Button */}
+          <button
+            onClick={() => {
+              if (!currentUser) {
+                openAuthModal('seller_register');
+              } else {
+                openQuickListModal();
+              }
+            }}
+            className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 sm:px-3.5 sm:py-2 bg-[#FF6B00] hover:bg-[#FF7A1A] text-[#111111] border-2 border-[#111111] dark:border-stone-800 text-xs sm:text-sm font-black rounded-xl shadow-[0_2.5px_0_#111111] dark:shadow-none transition-all active:translate-y-0.5"
+            title="List a craft in 60 seconds"
+          >
+            <span className="w-4 h-4 rounded-full bg-[#9FE870] text-[#111111] flex items-center justify-center text-xs font-black">
+              +
+            </span>
+            <span>Sell Product</span>
+          </button>
 
           {/* Theme Switcher Toggle Button (Tablet & Desktop, mobile has it in top bar) */}
           <button

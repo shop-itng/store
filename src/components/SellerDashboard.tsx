@@ -282,9 +282,7 @@ export const SellerDashboard: React.FC = () => {
           <button
             onClick={() => {
               if (!isVerified) {
-                notify('Identity Verification Required: Sellers must complete NIN & live selfie verification before listing crafts.', 'error');
-                setIsVerifModalOpen(true);
-                return;
+                notify('Notice: Complete your NIN identity verification before your first bank withdrawal.', 'info');
               }
               resetForm();
               setIsAddModalOpen(true);
@@ -306,12 +304,8 @@ export const SellerDashboard: React.FC = () => {
         productCount={sellerProducts.length}
         onOpenVerification={() => setIsVerifModalOpen(true)}
         onOpenAddProduct={() => {
-          if (!isVerified) {
-            setIsVerifModalOpen(true);
-          } else {
-            resetForm();
-            setIsAddModalOpen(true);
-          }
+          resetForm();
+          setIsAddModalOpen(true);
         }}
         onOpenWallet={() => setDashboardTab('wallet')}
       />

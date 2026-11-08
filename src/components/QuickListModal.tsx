@@ -123,10 +123,7 @@ export const QuickListModal: React.FC = () => {
     e.preventDefault();
 
     if (!isSellerVerified) {
-      notify('Identity verification required: Complete your NIN and selfie check before listing crafts.', 'error');
-      closeQuickListModal();
-      openVerificationModal();
-      return;
+      notify('Craft published! Complete your NIN identity verification anytime before requesting bank withdrawals.', 'info');
     }
 
     if (!imageUrl) {

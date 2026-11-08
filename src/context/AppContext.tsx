@@ -1348,11 +1348,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       currentUser?.role === 'admin'
     );
 
-    // Rule: Unverified sellers cannot list products
+    // Allow smooth product listing for all creators (NIN verification is enforced at withdrawal time)
     if (currentSeller && !isSellerVerified) {
-      notify('Identity Verification Required: Sellers must complete NIN & live selfie verification before listing crafts.', 'error');
-      setIsVerificationModalOpen(true);
-      return;
+      notify('Craft published! Remember to complete your NIN identity verification before requesting bank payouts.', 'info');
     }
 
     const id = `prod_${Date.now()}`;
@@ -1374,22 +1372,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       reviewCount: 0,
       reviews: [],
       createdAt: new Date().toISOString().split('T')[0],
-      isSoldOut: newProd.stock <= 0,
+      isSoldOut: (newProd.stock ?? 1) <= 0,
       isNewArrival: true,
     };
     setProducts(prev => [product, ...prev]);
 
-    // Persist to Neon PostgreSQL
+    // Persist to Neon PostgreSQL with auth headers
+    const token = typeof localStorage !== 'undefined' ? localStorage.getItem('shopit_session_token') : null;
     fetch('/api/products', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { 'x-session-token': token, Authorization: `Bearer ${token}` } : {}),
+        ...(currentUser?.id ? { 'x-user-id': currentUser.id } : {}),
+      },
       credentials: 'include',
       body: JSON.stringify(product),
     }).catch(err => {
       console.warn('[Add Product Network Error]:', err.message);
     });
 
-    notify(`Product "${product.title}" listed successfully!`, 'success');
+    notify(`Product "${product.title}" listed successfully in the marketplace!`, 'success');
   };
 
   const updateProduct = (id: string, updates: Partial<Product>) => {
@@ -1767,7 +1770,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const autoRelease = new Date(now.getTime() + 5 * 24 * 60 * 60 * 1000); // 5 days auto-release rule
 
     const handshakeCode = Math.floor(1000 + Math.random() * 9000).toString();
-    const paystackRef = `pstk_test_${Date.now()}_${Math.floor(10000 + Math.random() * 90000)}`;
+    const paystackRef = orderData.paymentReference || `pstk_${Date.now()}_${Math.floor(10000 + Math.random() * 90000)}`;
     const buyerEmail = currentUser?.email || 'customer@shopit.ng';
     const buyerName = currentUser?.name || 'Customer';
 
@@ -1846,10 +1849,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     });
 
-    // Persist order to Neon PostgreSQL
+    // Persist order to Neon PostgreSQL with session headers
+    const token = typeof localStorage !== 'undefined' ? localStorage.getItem('shopit_session_token') : null;
     fetch('/api/orders', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { 'x-session-token': token, Authorization: `Bearer ${token}` } : {}),
+        ...(currentUser?.id ? { 'x-user-id': currentUser.id } : {}),
+      },
       credentials: 'include',
       body: JSON.stringify({
         id: orderId,

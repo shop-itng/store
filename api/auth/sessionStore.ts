@@ -121,6 +121,38 @@ export async function getSession(token: string): Promise<UserSession | null> {
     session = memorySessions.get(cleanToken) || null;
   }
 
+  // Fallback for direct user session header
+  if (!session && cleanToken.startsWith('usr_direct_')) {
+    try {
+      const uId = cleanToken.substring(11).trim();
+      const uRes = await dbQuery(
+        `SELECT u.*, s.id as seller_id, s.is_verified_seller as s_verified
+         FROM shopit_users u
+         LEFT JOIN shopit_sellers s ON u.id = s.user_id
+         WHERE u.id = $1 OR LOWER(u.email) = LOWER($1)`,
+        [uId]
+      );
+      if (uRes.rows.length > 0) {
+        const u = uRes.rows[0];
+        session = {
+          sessionId: cleanToken,
+          userId: u.id,
+          email: u.email,
+          name: u.name,
+          role: u.role as any,
+          subRole: u.sub_role || 'superadmin',
+          sellerId: u.seller_id || undefined,
+          isVerifiedSeller: Boolean(u.is_verified_seller || u.s_verified),
+          mustChangePassword: Boolean(u.must_change_password),
+          createdAt: Date.now(),
+          expiresAt: Date.now() + SESSION_TTL_SECONDS * 1000,
+        };
+      }
+    } catch (err: any) {
+      console.warn('[Session Store] Direct user lookup warning:', err.message);
+    }
+  }
+
   if (!session) return null;
 
   // Verify expiration

@@ -202,20 +202,29 @@ export async function runMigration(): Promise<void> {
     CREATE TABLE IF NOT EXISTS shopit_verifications (
       id VARCHAR(64) PRIMARY KEY,
       seller_id VARCHAR(64) NOT NULL,
+      user_id VARCHAR(64),
       shop_name VARCHAR(255),
       owner_name VARCHAR(255),
       id_type VARCHAR(100),
+      document_type VARCHAR(100),
       id_number_masked VARCHAR(100),
+      full_nin_last4 VARCHAR(10),
+      nin_last4 VARCHAR(10),
       id_hash VARCHAR(255),
+      document_url TEXT,
+      selfie_url TEXT,
       under_18 BOOLEAN DEFAULT false,
       guardian_name VARCHAR(255),
       guardian_phone VARCHAR(50),
       status VARCHAR(50) NOT NULL DEFAULT 'pending',
+      notes TEXT,
       rejection_reason TEXT,
       admin_notes TEXT,
       reviewed_by VARCHAR(255),
       reviewed_at TIMESTAMPTZ,
-      submitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      submitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
     CREATE INDEX IF NOT EXISTS idx_shopit_verif_seller ON shopit_verifications (seller_id);
@@ -534,6 +543,8 @@ export async function runMigration(): Promise<void> {
     'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS document_url TEXT;',
     'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS selfie_url TEXT;',
     'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS notes TEXT;',
+    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS full_nin_last4 VARCHAR(10);',
+    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS nin_last4 VARCHAR(10);',
     'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();',
     'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();',
   ];
