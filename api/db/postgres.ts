@@ -48,10 +48,21 @@ export function verifyPassword(password: string, storedHash: string): boolean {
   }
 }
 
+export function getDatabaseUrl(): string {
+  return (
+    process.env.DATABASE_URL ||
+    process.env.POSTGRES_URL ||
+    process.env.POSTGRES_PRISMA_URL ||
+    process.env.POSTGRES_URL_NON_POOLING ||
+    process.env.NEON_DATABASE_URL ||
+    ''
+  ).trim();
+}
+
 export async function getPool(): Promise<any> {
   if (activePool) return activePool;
 
-  const dbUrl = (process.env.DATABASE_URL || process.env.POSTGRES_URL || '').trim();
+  const dbUrl = getDatabaseUrl();
 
   if (dbUrl) {
     try {
@@ -59,11 +70,12 @@ export async function getPool(): Promise<any> {
       activePool = new Pool({
         connectionString: dbUrl,
         max: 10,
-        ssl: dbUrl.includes('localhost') ? false : { rejectUnauthorized: false },
+        ssl: dbUrl.includes('localhost') || dbUrl.includes('127.0.0.1') ? false : { rejectUnauthorized: false },
         idleTimeoutMillis: 30000,
         connectionTimeoutMillis: 10000,
       });
       isPgMem = false;
+      console.log('[Database] Connected to external PostgreSQL database.');
       return activePool;
     } catch (err: any) {
       console.error('[Database Pool Init Error]', err.message);
@@ -104,17 +116,18 @@ export async function query(text: string, params?: any[]): Promise<any> {
   }
 }
 
-export async function pingPostgres(): Promise<{ ok: boolean; provider: string; error?: string }> {
+export async function pingPostgres(): Promise<{ ok: boolean; provider: string; isPgMem?: boolean; error?: string }> {
   try {
     const pool = await getPool();
     const res = await pool.query('SELECT 1 AS alive');
     const isAlive = res?.rows?.[0]?.alive === 1;
     return {
       ok: isAlive,
+      isPgMem,
       provider: isPgMem ? 'pg-mem (local dev)' : 'Neon PostgreSQL (DATABASE_URL)',
     };
   } catch (err: any) {
-    return { ok: false, provider: 'Neon PostgreSQL', error: err.message };
+    return { ok: false, isPgMem, provider: 'Neon PostgreSQL', error: err.message };
   }
 }
 

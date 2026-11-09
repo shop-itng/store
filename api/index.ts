@@ -29,6 +29,7 @@ import {
   pingPostgres,
   pingRedis,
   runMigration,
+  getDatabaseUrl,
   DATABASE_URL_ENV_NAME,
 } from './db/postgres.js';
 
@@ -1158,11 +1159,13 @@ router.get('/admin/metrics', async (_req, res) => {
         pendingVerifications: parseInt(verifStats.rows[0].pending_verifications || '0', 10),
       },
       database: {
-        neon: pgPing.ok,
+        neon: pgPing.ok && !pgPing.isPgMem,
+        isPgMem: Boolean(pgPing.isPgMem),
         redis: redisPing.ok,
         provider: pgPing.provider,
-        databaseUrlConfigured: Boolean(process.env.DATABASE_URL || process.env.POSTGRES_URL),
-        redisConfigured: Boolean(process.env.KV_REST_API_URL),
+        databaseUrlConfigured: Boolean(getDatabaseUrl()),
+        redisConfigured: Boolean(process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL),
+        configuredDbEnvVar: getDatabaseUrl() ? 'Configured' : 'Missing (DATABASE_URL)',
       },
     });
   } catch (err: any) {

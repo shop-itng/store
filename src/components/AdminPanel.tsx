@@ -271,10 +271,12 @@ export const AdminPanel: React.FC = () => {
     };
     database: {
       neon: boolean;
+      isPgMem?: boolean;
       redis: boolean;
       provider: string;
       databaseUrlConfigured: boolean;
       redisConfigured: boolean;
+      configuredDbEnvVar?: string;
     };
   } | null>(null);
   const [loadingMetrics, setLoadingMetrics] = useState(false);
@@ -446,10 +448,12 @@ export const AdminPanel: React.FC = () => {
               <span className={`px-2.5 py-1 rounded-full text-xs font-bold border flex items-center gap-1.5 ${
                 metricsData?.database?.neon
                   ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
+                  : metricsData?.database?.isPgMem
+                  ? 'bg-amber-50 text-amber-800 border-amber-300'
                   : 'bg-red-50 text-red-800 border-red-300'
               }`}>
-                <span className={`w-2 h-2 rounded-full ${metricsData?.database?.neon ? 'bg-emerald-500' : 'bg-red-500'}`} />
-                Neon Postgres: {metricsData?.database?.neon ? 'Connected (Live)' : 'Disconnected'}
+                <span className={`w-2 h-2 rounded-full ${metricsData?.database?.neon ? 'bg-emerald-500' : metricsData?.database?.isPgMem ? 'bg-amber-500' : 'bg-red-500'}`} />
+                PostgreSQL: {metricsData?.database?.neon ? 'Neon (Cloud Live)' : metricsData?.database?.isPgMem ? 'In-Memory (Local Dev)' : 'Disconnected'}
               </span>
 
               <span className={`px-2.5 py-1 rounded-full text-xs font-bold border flex items-center gap-1.5 ${
@@ -458,7 +462,7 @@ export const AdminPanel: React.FC = () => {
                   : 'bg-stone-100 text-stone-700 border-stone-300'
               }`}>
                 <span className={`w-2 h-2 rounded-full ${metricsData?.database?.redis ? 'bg-emerald-500' : 'bg-stone-400'}`} />
-                Upstash Redis: {metricsData?.database?.redis ? 'Connected (Live)' : 'Standby / Local Cache'}
+                Upstash Redis: {metricsData?.database?.redis ? 'Connected (Live)' : 'Standby / Memory'}
               </span>
             </div>
           </div>
