@@ -107,6 +107,13 @@ export async function getPool(): Promise<any> {
 
 export async function query(text: string, params?: any[]): Promise<any> {
   const pool = await getPool();
+  if (!migrationCompleted) {
+    try {
+      await runMigration();
+    } catch (migErr: any) {
+      console.warn('[Query Migration Await Warning]:', migErr.message);
+    }
+  }
   try {
     return await pool.query(text, params);
   } catch (err: any) {
@@ -151,18 +158,22 @@ export async function pingRedis(): Promise<{ ok: boolean; error?: string }> {
   }
 }
 
+let migrationPromise: Promise<void> | null = null;
+
 export async function runMigration(): Promise<void> {
   if (migrationCompleted) return;
+  if (migrationPromise) return migrationPromise;
 
-  const pool = await getPool();
+  migrationPromise = (async () => {
+    const pool = await getPool();
 
-  console.log('[Database Migration] Running schema migration on PostgreSQL...');
+    console.log('[Database Migration] Running schema migration on PostgreSQL...');
 
-  const migrationSql = `
-    -- 1. Users Table
-    CREATE TABLE IF NOT EXISTS shopit_users (
-      id VARCHAR(64) PRIMARY KEY,
-      email VARCHAR(255) UNIQUE NOT NULL,
+    const migrationSql = `
+      -- 1. Users Table
+      CREATE TABLE IF NOT EXISTS shopit_users (
+        id VARCHAR(64) PRIMARY KEY,
+        email VARCHAR(255) UNIQUE NOT NULL,
       name VARCHAR(255) NOT NULL,
       password_hash VARCHAR(255) NOT NULL,
       role VARCHAR(32) NOT NULL DEFAULT 'buyer',
@@ -610,6 +621,9 @@ export async function runMigration(): Promise<void> {
     console.log('[Admin Setup] Notice: ADMIN_EMAIL and ADMIN_INITIAL_PASSWORD environment variables are not set in environment.');
   }
 
-  migrationCompleted = true;
-  console.log('[Database Migration] All tables, audit logs, and security schemas successfully verified in PostgreSQL.');
+    migrationCompleted = true;
+    console.log('[Database Migration] All tables, audit logs, and security schemas successfully verified in PostgreSQL.');
+  })();
+
+  return migrationPromise;
 }

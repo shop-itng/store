@@ -2994,7 +2994,7 @@ router.get('/verification/admin/queue', async (_req, res) => {
     const dbRes = await dbQuery(`
       SELECT v.*, s.shop_name as seller_shop_name, s.owner_name as seller_owner_name, s.email as seller_email
       FROM shopit_verifications v
-      LEFT JOIN shopit_sellers s ON v.seller_id = s.id OR v.user_id = s.user_id
+      LEFT JOIN shopit_sellers s ON (s.id = v.seller_id OR s.user_id = v.seller_id)
       ORDER BY v.submitted_at DESC
       LIMIT 100
     `);
