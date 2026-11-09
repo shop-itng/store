@@ -806,13 +806,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }, [currentUser]);
 
-  // Neon PostgreSQL Single Source of Truth: Fetch products, sellers, and verification queue on app boot
+  // Neon PostgreSQL Single Source of Truth: Fetch products, sellers, verification queue, and accounts on app boot
   const fetchMarketplaceData = useCallback(async () => {
     try {
-      const [prodRes, sellRes, verifRes] = await Promise.all([
+      const [prodRes, sellRes, verifRes, usersRes] = await Promise.all([
         fetch('/api/products?limit=100', { credentials: 'include' }).catch(() => null),
         fetch('/api/sellers', { credentials: 'include' }).catch(() => null),
         fetch('/api/verification/admin/queue', { credentials: 'include' }).catch(() => null),
+        fetch('/api/admin/users?limit=100', { credentials: 'include' }).catch(() => null),
       ]);
 
       if (prodRes && prodRes.ok) {
@@ -833,6 +834,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const verifData = await verifRes.json();
         if (verifData.status && Array.isArray(verifData.queue)) {
           setVerificationRequests(verifData.queue);
+        }
+      }
+
+      if (usersRes && usersRes.ok) {
+        const usersData = await usersRes.json();
+        if (usersData.status && Array.isArray(usersData.users)) {
+          setRegisteredUsers(usersData.users);
+          try {
+            localStorage.setItem('shopit_registered_users', JSON.stringify(usersData.users));
+          } catch {}
         }
       }
     } catch (err: any) {
@@ -1123,19 +1134,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
     setCurrentUser(newUser);
 
-    // Save in registered users list if has password and not already stored
-    if ((userData as any).password) {
-      try {
-        const regStr = localStorage.getItem('shopit_registered_users');
-        const regList: any[] = regStr ? JSON.parse(regStr) : [];
-        if (!regList.some(u => u.email.toLowerCase() === newUser.email.toLowerCase())) {
-          regList.push({ ...newUser, password: (userData as any).password });
-          localStorage.setItem('shopit_registered_users', JSON.stringify(regList));
-          setRegisteredUsers(regList);
-        }
-      } catch (err) {
-        // ignore
+    // Update registeredUsers list state
+    setRegisteredUsers(prev => {
+      const exists = prev.some(u => u.id === newUser.id || u.email.toLowerCase() === newUser.email.toLowerCase());
+      if (exists) {
+        return prev.map(u => (u.id === newUser.id || u.email.toLowerCase() === newUser.email.toLowerCase() ? { ...u, ...newUser } : u));
       }
+      return [newUser, ...prev];
+    });
+
+    try {
+      const regStr = localStorage.getItem('shopit_registered_users');
+      const regList: any[] = regStr ? JSON.parse(regStr) : [];
+      if (!regList.some(u => u.email.toLowerCase() === newUser.email.toLowerCase())) {
+        regList.push(newUser);
+        localStorage.setItem('shopit_registered_users', JSON.stringify(regList));
+      }
+    } catch (err) {
+      // ignore
     }
 
     notify(`Welcome back, ${newUser.name}!`, 'success');
@@ -1310,6 +1326,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       setCurrentUser(serverUser);
       localStorage.setItem('shopit_current_user', JSON.stringify(serverUser));
+
+      setRegisteredUsers(prev => {
+        const exists = prev.some(u => u.id === serverUser.id || u.email.toLowerCase() === serverUser.email.toLowerCase());
+        if (exists) {
+          return prev.map(u => (u.id === serverUser.id || u.email.toLowerCase() === serverUser.email.toLowerCase() ? { ...u, ...serverUser } : u));
+        }
+        return [serverUser, ...prev];
+      });
 
       sendTransactionalEmail(serverUser.email, 'welcome', {
         name: serverUser.name || sellerData.shopName,

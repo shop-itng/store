@@ -865,15 +865,15 @@ export const AdminPanel: React.FC = () => {
             <div className="p-4 bg-white rounded-xl border border-stone-200 shadow-2xs">
               <span className="text-xs text-stone-500 font-medium">Registered Accounts</span>
               <p className="text-xl sm:text-2xl font-bold font-mono-numbers text-stone-900 mt-1">
-                {registeredUsers.length}
+                {metricsData ? metricsData.metrics.totalUsers : (dbUsersTotal || registeredUsers.length)}
               </p>
-              <span className="text-[11px] text-stone-500">Live platform accounts</span>
+              <span className="text-[11px] text-stone-500">Live platform accounts in Neon</span>
             </div>
 
             <div className="p-4 bg-white rounded-xl border border-stone-200 shadow-2xs">
               <span className="text-xs text-stone-500 font-medium">Youth Sellers</span>
               <p className="text-xl sm:text-2xl font-bold font-mono-numbers text-[#f95700] mt-1">
-                {registeredUsers.filter(u => u.role === 'seller').length}
+                {metricsData ? metricsData.metrics.totalSellers : registeredUsers.filter(u => u.role === 'seller').length}
               </p>
               <span className="text-[11px] text-stone-500">Store owners</span>
             </div>
@@ -881,7 +881,7 @@ export const AdminPanel: React.FC = () => {
             <div className="p-4 bg-white rounded-xl border border-stone-200 shadow-2xs">
               <span className="text-xs text-stone-500 font-medium">Campus Shoppers</span>
               <p className="text-xl sm:text-2xl font-bold font-mono-numbers text-blue-600 mt-1">
-                {registeredUsers.filter(u => u.role === 'buyer').length}
+                {metricsData ? metricsData.metrics.totalBuyers : registeredUsers.filter(u => u.role === 'buyer').length}
               </p>
               <span className="text-[11px] text-stone-500">Buyer profiles</span>
             </div>
