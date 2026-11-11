@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { getPool, query as dbQuery } from './postgres.js';
 
 export interface StoredOtpRecord {
   email: string;
@@ -39,7 +40,6 @@ export function verifyOtpHash(enteredCode: string, storedHash: string): boolean 
 // -------------------------------------------------------------
 const KV_URL = (process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || '').trim();
 const KV_TOKEN = (process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || '').trim();
-const PG_URL = (process.env.POSTGRES_URL || process.env.DATABASE_URL || '').trim();
 
 // In-memory ephemeral fallback maps for local development/test execution
 const memoryOtps = new Map<string, StoredOtpRecord>();
@@ -47,17 +47,22 @@ const memoryRateLimits = new Map<string, number[]>();
 const memoryPayments = new Map<string, any>();
 const memoryReports = new Map<string, any>();
 
-// KV / Redis REST command helper
+// KV / Redis REST command helper (uses POST array format for full JSON safety and zero truncation)
 async function runKvCommand(command: string, ...args: any[]): Promise<any> {
   if (!KV_URL || !KV_TOKEN) return null;
   try {
-    const url = `${KV_URL.replace(/\/$/, '')}/${command}/${args.map(a => encodeURIComponent(typeof a === 'object' ? JSON.stringify(a) : String(a))).join('/')}`;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 4000);
+    const commandPayload = [command.toUpperCase(), ...args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a)))];
+    const url = KV_URL.replace(/\/$/, '');
 
     const res = await fetch(url, {
-      method: 'GET',
-      headers: { Authorization: `Bearer ${KV_TOKEN}` },
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${KV_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(commandPayload),
       signal: controller.signal,
     });
     clearTimeout(timeout);
@@ -74,66 +79,13 @@ async function runKvCommand(command: string, ...args: any[]): Promise<any> {
   }
 }
 
-// PostgreSQL Client Pool (lazy initialized if PG_URL is present)
-let pgPool: any = null;
-let pgTableInitialized = false;
-
+// Shared PostgreSQL Client Pool from centralized postgres.ts
 async function getPgPool() {
-  if (!PG_URL) return null;
-  if (!pgPool) {
-    try {
-      // @ts-ignore
-      const { Pool } = await import('pg');
-      pgPool = new Pool({ connectionString: PG_URL, max: 5 });
-    } catch {
-      return null;
-    }
+  try {
+    return await getPool();
+  } catch {
+    return null;
   }
-  if (!pgTableInitialized && pgPool) {
-    try {
-      await pgPool.query(`
-        CREATE TABLE IF NOT EXISTS shopit_otps (
-          key VARCHAR(255) PRIMARY KEY,
-          data JSONB NOT NULL,
-          expires_at BIGINT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS shopit_rate_limits (
-          key VARCHAR(255) PRIMARY KEY,
-          timestamps JSONB NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS shopit_payments (
-          reference VARCHAR(255) PRIMARY KEY,
-          order_id VARCHAR(255),
-          amount_kobo BIGINT,
-          amount_naira NUMERIC,
-          currency VARCHAR(10) DEFAULT 'NGN',
-          channel VARCHAR(50),
-          status VARCHAR(50),
-          webhook_received BOOLEAN DEFAULT FALSE,
-          customer_email VARCHAR(255),
-          data JSONB,
-          created_at TIMESTAMPTZ DEFAULT NOW(),
-          updated_at TIMESTAMPTZ DEFAULT NOW()
-        );
-        CREATE TABLE IF NOT EXISTS shopit_reports (
-          id VARCHAR(255) PRIMARY KEY,
-          target_type VARCHAR(50) NOT NULL,
-          target_id VARCHAR(255) NOT NULL,
-          target_title VARCHAR(255),
-          reporter_email VARCHAR(255),
-          reason VARCHAR(255) NOT NULL,
-          details TEXT,
-          status VARCHAR(50) DEFAULT 'open',
-          action_logs JSONB DEFAULT '[]'::jsonb,
-          created_at TIMESTAMPTZ DEFAULT NOW()
-        );
-      `);
-      pgTableInitialized = true;
-    } catch (err: any) {
-      console.warn('[Postgres] Table init warning:', err.message);
-    }
-  }
-  return pgPool;
 }
 
 // -------------------------------------------------------------
@@ -504,7 +456,7 @@ export async function savePaymentRecord(record: PaymentRecord): Promise<void> {
         ON CONFLICT (reference) DO UPDATE SET
           status = $7,
           webhook_received = $8,
-          channel = COALESCE(NULLIF($6, ''), shopit_payments.channel),
+          channel = COALESCE($6, shopit_payments.channel),
           updated_at = NOW(),
           data = $10`,
         [
@@ -513,7 +465,7 @@ export async function savePaymentRecord(record: PaymentRecord): Promise<void> {
           record.amountKobo,
           record.amountNaira,
           record.currency || 'NGN',
-          record.channel || 'unknown',
+          record.channel?.trim() || null,
           record.status,
           record.webhookReceived,
           record.customerEmail,
@@ -721,16 +673,14 @@ export async function pingHealth(): Promise<{
   let dbStatus: 'connected' | 'not_configured' | 'error' = 'not_configured';
   let redisStatus: 'connected' | 'not_configured' | 'error' = 'not_configured';
 
-  if (PG_URL) {
-    try {
-      const pool = await getPgPool();
-      if (pool) {
-        await pool.query('SELECT 1');
-        dbStatus = 'connected';
-      }
-    } catch {
-      dbStatus = 'error';
+  try {
+    const pool = await getPgPool();
+    if (pool) {
+      await pool.query('SELECT 1');
+      dbStatus = 'connected';
     }
+  } catch {
+    dbStatus = 'error';
   }
 
   if (KV_URL && KV_TOKEN) {

@@ -107,12 +107,8 @@ export const AuthModal: React.FC = () => {
     }
 
     setIsSendingResetEmail(true);
-    const resetLink = typeof window !== 'undefined'
-      ? `${window.location.origin}/reset-password?email=${encodeURIComponent(cleanEmail)}`
-      : 'https://shop-itng-pied.vercel.app/reset-password';
     const otpResult = await generateEmailOtp(cleanEmail, 'password_reset', {
       name: cleanEmail.split('@')[0],
-      reset_link: resetLink,
     });
     setIsSendingResetEmail(false);
 
@@ -129,12 +125,8 @@ export const AuthModal: React.FC = () => {
 
   const handleResendResetOtp = async () => {
     const cleanEmail = forgotEmail.trim().toLowerCase();
-    const resetLink = typeof window !== 'undefined'
-      ? `${window.location.origin}/reset-password?email=${encodeURIComponent(cleanEmail)}`
-      : 'https://shop-itng-pied.vercel.app/reset-password';
     const otpResult = await generateEmailOtp(cleanEmail, 'password_reset', {
       name: cleanEmail.split('@')[0],
-      reset_link: resetLink,
     });
     if (!otpResult.success) {
       notify(otpResult.error || 'Please wait before requesting a new code.', 'error');
@@ -201,6 +193,16 @@ export const AuthModal: React.FC = () => {
     const cleanPass = loginPassword.trim();
     const currentDeviceId = getDeviceId();
 
+    if (!cleanEmail || !cleanEmail.includes('@') || !cleanEmail.includes('.')) {
+      notify('Please enter a valid registered email address.', 'error');
+      return;
+    }
+
+    if (!cleanPass) {
+      notify('Please enter your password.', 'error');
+      return;
+    }
+
     let matchedUser: any = null;
 
     try {
@@ -213,7 +215,16 @@ export const AuthModal: React.FC = () => {
       if (res.ok && data.status && data.user) {
         matchedUser = data.user;
       } else {
-        notify(data.message || 'Invalid login credentials. Please check your email and password.', 'error');
+        if (data.error === 'EMAIL_NOT_REGISTERED') {
+          notify(data.message || 'No account is registered with this email address. Please register an account first.', 'error');
+        } else if (data.error === 'EMAIL_NOT_VERIFIED') {
+          notify('Your email is not verified yet. We are sending you a 6-digit verification code now.', 'info');
+          setEmail(cleanEmail);
+          setAuthTab('otp');
+          generateEmailOtp(cleanEmail, 'signup', { name: cleanEmail.split('@')[0] });
+        } else {
+          notify(data.message || 'Invalid login credentials. Please check your email and password.', 'error');
+        }
         return;
       }
     } catch (err: any) {

@@ -204,8 +204,18 @@ export const QuickListModal: React.FC = () => {
           </button>
         </div>
 
-        {/* Verification Required Alert for Unverified Sellers */}
-        {!isSellerVerified && (
+        {/* Verification Alert for Unverified Sellers / Badge for Verified Sellers */}
+        {isSellerVerified ? (
+          <div className="mx-4 mt-3 p-2.5 bg-emerald-50 border border-emerald-200 rounded-xl flex items-center justify-between text-xs text-emerald-900">
+            <div className="flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+              <span className="font-bold">Verified Maker Store &bull; Verified Badge Active</span>
+            </div>
+            <span className="text-[10px] font-black uppercase tracking-wider bg-emerald-200/80 text-emerald-800 px-2 py-0.5 rounded-md">
+              NIMC Verified
+            </span>
+          </div>
+        ) : (
           <div className="mx-4 mt-3 p-3 bg-amber-50 border border-amber-200 rounded-xl flex items-start gap-2.5 text-xs text-amber-900">
             <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
             <div className="flex-1">

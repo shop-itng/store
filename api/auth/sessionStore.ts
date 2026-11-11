@@ -25,16 +25,18 @@ const memoryLockouts = new Map<string, { count: number; lockedUntil: number }>()
 async function runKvCommand(command: string, ...args: any[]): Promise<any> {
   if (!KV_URL || !KV_TOKEN) return null;
   try {
-    const encodedArgs = args.map(a =>
-      encodeURIComponent(typeof a === 'object' ? JSON.stringify(a) : String(a))
-    );
-    const url = `${KV_URL.replace(/\/$/, '')}/${command}/${encodedArgs.join('/')}`;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 4000);
+    const commandPayload = [command.toUpperCase(), ...args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a)))];
+    const url = KV_URL.replace(/\/$/, '');
 
     const res = await fetch(url, {
-      method: 'GET',
-      headers: { Authorization: `Bearer ${KV_TOKEN}` },
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${KV_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(commandPayload),
       signal: controller.signal,
     });
     clearTimeout(timeout);

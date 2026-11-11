@@ -1,12 +1,9 @@
+import 'dotenv/config';
 import pg from 'pg';
 import crypto from 'crypto';
 
 // The exact pooled connection variable name added by Vercel for Neon PostgreSQL
 export const DATABASE_URL_ENV_NAME = 'DATABASE_URL';
-
-const RAW_DB_URL = (process.env.DATABASE_URL || process.env.POSTGRES_URL || '').trim();
-const KV_URL = (process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || '').trim();
-const KV_TOKEN = (process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || '').trim();
 
 let activePool: any = null;
 let isPgMem = false;
@@ -49,14 +46,23 @@ export function verifyPassword(password: string, storedHash: string): boolean {
 }
 
 export function getDatabaseUrl(): string {
-  return (
+  let url = (
     process.env.DATABASE_URL ||
     process.env.POSTGRES_URL ||
     process.env.POSTGRES_PRISMA_URL ||
     process.env.POSTGRES_URL_NON_POOLING ||
     process.env.NEON_DATABASE_URL ||
     ''
-  ).trim();
+  ).trim().replace(/^["']|["']$/g, '');
+
+  if (!url) return '';
+
+  // Prepare for libpq compatibility and silence Node 22 deprecation warnings on Neon sslmode=require
+  if (url.includes('sslmode=require') && !url.includes('uselibpqcompat')) {
+    url = url.includes('?') ? `${url}&uselibpqcompat=true` : `${url}?uselibpqcompat=true`;
+  }
+
+  return url;
 }
 
 export async function getPool(): Promise<any> {
@@ -92,6 +98,10 @@ export async function getPool(): Promise<any> {
     memDb.public.registerFunction({
       name: 'now',
       implementation: () => new Date(),
+    });
+    memDb.public.registerFunction({
+      name: 'nullif',
+      implementation: (a: any, b: any) => (a === b ? null : a),
     });
     
     const { Pool } = memDb.adapters.createPg();
@@ -139,14 +149,17 @@ export async function pingPostgres(): Promise<{ ok: boolean; provider: string; i
 }
 
 export async function pingRedis(): Promise<{ ok: boolean; error?: string }> {
-  if (!KV_URL || !KV_TOKEN) {
+  const kvUrl = (process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || '').trim();
+  const kvToken = (process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || '').trim();
+
+  if (!kvUrl || !kvToken) {
     return { ok: false, error: 'KV_REST_API_URL not configured' };
   }
   try {
-    const url = `${KV_URL.replace(/\/$/, '')}/ping`;
+    const url = `${kvUrl.replace(/\/$/, '')}/ping`;
     const res = await fetch(url, {
       method: 'GET',
-      headers: { Authorization: `Bearer ${KV_TOKEN}` },
+      headers: { Authorization: `Bearer ${kvToken}` },
     });
     if (!res.ok) {
       return { ok: false, error: `Upstash returned HTTP ${res.status}` };
@@ -520,62 +533,262 @@ export async function runMigration(): Promise<void> {
 
     CREATE INDEX IF NOT EXISTS idx_shopit_comm_buyer ON shopit_commissions (buyer_id);
     CREATE INDEX IF NOT EXISTS idx_shopit_comm_seller ON shopit_commissions (seller_id);
+
+    -- 19. OTP Storage Table (Zero File System Dependencies)
+    CREATE TABLE IF NOT EXISTS shopit_otps (
+      key VARCHAR(255) PRIMARY KEY,
+      data JSONB NOT NULL,
+      expires_at BIGINT NOT NULL
+    );
+
+    -- 20. Rate Limits Table
+    CREATE TABLE IF NOT EXISTS shopit_rate_limits (
+      key VARCHAR(255) PRIMARY KEY,
+      timestamps JSONB NOT NULL
+    );
   `;
 
-  // Execute migration statements
+  // Comprehensive column healing: ensures every table has all required columns regardless of initial creation schema
+  const alterStatements = [
+    // 1. shopit_users
+    'ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS email VARCHAR(255);',
+    'ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS name VARCHAR(255);',
+    'ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255);',
+    'ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS role VARCHAR(32) DEFAULT \'buyer\';',
+    'ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS sub_role VARCHAR(50) DEFAULT \'superadmin\';',
+    'ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS is_verified_email BOOLEAN DEFAULT true;',
+    'ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS age INTEGER;',
+    'ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS has_guardian_consent BOOLEAN DEFAULT false;',
+    'ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS guardian_name VARCHAR(255);',
+    'ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT false;',
+    'ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS ban_reason TEXT;',
+    'ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ;',
+    'ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN DEFAULT false;',
+    'ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS failed_login_attempts INTEGER DEFAULT 0;',
+    'ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS locked_until TIMESTAMPTZ;',
+    'ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS is_verified_seller BOOLEAN DEFAULT false;',
+    'ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS verification_status VARCHAR(50) DEFAULT \'not_started\';',
+    'ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();',
+    'ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();',
+
+    // 2. shopit_sellers
+    'ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS user_id VARCHAR(64);',
+    'ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS shop_name VARCHAR(255);',
+    'ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS owner_name VARCHAR(255);',
+    'ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS email VARCHAR(255);',
+    'ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS bio TEXT;',
+    'ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS campus VARCHAR(255);',
+    'ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS location_state VARCHAR(100);',
+    'ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS location_city VARCHAR(100);',
+    'ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS location_area VARCHAR(100);',
+    'ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS is_verified_seller BOOLEAN DEFAULT false;',
+    'ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS verification_status VARCHAR(50) DEFAULT \'not_started\';',
+    'ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS under_18 BOOLEAN DEFAULT false;',
+    'ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS guardian_consent BOOLEAN DEFAULT false;',
+    'ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS guardian_name VARCHAR(255);',
+    'ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS guardian_phone VARCHAR(50);',
+    'ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS badges JSONB DEFAULT \'[]\'::jsonb;',
+    'ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS vacation_mode BOOLEAN DEFAULT false;',
+    'ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS rating NUMERIC(3,2) DEFAULT 5.0;',
+    'ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS sales_count INTEGER DEFAULT 0;',
+    'ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS views_count INTEGER DEFAULT 0;',
+    'ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS verified_legal_name VARCHAR(255);',
+    'ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS verified_nin_last4 VARCHAR(10);',
+    'ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS verified_at TIMESTAMPTZ;',
+    'ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS verification_rejection_reason TEXT;',
+    'ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();',
+    'ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();',
+
+    // 3. shopit_verifications
+    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS seller_id VARCHAR(64);',
+    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS user_id VARCHAR(64);',
+    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS shop_name VARCHAR(255);',
+    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS owner_name VARCHAR(255);',
+    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS id_type VARCHAR(100);',
+    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS document_type VARCHAR(100);',
+    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS id_number_masked VARCHAR(100);',
+    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS full_nin_last4 VARCHAR(10);',
+    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS nin_last4 VARCHAR(10);',
+    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS id_hash VARCHAR(255);',
+    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS document_url TEXT;',
+    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS selfie_url TEXT;',
+    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS under_18 BOOLEAN DEFAULT false;',
+    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS guardian_name VARCHAR(255);',
+    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS guardian_phone VARCHAR(50);',
+    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS guardian_consent BOOLEAN DEFAULT false;',
+    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT \'pending\';',
+    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS notes TEXT;',
+    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS rejection_reason TEXT;',
+    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS admin_notes TEXT;',
+    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS reviewed_by VARCHAR(255);',
+    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ;',
+    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS submitted_at TIMESTAMPTZ DEFAULT NOW();',
+    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();',
+    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();',
+
+    // 4. shopit_products
+    'ALTER TABLE shopit_products ADD COLUMN IF NOT EXISTS seller_id VARCHAR(64);',
+    'ALTER TABLE shopit_products ADD COLUMN IF NOT EXISTS seller_shop_name VARCHAR(255);',
+    'ALTER TABLE shopit_products ADD COLUMN IF NOT EXISTS seller_campus VARCHAR(255);',
+    'ALTER TABLE shopit_products ADD COLUMN IF NOT EXISTS title VARCHAR(255);',
+    'ALTER TABLE shopit_products ADD COLUMN IF NOT EXISTS description TEXT;',
+    'ALTER TABLE shopit_products ADD COLUMN IF NOT EXISTS category VARCHAR(100);',
+    'ALTER TABLE shopit_products ADD COLUMN IF NOT EXISTS seller_price NUMERIC(12,2) DEFAULT 0;',
+    'ALTER TABLE shopit_products ADD COLUMN IF NOT EXISTS service_fee NUMERIC(12,2) DEFAULT 0;',
+    'ALTER TABLE shopit_products ADD COLUMN IF NOT EXISTS display_price NUMERIC(12,2) DEFAULT 0;',
+    'ALTER TABLE shopit_products ADD COLUMN IF NOT EXISTS stock INTEGER DEFAULT 1;',
+    'ALTER TABLE shopit_products ADD COLUMN IF NOT EXISTS images JSONB DEFAULT \'[]\'::jsonb;',
+    'ALTER TABLE shopit_products ADD COLUMN IF NOT EXISTS delivery_pickup_fee NUMERIC(12,2) DEFAULT 0;',
+    'ALTER TABLE shopit_products ADD COLUMN IF NOT EXISTS delivery_local_fee NUMERIC(12,2) DEFAULT 0;',
+    'ALTER TABLE shopit_products ADD COLUMN IF NOT EXISTS delivery_buyer_arranges BOOLEAN DEFAULT false;',
+    'ALTER TABLE shopit_products ADD COLUMN IF NOT EXISTS location_state VARCHAR(100);',
+    'ALTER TABLE shopit_products ADD COLUMN IF NOT EXISTS location_city VARCHAR(100);',
+    'ALTER TABLE shopit_products ADD COLUMN IF NOT EXISTS location_area VARCHAR(100);',
+    'ALTER TABLE shopit_products ADD COLUMN IF NOT EXISTS seller_badges JSONB DEFAULT \'[]\'::jsonb;',
+    'ALTER TABLE shopit_products ADD COLUMN IF NOT EXISTS rating NUMERIC(3,2) DEFAULT 5.0;',
+    'ALTER TABLE shopit_products ADD COLUMN IF NOT EXISTS review_count INTEGER DEFAULT 0;',
+    'ALTER TABLE shopit_products ADD COLUMN IF NOT EXISTS is_sold_out BOOLEAN DEFAULT false;',
+    'ALTER TABLE shopit_products ADD COLUMN IF NOT EXISTS is_new_arrival BOOLEAN DEFAULT true;',
+    'ALTER TABLE shopit_products ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();',
+    'ALTER TABLE shopit_products ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();',
+
+    // 5. shopit_orders
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS buyer_id VARCHAR(64);',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS buyer_name VARCHAR(255);',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS buyer_email VARCHAR(255);',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS buyer_masked_id VARCHAR(64);',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS items JSONB DEFAULT \'[]\'::jsonb;',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS subtotal NUMERIC(12,2) DEFAULT 0;',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS subtotal_kobo BIGINT DEFAULT 0;',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS service_fee_total NUMERIC(12,2) DEFAULT 0;',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS service_fee_kobo BIGINT DEFAULT 0;',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS delivery_total NUMERIC(12,2) DEFAULT 0;',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS delivery_fee_kobo BIGINT DEFAULT 0;',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS discount_total NUMERIC(12,2) DEFAULT 0;',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS grand_total NUMERIC(12,2) DEFAULT 0;',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS grand_total_kobo BIGINT DEFAULT 0;',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS payment_method VARCHAR(50) DEFAULT \'paystack\';',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS payment_reference VARCHAR(255);',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS handshake_otp VARCHAR(10);',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS handshake_verified BOOLEAN DEFAULT false;',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT \'pending_payment\';',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS campus VARCHAR(255);',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS delivery_area VARCHAR(255);',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS pickup_point VARCHAR(255);',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS auto_release_at TIMESTAMPTZ;',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS shipped_at TIMESTAMPTZ;',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ;',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();',
+
+    // 6. shopit_wallets
+    'ALTER TABLE shopit_wallets ADD COLUMN IF NOT EXISTS pending_balance NUMERIC(12,2) DEFAULT 0;',
+    'ALTER TABLE shopit_wallets ADD COLUMN IF NOT EXISTS pending_balance_kobo BIGINT DEFAULT 0;',
+    'ALTER TABLE shopit_wallets ADD COLUMN IF NOT EXISTS available_balance NUMERIC(12,2) DEFAULT 0;',
+    'ALTER TABLE shopit_wallets ADD COLUMN IF NOT EXISTS available_balance_kobo BIGINT DEFAULT 0;',
+    'ALTER TABLE shopit_wallets ADD COLUMN IF NOT EXISTS total_withdrawn NUMERIC(12,2) DEFAULT 0;',
+    'ALTER TABLE shopit_wallets ADD COLUMN IF NOT EXISTS total_withdrawn_kobo BIGINT DEFAULT 0;',
+    'ALTER TABLE shopit_wallets ADD COLUMN IF NOT EXISTS is_frozen BOOLEAN DEFAULT false;',
+    'ALTER TABLE shopit_wallets ADD COLUMN IF NOT EXISTS freeze_reason TEXT;',
+    'ALTER TABLE shopit_wallets ADD COLUMN IF NOT EXISTS payout_accounts JSONB DEFAULT \'[]\'::jsonb;',
+    'ALTER TABLE shopit_wallets ADD COLUMN IF NOT EXISTS active_payout_account_id VARCHAR(64);',
+    'ALTER TABLE shopit_wallets ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();',
+    'ALTER TABLE shopit_wallets ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();',
+
+    // 7. shopit_payments
+    'ALTER TABLE shopit_payments ADD COLUMN IF NOT EXISTS order_id VARCHAR(64);',
+    'ALTER TABLE shopit_payments ADD COLUMN IF NOT EXISTS amount_kobo BIGINT DEFAULT 0;',
+    'ALTER TABLE shopit_payments ADD COLUMN IF NOT EXISTS amount_naira NUMERIC(12,2) DEFAULT 0;',
+    'ALTER TABLE shopit_payments ADD COLUMN IF NOT EXISTS currency VARCHAR(10) DEFAULT \'NGN\';',
+    'ALTER TABLE shopit_payments ADD COLUMN IF NOT EXISTS channel VARCHAR(50);',
+    'ALTER TABLE shopit_payments ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT \'pending\';',
+    'ALTER TABLE shopit_payments ADD COLUMN IF NOT EXISTS webhook_received BOOLEAN DEFAULT false;',
+    'ALTER TABLE shopit_payments ADD COLUMN IF NOT EXISTS customer_email VARCHAR(255);',
+    'ALTER TABLE shopit_payments ADD COLUMN IF NOT EXISTS data JSONB DEFAULT \'{}\'::jsonb;',
+    'ALTER TABLE shopit_payments ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();',
+    'ALTER TABLE shopit_payments ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();',
+
+    // 8. shopit_ledger_entries
+    'ALTER TABLE shopit_ledger_entries ADD COLUMN IF NOT EXISTS wallet_id VARCHAR(64);',
+    'ALTER TABLE shopit_ledger_entries ADD COLUMN IF NOT EXISTS type VARCHAR(50);',
+    'ALTER TABLE shopit_ledger_entries ADD COLUMN IF NOT EXISTS amount NUMERIC(12,2) DEFAULT 0;',
+    'ALTER TABLE shopit_ledger_entries ADD COLUMN IF NOT EXISTS amount_kobo BIGINT DEFAULT 0;',
+    'ALTER TABLE shopit_ledger_entries ADD COLUMN IF NOT EXISTS fee NUMERIC(12,2) DEFAULT 0;',
+    'ALTER TABLE shopit_ledger_entries ADD COLUMN IF NOT EXISTS fee_kobo BIGINT DEFAULT 0;',
+    'ALTER TABLE shopit_ledger_entries ADD COLUMN IF NOT EXISTS balance_after NUMERIC(12,2) DEFAULT 0;',
+    'ALTER TABLE shopit_ledger_entries ADD COLUMN IF NOT EXISTS balance_after_kobo BIGINT DEFAULT 0;',
+    'ALTER TABLE shopit_ledger_entries ADD COLUMN IF NOT EXISTS balance_type VARCHAR(20) DEFAULT \'pending\';',
+    'ALTER TABLE shopit_ledger_entries ADD COLUMN IF NOT EXISTS description TEXT;',
+    'ALTER TABLE shopit_ledger_entries ADD COLUMN IF NOT EXISTS reference VARCHAR(255);',
+    'ALTER TABLE shopit_ledger_entries ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(255);',
+    'ALTER TABLE shopit_ledger_entries ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();',
+
+    // 9. shopit_disputes
+    'ALTER TABLE shopit_disputes ADD COLUMN IF NOT EXISTS order_id VARCHAR(64);',
+    'ALTER TABLE shopit_disputes ADD COLUMN IF NOT EXISTS seller_id VARCHAR(64);',
+    'ALTER TABLE shopit_disputes ADD COLUMN IF NOT EXISTS buyer_id VARCHAR(64);',
+    'ALTER TABLE shopit_disputes ADD COLUMN IF NOT EXISTS buyer_name VARCHAR(255);',
+    'ALTER TABLE shopit_disputes ADD COLUMN IF NOT EXISTS buyer_masked_id VARCHAR(64);',
+    'ALTER TABLE shopit_disputes ADD COLUMN IF NOT EXISTS seller_shop_name VARCHAR(255);',
+    'ALTER TABLE shopit_disputes ADD COLUMN IF NOT EXISTS reason VARCHAR(255);',
+    'ALTER TABLE shopit_disputes ADD COLUMN IF NOT EXISTS description TEXT;',
+    'ALTER TABLE shopit_disputes ADD COLUMN IF NOT EXISTS amount_held_in_escrow NUMERIC(12,2) DEFAULT 0;',
+    'ALTER TABLE shopit_disputes ADD COLUMN IF NOT EXISTS evidence_photo_url TEXT;',
+    'ALTER TABLE shopit_disputes ADD COLUMN IF NOT EXISTS seller_packed_photo_url TEXT;',
+    'ALTER TABLE shopit_disputes ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT \'open\';',
+    'ALTER TABLE shopit_disputes ADD COLUMN IF NOT EXISTS resolution_notes TEXT;',
+    'ALTER TABLE shopit_disputes ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();',
+    'ALTER TABLE shopit_disputes ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();',
+
+    // 10. shopit_reports
+    'ALTER TABLE shopit_reports ADD COLUMN IF NOT EXISTS target_type VARCHAR(50);',
+    'ALTER TABLE shopit_reports ADD COLUMN IF NOT EXISTS target_id VARCHAR(64);',
+    'ALTER TABLE shopit_reports ADD COLUMN IF NOT EXISTS target_title VARCHAR(255);',
+    'ALTER TABLE shopit_reports ADD COLUMN IF NOT EXISTS reporter_email VARCHAR(255);',
+    'ALTER TABLE shopit_reports ADD COLUMN IF NOT EXISTS reason VARCHAR(255);',
+    'ALTER TABLE shopit_reports ADD COLUMN IF NOT EXISTS details TEXT;',
+    'ALTER TABLE shopit_reports ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT \'open\';',
+    'ALTER TABLE shopit_reports ADD COLUMN IF NOT EXISTS action_logs JSONB DEFAULT \'[]\'::jsonb;',
+    'ALTER TABLE shopit_reports ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();',
+    'ALTER TABLE shopit_reports ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();',
+
+    // 11. shopit_commissions
+    'ALTER TABLE shopit_commissions ADD COLUMN IF NOT EXISTS buyer_id VARCHAR(64);',
+    'ALTER TABLE shopit_commissions ADD COLUMN IF NOT EXISTS buyer_name VARCHAR(255);',
+    'ALTER TABLE shopit_commissions ADD COLUMN IF NOT EXISTS seller_id VARCHAR(64);',
+    'ALTER TABLE shopit_commissions ADD COLUMN IF NOT EXISTS seller_shop_name VARCHAR(255);',
+    'ALTER TABLE shopit_commissions ADD COLUMN IF NOT EXISTS title VARCHAR(255);',
+    'ALTER TABLE shopit_commissions ADD COLUMN IF NOT EXISTS description TEXT;',
+    'ALTER TABLE shopit_commissions ADD COLUMN IF NOT EXISTS budget_kobo BIGINT DEFAULT 0;',
+    'ALTER TABLE shopit_commissions ADD COLUMN IF NOT EXISTS budget_naira NUMERIC(12,2) DEFAULT 0;',
+    'ALTER TABLE shopit_commissions ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT \'pending\';',
+    'ALTER TABLE shopit_commissions ADD COLUMN IF NOT EXISTS milestones JSONB DEFAULT \'[]\'::jsonb;',
+    'ALTER TABLE shopit_commissions ADD COLUMN IF NOT EXISTS reference VARCHAR(255);',
+    'ALTER TABLE shopit_commissions ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();',
+    'ALTER TABLE shopit_commissions ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();',
+  ];
+
   const statements = migrationSql
     .split(';')
     .map(s => s.trim())
     .filter(s => s.length > 0);
 
+  // Execute tables and column additions with individual fault-tolerance
   for (const statement of statements) {
     try {
       await pool.query(statement);
     } catch (err: any) {
-      console.warn('[Migration Warning on statement]:', err.message);
+      console.warn('[Migration DDL Statement Note]:', err.message);
     }
   }
 
-  // Gracefully alter existing tables to ensure security & integer kobo columns exist
-  const alterStatements = [
-    'ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT false;',
-    'ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS sub_role VARCHAR(50) DEFAULT \'superadmin\';',
-    'ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS failed_login_attempts INTEGER DEFAULT 0;',
-    'ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS locked_until TIMESTAMPTZ;',
-    'ALTER TABLE shopit_wallets ADD COLUMN IF NOT EXISTS pending_balance_kobo BIGINT NOT NULL DEFAULT 0;',
-    'ALTER TABLE shopit_wallets ADD COLUMN IF NOT EXISTS available_balance_kobo BIGINT NOT NULL DEFAULT 0;',
-    'ALTER TABLE shopit_wallets ADD COLUMN IF NOT EXISTS total_withdrawn_kobo BIGINT NOT NULL DEFAULT 0;',
-    'ALTER TABLE shopit_ledger_entries ADD COLUMN IF NOT EXISTS amount_kobo BIGINT;',
-    'ALTER TABLE shopit_ledger_entries ADD COLUMN IF NOT EXISTS fee_kobo BIGINT DEFAULT 0;',
-    'ALTER TABLE shopit_ledger_entries ADD COLUMN IF NOT EXISTS balance_after_kobo BIGINT;',
-    'ALTER TABLE shopit_ledger_entries ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(255);',
-    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS subtotal_kobo BIGINT;',
-    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS grand_total_kobo BIGINT;',
-    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS service_fee_kobo BIGINT;',
-    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS delivery_fee_kobo BIGINT;',
-    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS shipped_at TIMESTAMPTZ;',
-    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ;',
-    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;',
-    'ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS is_verified_seller BOOLEAN DEFAULT false;',
-    'ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS verification_status VARCHAR(50) DEFAULT \'not_started\';',
-    'ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS verified_legal_name VARCHAR(255);',
-    'ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS verified_nin_last4 VARCHAR(10);',
-    'ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS verified_at TIMESTAMPTZ;',
-    'ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS verification_rejection_reason TEXT;',
-    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS user_id VARCHAR(64);',
-    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS document_type VARCHAR(100);',
-    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS document_url TEXT;',
-    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS selfie_url TEXT;',
-    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS notes TEXT;',
-    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS full_nin_last4 VARCHAR(10);',
-    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS nin_last4 VARCHAR(10);',
-    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();',
-    'ALTER TABLE shopit_verifications ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();',
-  ];
   for (const stmt of alterStatements) {
     try {
       await pool.query(stmt);
-    } catch {}
+    } catch (alterErr: any) {
+      console.warn('[Migration Column Note]:', alterErr.message);
+    }
   }
 
   // Create First Administrator strictly from server environment secrets
@@ -623,7 +836,12 @@ export async function runMigration(): Promise<void> {
 
     migrationCompleted = true;
     console.log('[Database Migration] All tables, audit logs, and security schemas successfully verified in PostgreSQL.');
-  })();
+  })().catch(err => {
+    migrationPromise = null;
+    migrationCompleted = false;
+    console.error('[Database Migration Critical Error]:', err.message);
+    throw err;
+  });
 
   return migrationPromise;
 }

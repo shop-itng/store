@@ -2261,9 +2261,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   ): Promise<boolean> => {
     if (!currentSeller) return false;
 
-    // Rule: Unverified sellers cannot link payout accounts
-    if (currentSeller.verificationStatus !== 'verified' && currentSeller.verificationStatus !== 'approved') {
-      notify('Identity Verification Required: Please complete NIN and live selfie verification before linking a bank payout account.', 'error');
+    // Rule: Sellers must submit NIN verification before linking payout accounts
+    if (
+      currentSeller.verificationStatus !== 'verified' &&
+      currentSeller.verificationStatus !== 'approved' &&
+      currentSeller.verificationStatus !== 'pending'
+    ) {
+      notify('Identity Verification Required: Please submit your NIN and live selfie before linking a bank payout account.', 'error');
       setIsVerificationModalOpen(true);
       return false;
     }

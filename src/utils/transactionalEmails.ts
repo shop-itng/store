@@ -87,38 +87,30 @@ export function renderTransactionalEmail(
       break;
 
     case 'password_reset':
-      subject = 'Reset your Shop It password';
+      subject = 'Your Shop It password reset code';
       bodyText = `We received a request to reset the password for your Shop It account.
 
 Your 6-digit reset code is: ${code}
 (Expires in 10 minutes · 3 attempts max)
 
-You can also reset your password directly using this link:
-${resetLink}
+Enter this 6-digit code in the app to reset your password. Never share this code with anyone.
 
-If you didn't ask to reset your password, you can safely ignore this message. Your password will remain unchanged.`;
+If you didn't ask to reset your password, you can safely ignore this email. Your password will remain unchanged.`;
       bodyHtmlContent = `
         <p style="margin: 0 0 16px; font-size: 15px; color: #0f172a; line-height: 1.6;">
-          We received a request to reset the password for your Shop It account. Use the 6-digit code below to set a new password:
+          We received a request to reset the password for your Shop It account. Enter the 6-digit code below in the app to choose a new password:
         </p>
 
         <div style="text-align: center; margin: 24px 0; background-color: #fff7ed; border: 2px dashed #FF6B00; border-radius: 14px; padding: 20px 16px;">
           <span style="display: block; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 1.5px; color: #c2410c; margin-bottom: 8px;">
-            Your 6-Digit Reset Code
+            Your 6-Digit Password Reset Code
           </span>
-          <div style="font-size: 36px; font-weight: 900; letter-spacing: 8px; font-family: 'Courier New', Courier, monospace; color: #111111; display: inline-block;">
+          <div style="font-size: 38px; font-weight: 900; letter-spacing: 8px; font-family: 'Courier New', Courier, monospace; color: #111111; display: inline-block;">
             ${code}
           </div>
           <span style="display: block; font-size: 12px; color: #78350f; font-weight: 600; margin-top: 8px;">
-            ⏱ Valid for 10 minutes · 3 wrong attempts max
+            ⏱ Valid for 10 minutes · 3 wrong attempts max · Never share this code
           </span>
-        </div>
-
-        <div style="text-align: center; margin: 24px 0 20px;">
-          <p style="font-size: 13px; color: #64748b; margin-bottom: 12px;">Or tap the button below to reset your password directly on the website:</p>
-          <a href="${resetLink}" style="display: inline-block; background-color: #FF6B00; color: #111111; font-weight: 900; font-size: 14px; text-decoration: none; padding: 13px 28px; border-radius: 12px; border: 2px solid #111111; box-shadow: 0 3px 0 #111111;">
-            Reset Password on Shop It &rarr;
-          </a>
         </div>
 
         <p style="margin: 20px 0 0; font-size: 13px; color: #64748b; line-height: 1.5; border-top: 1px solid #f1f5f9; padding-top: 16px;">

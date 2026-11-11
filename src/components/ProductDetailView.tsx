@@ -169,38 +169,38 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({ product, o
         {/* Left Column: Photo Gallery */}
         <div className="lg:col-span-7 space-y-4">
           <div className="relative aspect-4/3 w-full bg-slate-100 rounded-2xl overflow-hidden border border-slate-200">
-            {!lowDataMode && !imageLoaded && (
-              <div className="absolute inset-0 skeleton-shimmer z-0" />
-            )}
+              {!lowDataMode && !imageLoaded && (
+                <div className="absolute inset-0 skeleton-shimmer z-0" />
+              )}
 
-            {lowDataMode ? (
-              <div className="w-full h-full flex flex-col items-center justify-center p-6 bg-slate-100 text-center">
-                <span className="text-4xl mb-2">✨</span>
-                <span className="text-base font-semibold text-slate-800">{product.title}</span>
-                <span className="text-xs text-amber-700 mt-2 bg-amber-50 px-3 py-1 rounded-full border border-amber-200">
-                  Low-Data Mode active: Image preview reduced
-                </span>
-              </div>
-            ) : (
-              <img
-                src={product.images[selectedPhotoIndex] || product.images[0]}
-                alt={product.title}
-                referrerPolicy="no-referrer"
-                onLoad={() => setImageLoaded(true)}
-                className={`w-full h-full object-cover transition-opacity duration-300 ${
-                  imageLoaded ? 'opacity-100' : 'opacity-0'
-                }`}
-              />
-            )}
+              {lowDataMode ? (
+                <div className="w-full h-full flex flex-col items-center justify-center p-6 bg-slate-100 text-center">
+                  <span className="text-4xl mb-2">✨</span>
+                  <span className="text-base font-semibold text-slate-800">{product.title}</span>
+                  <span className="text-xs text-amber-700 mt-2 bg-amber-50 px-3 py-1 rounded-full border border-amber-200">
+                    Low-Data Mode active: Image preview reduced
+                  </span>
+                </div>
+              ) : (
+                <img
+                  src={product.images[selectedPhotoIndex] || product.images[0]}
+                  alt={product.title}
+                  referrerPolicy="no-referrer"
+                  onLoad={() => setImageLoaded(true)}
+                  className={`w-full h-full object-cover transition-opacity duration-300 ${
+                    imageLoaded ? 'opacity-100' : 'opacity-0'
+                  }`}
+                />
+              )}
 
-            {product.isSoldOut && (
-              <div className="absolute inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center">
-                <span className="px-4 py-2 bg-white text-slate-900 font-bold rounded-xl text-sm">
-                  Temporarily Sold Out
-                </span>
-              </div>
-            )}
-          </div>
+              {product.isSoldOut && (
+                <div className="absolute inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center">
+                  <span className="px-4 py-2 bg-white text-slate-900 font-bold rounded-xl text-sm">
+                    Temporarily Sold Out
+                  </span>
+                </div>
+              )}
+            </div>
 
           {/* Thumbnail switcher if multiple photos */}
           {product.images.length > 1 && !lowDataMode && (

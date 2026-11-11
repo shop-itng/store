@@ -2,6 +2,7 @@ import express, { Response } from 'express';
 import { query as dbQuery } from '../db/postgres.js';
 import {
   requireAuth,
+  optionalAuth,
   AuthenticatedRequest,
 } from '../auth/middleware.js';
 import { logAuditEvent } from '../auth/sessionStore.js';
@@ -269,6 +270,10 @@ router.post('/products', requireAuth, async (req: AuthenticatedRequest, res: Res
       };
     }
 
+    if (user.role === 'buyer') {
+      await dbQuery("UPDATE shopit_users SET role = 'seller', updated_at = NOW() WHERE id = $1", [user.userId]).catch(() => {});
+    }
+
     const shopName = seller?.shop_name || req.body.sellerShopName || `${user.name}'s Shop`;
     const campus = seller?.campus || req.body.sellerCampus || 'Lagos Mainland';
     const isVerified = Boolean(seller?.is_verified_seller || seller?.verification_status === 'verified' || user.isVerifiedSeller);
@@ -456,7 +461,9 @@ router.get('/sellers', async (_req, res) => {
       guardianConsent: Boolean(row.guardian_consent),
       guardianName: row.guardian_name,
       guardianPhone: row.guardian_phone,
-      badges: Array.isArray(row.badges) ? row.badges : (row.is_verified_seller ? ['verified'] : []),
+      badges: Array.isArray(row.badges)
+        ? (row.is_verified_seller && !row.badges.includes('verified') ? [...row.badges, 'verified'] : row.badges)
+        : (row.is_verified_seller ? ['verified'] : []),
       level: 1,
       rating: parseFloat(row.rating || 5.0),
       reviewCount: 0,
@@ -509,7 +516,9 @@ router.get('/sellers/:id', async (req, res) => {
       verifiedLegalName: row.verified_legal_name,
       under18: Boolean(row.under_18),
       guardianConsent: Boolean(row.guardian_consent),
-      badges: Array.isArray(row.badges) ? row.badges : (row.is_verified_seller ? ['verified'] : []),
+      badges: Array.isArray(row.badges)
+        ? (row.is_verified_seller && !row.badges.includes('verified') ? [...row.badges, 'verified'] : row.badges)
+        : (row.is_verified_seller ? ['verified'] : []),
       rating: parseFloat(row.rating || 5.0),
       salesCount: parseInt(row.sales_count, 10) || 0,
       viewsCount: parseInt(row.views_count, 10) || 0,
@@ -692,9 +701,9 @@ router.get('/orders', requireAuth, async (req: AuthenticatedRequest, res: Respon
 });
 
 // POST /api/orders - Create an order with integer kobo & status history
-router.post('/orders', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+router.post('/orders', optionalAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const user = req.user!;
+    const user = req.user;
     const {
       id: requestedId,
       items = [],
@@ -710,6 +719,10 @@ router.post('/orders', requireAuth, async (req: AuthenticatedRequest, res: Respo
     } = req.body;
 
     const orderId = requestedId || `ORD-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
+
+    const buyerEmail = user?.email || (req.body.buyerEmail ? String(req.body.buyerEmail).trim().toLowerCase() : (req.body.email ? String(req.body.email).trim().toLowerCase() : 'customer@shopit.ng'));
+    const buyerName = user?.name || (req.body.buyerName ? String(req.body.buyerName).trim() : (req.body.name ? String(req.body.name).trim() : 'Customer'));
+    const buyerId = user?.userId || `guest_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 
     const subtotalKobo = nairaToKobo(subtotal);
     const serviceFeeKobo = nairaToKobo(serviceFeeTotal);
@@ -737,9 +750,9 @@ router.post('/orders', requireAuth, async (req: AuthenticatedRequest, res: Respo
       )`,
       [
         orderId,
-        user.userId,
-        user.name,
-        user.email,
+        buyerId,
+        buyerName,
+        buyerEmail,
         buyerMaskedId,
         JSON.stringify(items),
         koboToNaira(subtotalKobo),
@@ -765,7 +778,7 @@ router.post('/orders', requireAuth, async (req: AuthenticatedRequest, res: Respo
       `INSERT INTO shopit_order_status_history (
         id, order_id, previous_status, new_status, changed_by, notes, created_at
       ) VALUES ($1, $2, NULL, 'paid', $3, 'Order created and paid via Paystack escrow.', NOW())`,
-      [historyId, orderId, user.userId]
+      [historyId, orderId, user?.userId || buyerId]
     );
 
     const sellerTotals: Record<string, number> = {};
@@ -820,7 +833,9 @@ router.post('/orders', requireAuth, async (req: AuthenticatedRequest, res: Respo
       );
     }
 
-    await dbQuery('DELETE FROM shopit_carts WHERE user_id = $1', [user.userId]);
+    if (user?.userId) {
+      await dbQuery('DELETE FROM shopit_carts WHERE user_id = $1', [user.userId]);
+    }
 
     return res.status(201).json({
       status: true,
