@@ -35,6 +35,7 @@ export const CheckoutModal: React.FC = () => {
     removeCoupon,
     notify,
     emergencyControls,
+    paymentsEnabled,
   } = useApp();
 
   const [paymentMethod, setPaymentMethod] = useState<'paystack_card' | 'paystack_transfer' | 'ussd'>('paystack_card');
@@ -206,6 +207,11 @@ export const CheckoutModal: React.FC = () => {
   };
 
   const handleCompletePayment = async () => {
+    if (!paymentsEnabled) {
+      notify('Online payments are coming soon. Arrange directly with the seller', 'info');
+      return;
+    }
+
     setIsProcessing(true);
     setProcessingStage('1/3 Calculating amount on server & initializing Paystack...');
 
@@ -794,6 +800,16 @@ export const CheckoutModal: React.FC = () => {
           </div>
         </div>
 
+        {/* Safety Notice if payments are disabled */}
+        {!paymentsEnabled && (
+          <div className="p-3 bg-amber-50 dark:bg-amber-950/40 border-2 border-amber-400 dark:border-amber-600 rounded-xl text-xs text-amber-900 dark:text-amber-200 flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+            <span className="font-bold">
+              Online payments are coming soon. Arrange directly with the seller
+            </span>
+          </div>
+        )}
+
         {/* Emergency Pause Notice if activated by Moderator */}
         {emergencyControls?.pauseNewOrders && (
           <div className="p-3 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 rounded-xl text-xs text-rose-900 dark:text-rose-200 flex items-center gap-2">
@@ -807,10 +823,12 @@ export const CheckoutModal: React.FC = () => {
         {/* Authorize & Pay Button */}
         <button
           onClick={handleCompletePayment}
-          disabled={isProcessing || emergencyControls?.pauseNewOrders}
+          disabled={isProcessing || emergencyControls?.pauseNewOrders || !paymentsEnabled}
           className="w-full h-12 bg-[#FF6B00] hover:bg-[#ff7a1a] disabled:bg-stone-300 disabled:border-stone-400 disabled:text-stone-500 disabled:shadow-none text-[#111111] font-black text-xs sm:text-sm rounded-xl transition-all border-2 border-[#111111] shadow-[0_3px_0_#111111] active:translate-y-0.5 active:shadow-[0_1px_0_#111111] flex items-center justify-center gap-2"
         >
-          {emergencyControls?.pauseNewOrders ? (
+          {!paymentsEnabled ? (
+            <span className="font-bold text-center px-2">Online payments are coming soon. Arrange directly with the seller</span>
+          ) : emergencyControls?.pauseNewOrders ? (
             <span className="font-bold">Checkout Temporarily Disabled by Moderation</span>
           ) : isProcessing ? (
             <div className="flex items-center gap-2 text-[#111111]">

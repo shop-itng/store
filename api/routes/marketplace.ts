@@ -9,6 +9,18 @@ import { logAuditEvent } from '../auth/sessionStore.js';
 
 const router = express.Router();
 
+// Safety switch middleware: returns 503 when PAYMENTS_ENABLED is not 'true'
+const requirePaymentsEnabled = (_req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (process.env.PAYMENTS_ENABLED !== 'true') {
+    return res.status(503).json({
+      status: false,
+      error: 'PAYMENTS_DISABLED',
+      message: 'Online payments are coming soon. Arrange directly with the seller',
+    });
+  }
+  next();
+};
+
 // Helper: Convert Naira to integer Kobo
 function nairaToKobo(naira: number | string): number {
   const num = typeof naira === 'string' ? parseFloat(naira) : naira;
@@ -701,7 +713,15 @@ router.get('/orders', requireAuth, async (req: AuthenticatedRequest, res: Respon
 });
 
 // POST /api/orders - Create an order with integer kobo & status history
-router.post('/orders', optionalAuth, async (req: AuthenticatedRequest, res: Response) => {
+router.post('/orders', requirePaymentsEnabled, optionalAuth, async (req: AuthenticatedRequest, res: Response) => {
+  if (process.env.PAYMENTS_ENABLED !== 'true') {
+    return res.status(503).json({
+      status: false,
+      error: 'PAYMENTS_DISABLED',
+      message: 'Online payments are coming soon. Arrange directly with the seller',
+    });
+  }
+
   try {
     const user = req.user;
     const {
@@ -1070,7 +1090,15 @@ router.post('/escrow/auto-release', async (_req, res) => {
 // ============================================================================
 
 // GET /api/wallet - Get seller wallet calculated strictly from append-only ledger
-router.get('/wallet', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+router.get('/wallet', requirePaymentsEnabled, requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  if (process.env.PAYMENTS_ENABLED !== 'true') {
+    return res.status(503).json({
+      status: false,
+      error: 'PAYMENTS_DISABLED',
+      message: 'Online payments are coming soon. Arrange directly with the seller',
+    });
+  }
+
   try {
     const user = req.user!;
     const sellerId = req.query.sellerId ? String(req.query.sellerId).trim() : user.userId;
@@ -1156,7 +1184,15 @@ router.get('/wallet', requireAuth, async (req: AuthenticatedRequest, res: Respon
 });
 
 // POST /api/wallet/payout-account - Add payout bank account
-router.post('/wallet/payout-account', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+router.post('/wallet/payout-account', requirePaymentsEnabled, requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  if (process.env.PAYMENTS_ENABLED !== 'true') {
+    return res.status(503).json({
+      status: false,
+      error: 'PAYMENTS_DISABLED',
+      message: 'Online payments are coming soon. Arrange directly with the seller',
+    });
+  }
+
   try {
     const user = req.user!;
     const { bankCode, bankName, accountNumber, accountName } = req.body;

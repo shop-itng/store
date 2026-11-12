@@ -127,6 +127,11 @@ export default async function handler(req: any, res: any) {
   }
 
   if (req.method === 'POST') {
+    if (process.env.PAYMENTS_ENABLED !== 'true') {
+      res.setHeader('Content-Type', 'application/json');
+      res.statusCode = 503;
+      return res.end(JSON.stringify({ status: false, error: 'PAYMENTS_DISABLED', message: 'Online payments are coming soon. Arrange directly with the seller' }));
+    }
     try {
       const rawBuffer = await getRawBodyBuffer(req);
       const signature = (req.headers['x-paystack-signature'] || '') as string;

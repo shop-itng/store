@@ -1231,6 +1231,14 @@ router.get('/paystack/webhook-info', (_req, res) => {
 
 // 3. POST /paystack/initialize - Starts payment from server & computes kobo amount on server
 router.post('/paystack/initialize', async (req, res) => {
+  if (process.env.PAYMENTS_ENABLED !== 'true') {
+    return res.status(503).json({
+      status: false,
+      error: 'PAYMENTS_DISABLED',
+      message: 'Online payments are coming soon. Arrange directly with the seller',
+    });
+  }
+
   try {
     const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
     if (!checkRateLimit(clientIp)) {
@@ -1398,6 +1406,13 @@ router.post('/paystack/initialize', async (req, res) => {
 
 // 4. Paystack Webhook - Delegated directly to the Vercel serverless function handler
 router.all('/paystack/webhook', async (req: any, res: any) => {
+  if (process.env.PAYMENTS_ENABLED !== 'true') {
+    return res.status(503).json({
+      status: false,
+      error: 'PAYMENTS_DISABLED',
+      message: 'Online payments are coming soon. Arrange directly with the seller',
+    });
+  }
   return paystackWebhookHandler(req, res);
 });
 
@@ -1744,6 +1759,14 @@ router.post('/auth/verify-otp', async (req, res) => {
 
 // 5. GET /paystack/verify/:reference - Strict verification with database persistence & idempotency
 router.get('/paystack/verify/:reference', async (req, res) => {
+  if (process.env.PAYMENTS_ENABLED !== 'true') {
+    return res.status(503).json({
+      status: false,
+      error: 'PAYMENTS_DISABLED',
+      message: 'Online payments are coming soon. Arrange directly with the seller',
+    });
+  }
+
   const { reference } = req.params;
 
   if (!reference) {
@@ -2203,8 +2226,28 @@ router.get('/paystack/events', requireAdmin, (_req: AuthenticatedRequest, res: a
   });
 });
 
+// Safety switch middleware: returns 503 when PAYOUTS_ENABLED is not 'true'
+const requirePayoutsEnabled = (_req: any, res: any, next: any) => {
+  if (process.env.PAYOUTS_ENABLED !== 'true') {
+    return res.status(503).json({
+      status: false,
+      error: 'PAYOUTS_DISABLED',
+      message: 'Payouts are currently disabled by system safety switch. No withdrawal can be requested or debited.',
+    });
+  }
+  next();
+};
+
 // 7. POST /paystack/transfer - Seller withdrawal dispatcher with cooling period, OTP, & ledger debit
-router.post('/paystack/transfer', requireAuth, async (req: AuthenticatedRequest, res: any) => {
+router.post('/paystack/transfer', requirePayoutsEnabled, requireAuth, async (req: AuthenticatedRequest, res: any) => {
+  if (process.env.PAYOUTS_ENABLED !== 'true') {
+    return res.status(503).json({
+      status: false,
+      error: 'PAYOUTS_DISABLED',
+      message: 'Payouts are currently disabled by system safety switch. No withdrawal can be requested or debited.',
+    });
+  }
+
   const user = req.user!;
   const { amount, payoutAccountId, otpCode, bankName, accountNumber, sellerId } = req.body;
 

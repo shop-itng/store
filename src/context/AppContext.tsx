@@ -313,6 +313,10 @@ interface AppContextType {
   toggleTwoFactor: () => void;
   revokeSession: (sessionId: string) => void;
 
+  // Safety switch flags
+  paymentsEnabled: boolean;
+  payoutsEnabled: boolean;
+
   // Checkout modal & coupons
   isCheckoutModalOpen: boolean;
   openCheckoutModal: () => void;
@@ -499,6 +503,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, [theme]);
 
   // Checkout & Coupon states
+  const paymentsEnabled = import.meta.env.VITE_PAYMENTS_ENABLED === 'true';
+  const payoutsEnabled = import.meta.env.VITE_PAYOUTS_ENABLED === 'true';
   const [isCheckoutModalOpen, setIsCheckoutModalOpen] = useState(false);
   const [appliedCoupon, setAppliedCoupon] = useState<Coupon | null>(null);
 
@@ -2154,6 +2160,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Rule 4 & Rule 5: Seller withdrawals go to Opay or a Nigerian bank through Paystack Transfers API
   const requestWithdrawal = async (amount: number, payoutAccountId: string, otpCode: string): Promise<boolean> => {
+    if (!payoutsEnabled) {
+      notify('Payouts are currently disabled by system safety switch. No withdrawal can be requested or debited.', 'error');
+      return false;
+    }
+
     if (!currentSeller) return false;
 
     // Rule: Unverified sellers cannot withdraw
@@ -3875,6 +3886,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         securityProfile: currentSecurityProfile,
         toggleTwoFactor,
         revokeSession,
+        paymentsEnabled,
+        payoutsEnabled,
         isCheckoutModalOpen,
         openCheckoutModal,
         closeCheckoutModal,

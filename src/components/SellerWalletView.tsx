@@ -36,6 +36,7 @@ export const SellerWalletView: React.FC = () => {
     securityProfile,
     toggleTwoFactor,
     notify,
+    payoutsEnabled,
   } = useApp();
 
   const [isWithdrawModalOpen, setIsWithdrawModalOpen] = useState(false);
@@ -97,6 +98,10 @@ export const SellerWalletView: React.FC = () => {
   const totalDeducted = withdrawAmount + withdrawalFee;
 
   const handleOpenWithdrawModal = () => {
+    if (!payoutsEnabled) {
+      notify('Payouts are currently disabled by system safety switch. No withdrawal can be requested or debited.', 'error');
+      return;
+    }
     setIsWithdrawModalOpen(true);
     setWithdrawalOtp('');
     setOtpSent(false);
@@ -136,6 +141,10 @@ export const SellerWalletView: React.FC = () => {
 
   const handleWithdrawSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!payoutsEnabled) {
+      notify('Payouts are currently disabled by system safety switch. No withdrawal can be requested or debited.', 'error');
+      return;
+    }
     if (!selectedAccount) {
       notify('Please select or add a payout bank account / OPay first.', 'error');
       return;
@@ -268,13 +277,13 @@ export const SellerWalletView: React.FC = () => {
           <div className="pt-2 flex flex-wrap items-center gap-3">
             <button
               onClick={handleOpenWithdrawModal}
-              disabled={currentWallet.availableBalance < 1000 || currentWallet.isFrozen}
+              disabled={currentWallet.availableBalance < 1000 || currentWallet.isFrozen || !payoutsEnabled}
               className="px-5 py-2.5 bg-[#FF6B00] hover:bg-[#ff7a1a] disabled:bg-stone-700 disabled:text-stone-400 text-[#111111] font-black rounded-xl text-xs sm:text-sm transition-all border-2 border-[#111111] shadow-[0_3px_0_#9FE870] active:translate-y-0.5 flex items-center gap-2"
             >
               <div className="w-5 h-5 rounded-md bg-[#9FE870] border border-[#111111] flex items-center justify-center text-[#111111]">
                 <ArrowUpRight className="w-3.5 h-3.5 stroke-[3]" />
               </div>
-              <span>Withdraw Funds</span>
+              <span>{!payoutsEnabled ? 'Payouts Disabled (Maintenance)' : 'Withdraw Funds'}</span>
             </button>
 
             <button
