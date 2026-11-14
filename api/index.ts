@@ -64,8 +64,10 @@ import {
   sendAdminAlert as dispatchAdminAlert,
   commitPaidOrderTransaction,
   expireStalePendingOrders,
+  processUnshippedOrders,
   restoreOrderStockInTx,
 } from './lib/payments.js';
+import { getKycProvider } from './lib/kycProvider.js';
 import marketplaceRouter, { processEscrowAutoRelease } from './routes/marketplace.js';
 
 export const sendAdminAlert = dispatchAdminAlert;
@@ -988,9 +990,19 @@ router.post('/admin/sellers/:id/verify', requireModerator, async (req: Authentic
 
       await client.query(
         `UPDATE shopit_verifications
-         SET status = $1, reviewed_by = $2, reviewed_at = NOW(), updated_at = NOW()
+         SET status = $1, reviewed_by = $2, reviewed_at = NOW(),
+             document_url = '[Deleted after review decision]',
+             selfie_url = '[Deleted after review decision]',
+             updated_at = NOW()
          WHERE seller_id = $3 OR user_id = $3 OR id = $3`,
         [status, req.user!.email, id]
+      );
+
+      await client.query(
+        `DELETE FROM shopit_verification_documents
+         WHERE seller_id = $1
+            OR seller_id IN (SELECT id FROM shopit_sellers WHERE id = $1 OR user_id = $1)`,
+        [id]
       );
     });
 
@@ -1008,6 +1020,121 @@ router.post('/admin/sellers/:id/verify', requireModerator, async (req: Authentic
       verificationStatus: status,
       message: `Seller verification updated to ${Boolean(isVerified)}.`,
     });
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: err.message });
+  }
+});
+
+// List under-18 guardian payout accounts awaiting one-time Admin approval
+router.get('/admin/payout-accounts/pending', requireAdmin, async (_req: AuthenticatedRequest, res) => {
+  try {
+    const wRes = await dbQuery(
+      `SELECT w.seller_id, w.payout_accounts, s.shop_name, s.owner_name, s.guardian_name, s.under_18, u.age
+       FROM shopit_wallets w
+       LEFT JOIN shopit_sellers s ON (s.id = w.seller_id OR s.user_id = w.seller_id)
+       LEFT JOIN shopit_users u ON u.id = s.user_id`
+    );
+
+    const pendingApprovals: any[] = [];
+    for (const row of wRes.rows) {
+      const accounts: any[] = Array.isArray(row.payout_accounts) ? row.payout_accounts : [];
+      for (const acc of accounts) {
+        if (acc && acc.adminApproved === false) {
+          pendingApprovals.push({
+            sellerId: row.seller_id,
+            shopName: row.shop_name || 'Artisan Shop',
+            ownerName: row.owner_name || 'Seller',
+            guardianName: row.guardian_name || acc.guardianName || '',
+            sellerAge: row.age ?? null,
+            accountId: acc.id,
+            bankName: acc.bankName,
+            accountNumber: acc.accountNumber,
+            accountName: acc.accountName,
+            createdAt: acc.createdAt,
+          });
+        }
+      }
+    }
+
+    return res.json({ status: true, pendingApprovals });
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: err.message });
+  }
+});
+
+// One-time Admin approval for an under-18 seller's guardian payout account
+router.post('/admin/wallets/:sellerId/payout-accounts/:accountId/approve', requireAdmin, async (req: AuthenticatedRequest, res) => {
+  try {
+    const { sellerId, accountId } = req.params;
+    const wRes = await dbQuery('SELECT seller_id, payout_accounts FROM shopit_wallets WHERE seller_id = $1', [sellerId]);
+    if (wRes.rows.length === 0) {
+      return res.status(404).json({ status: false, message: 'Seller wallet not found.' });
+    }
+
+    const accounts: any[] = Array.isArray(wRes.rows[0].payout_accounts) ? wRes.rows[0].payout_accounts : [];
+    const targetAcc = accounts.find(a => a.id === accountId);
+    if (!targetAcc) {
+      return res.status(404).json({ status: false, message: 'Payout account not found.' });
+    }
+
+    const updated = accounts.map(a =>
+      a.id === accountId
+        ? {
+            ...a,
+            adminApproved: true,
+            adminApprovedBy: req.user!.email,
+            adminApprovedAt: new Date().toISOString(),
+          }
+        : a
+    );
+
+    await dbQuery('UPDATE shopit_wallets SET payout_accounts = $1, updated_at = NOW() WHERE seller_id = $2', [
+      JSON.stringify(updated),
+      sellerId,
+    ]);
+
+    await logAuditEvent({
+      action: 'MINOR_PAYOUT_ACCOUNT_APPROVED',
+      actor: { id: req.user!.userId, email: req.user!.email, role: req.user!.role },
+      target: { type: 'wallet', id: sellerId },
+      details: { accountId, accountName: targetAcc.accountName, last4: String(targetAcc.accountNumber || '').slice(-4) },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
+
+    return res.json({
+      status: true,
+      message: 'Guardian payout account approved for withdrawals.',
+      account: updated.find(a => a.id === accountId),
+    });
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: err.message });
+  }
+});
+
+// Admin hold toggle (pauses automated Day-5 unshipped auto-refund/cancellation on held orders)
+router.patch('/admin/orders/:orderId/hold', requireAdmin, async (req: AuthenticatedRequest, res) => {
+  try {
+    const { orderId } = req.params;
+    const hold = Boolean(req.body?.hold);
+    const upd = await dbQuery(
+      'UPDATE shopit_orders SET admin_hold = $1, updated_at = NOW() WHERE id = $2 RETURNING id, admin_hold',
+      [hold, orderId]
+    );
+    if (upd.rows.length === 0) {
+      return res.status(404).json({ status: false, message: 'Order not found.' });
+    }
+
+    await logAuditEvent({
+      action: 'ORDER_ADMIN_HOLD_UPDATED',
+      actor: { id: req.user!.userId, email: req.user!.email, role: req.user!.role },
+      target: { type: 'order', id: orderId },
+      details: { adminHold: hold },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
+
+    return res.json({ status: true, orderId, adminHold: Boolean(upd.rows[0].admin_hold) });
   } catch (err: any) {
     return res.status(500).json({ status: false, message: err.message });
   }
@@ -1915,6 +2042,25 @@ router.get('/payments/events', requirePaymentsEnabled, requireAdmin, async (_req
 });
 
 // Seller withdrawal via Flutterwave Transfers API with ownership, FOR UPDATE debit, cooled saved account, daily cap, compensating rollback
+const withdrawalLocks = new Map<string, Promise<void>>();
+async function withSellerWithdrawalLock<T>(sellerKey: string, fn: () => Promise<T>): Promise<T> {
+  const prev = withdrawalLocks.get(sellerKey) || Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>(resolve => {
+    release = resolve;
+  });
+  withdrawalLocks.set(sellerKey, prev.then(() => current));
+  await prev;
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (withdrawalLocks.get(sellerKey) === current) {
+      withdrawalLocks.delete(sellerKey);
+    }
+  }
+}
+
 router.post('/payments/transfer', requirePayoutsEnabled, requireAuth, async (req: AuthenticatedRequest, res) => {
   const user = req.user!;
   const { amount, payoutAccountId, otpCode, sellerId } = req.body;
@@ -1958,76 +2104,115 @@ router.post('/payments/transfer', requirePayoutsEnabled, requireAuth, async (req
     const transferCode = `TRF_${Date.now()}_${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
 
     // 2. Atomic check + debit inside Postgres transaction BEFORE external payout API call
-    const debitState = await withTransaction(async client => {
-      const sellerRes = await client.query('SELECT * FROM shopit_sellers WHERE id = $1 OR user_id = $1', [
-        targetSellerId,
-      ]);
-      if (sellerRes.rows.length === 0) {
-        throw Object.assign(new Error('Registered artisan profile not found.'), { statusCode: 403 });
-      }
-      const seller = sellerRes.rows[0];
-      if (seller.verification_status !== 'verified' && seller.verification_status !== 'approved') {
-        throw Object.assign(new Error('NIN identity verification is required before withdrawing earnings.'), {
-          statusCode: 403,
-        });
-      }
+    const debitState = await withSellerWithdrawalLock(targetSellerId, () =>
+      withTransaction(async client => {
+        const sellerRes = await client.query('SELECT * FROM shopit_sellers WHERE id = $1 OR user_id = $1', [
+          targetSellerId,
+        ]);
+        if (sellerRes.rows.length === 0) {
+          throw Object.assign(new Error('Registered artisan profile not found.'), { statusCode: 403 });
+        }
+        const seller = sellerRes.rows[0];
+        if (seller.verification_status !== 'verified' && seller.verification_status !== 'approved') {
+          throw Object.assign(new Error('NIN identity verification is required before withdrawing earnings.'), {
+            statusCode: 403,
+          });
+        }
 
-      const wRes = await client.query('SELECT * FROM shopit_wallets WHERE seller_id = $1 FOR UPDATE', [seller.id]);
-      if (wRes.rows.length === 0) {
-        throw Object.assign(new Error('Seller wallet not found.'), { statusCode: 404 });
-      }
-      const wallet = wRes.rows[0];
-      if (wallet.is_frozen) {
-        throw Object.assign(new Error(`Wallet is frozen: ${wallet.freeze_reason || 'Security review'}`), {
-          statusCode: 403,
-        });
-      }
+        const userAgeRes = await client.query('SELECT age FROM shopit_users WHERE id = $1 OR id = $2 LIMIT 1', [
+          seller.user_id || targetSellerId,
+          user.userId,
+        ]);
+        const parsedAge =
+          userAgeRes.rows[0]?.age !== null && userAgeRes.rows[0]?.age !== undefined
+            ? Number(userAgeRes.rows[0].age)
+            : null;
+        const isMinorSeller = Boolean(seller.under_18) || (parsedAge !== null && parsedAge < 18);
 
-      const payoutAccounts: any[] = Array.isArray(wallet.payout_accounts) ? wallet.payout_accounts : [];
-      const account = payoutAccounts.find((a: any) => a.id === payoutAccountId);
-      if (!account || !account.bankCode || !account.accountNumber) {
-        throw Object.assign(new Error('Valid saved payout account with bank code not found.'), { statusCode: 400 });
-      }
+        const wRes = await client.query('SELECT * FROM shopit_wallets WHERE seller_id = $1 FOR UPDATE', [seller.id]);
+        if (wRes.rows.length === 0) {
+          throw Object.assign(new Error('Seller wallet not found.'), { statusCode: 404 });
+        }
+        const wallet = wRes.rows[0];
+        if (wallet.is_frozen) {
+          throw Object.assign(new Error(`Wallet is frozen: ${wallet.freeze_reason || 'Security review'}`), {
+            statusCode: 403,
+          });
+        }
 
-      if (account.coolingPeriodEndsAt && Date.now() < new Date(account.coolingPeriodEndsAt).getTime()) {
-        const hoursRemaining = Math.max(
-          1,
-          Math.ceil((new Date(account.coolingPeriodEndsAt).getTime() - Date.now()) / (1000 * 60 * 60))
+        const payoutAccounts: any[] = Array.isArray(wallet.payout_accounts) ? wallet.payout_accounts : [];
+        const account = payoutAccounts.find((a: any) => a.id === payoutAccountId);
+        if (!account || !account.bankCode || !account.accountNumber) {
+          throw Object.assign(new Error('Valid saved payout account with bank code not found.'), { statusCode: 400 });
+        }
+
+        if (isMinorSeller && account.adminApproved !== true) {
+          throw Object.assign(
+            new Error('Under-18 seller guardian payout account requires one-time Admin approval before withdrawing.'),
+            { statusCode: 403 }
+          );
+        }
+
+        if (account.coolingPeriodEndsAt && Date.now() < new Date(account.coolingPeriodEndsAt).getTime()) {
+          const hoursRemaining = Math.max(
+            1,
+            Math.ceil((new Date(account.coolingPeriodEndsAt).getTime() - Date.now()) / (1000 * 60 * 60))
+          );
+          throw Object.assign(
+            new Error(`Payout account is in 24h security cooling period (${hoursRemaining}h remaining).`),
+            { statusCode: 403 }
+          );
+        }
+
+        // Daily withdrawal cap check: ₦25,000 / 24h for under-18 sellers, ₦300,000 / 24h for adults
+        const dailyCapKobo = isMinorSeller ? 2500000 : 30000000;
+        const dailyCapNaira = isMinorSeller ? '₦25,000' : '₦300,000';
+        const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+        const dailyRes = await client.query(
+          `SELECT COALESCE(SUM(amount_kobo), 0) AS daily_kobo
+           FROM shopit_payouts
+           WHERE seller_id = $1 AND status IN ('pending', 'processing', 'success') AND created_at >= $2`,
+          [seller.id, dayAgo]
         );
-        throw Object.assign(
-          new Error(`Payout account is in 24h security cooling period (${hoursRemaining}h remaining).`),
-          { statusCode: 403 }
+        const dailyUsedKobo = parseInt(String(dailyRes.rows[0]?.daily_kobo || '0'), 10);
+        if (dailyUsedKobo + amountKobo > dailyCapKobo) {
+          throw Object.assign(
+            new Error(
+              isMinorSeller
+                ? `Under-18 daily withdrawal limit of ${dailyCapNaira} exceeded.`
+                : `Daily withdrawal limit of ${dailyCapNaira} exceeded.`
+            ),
+            { statusCode: 400 }
+          );
+        }
+
+        const availableKobo = parseInt(String(wallet.available_balance_kobo || '0'), 10);
+        if (availableKobo < totalDeductionKobo) {
+          throw Object.assign(new Error('Insufficient Available balance for withdrawal and fee.'), { statusCode: 400 });
+        }
+
+        const newAvailableKobo = availableKobo - totalDeductionKobo;
+        const newWithdrawnKobo = parseInt(String(wallet.total_withdrawn_kobo || '0'), 10) + amountKobo;
+
+        const updRes = await client.query(
+          `UPDATE shopit_wallets
+           SET available_balance_kobo = $1, available_balance = $2,
+               total_withdrawn_kobo = $3, total_withdrawn = $4, updated_at = NOW()
+           WHERE seller_id = $5 AND available_balance_kobo >= $6`,
+          [
+            newAvailableKobo,
+            koboToNaira(newAvailableKobo),
+            newWithdrawnKobo,
+            koboToNaira(newWithdrawnKobo),
+            seller.id,
+            totalDeductionKobo,
+          ]
         );
-      }
-
-      // Daily withdrawal cap check (max ₦300,000 / 24h across pending/processing/completed payouts)
-      const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-      const dailyRes = await client.query(
-        `SELECT COALESCE(SUM(amount_kobo), 0) AS daily_kobo
-         FROM shopit_payouts
-         WHERE seller_id = $1 AND status IN ('pending', 'processing', 'success') AND created_at >= $2`,
-        [seller.id, dayAgo]
-      );
-      const dailyUsedKobo = parseInt(String(dailyRes.rows[0]?.daily_kobo || '0'), 10);
-      if (dailyUsedKobo + amountKobo > 30000000) {
-        throw Object.assign(new Error('Daily withdrawal limit of ₦300,000 exceeded.'), { statusCode: 400 });
-      }
-
-      const availableKobo = parseInt(String(wallet.available_balance_kobo || '0'), 10);
-      if (availableKobo < totalDeductionKobo) {
-        throw Object.assign(new Error('Insufficient Available balance for withdrawal and fee.'), { statusCode: 400 });
-      }
-
-      const newAvailableKobo = availableKobo - totalDeductionKobo;
-      const newWithdrawnKobo = parseInt(String(wallet.total_withdrawn_kobo || '0'), 10) + amountKobo;
-
-      await client.query(
-        `UPDATE shopit_wallets
-         SET available_balance_kobo = $1, available_balance = $2,
-             total_withdrawn_kobo = $3, total_withdrawn = $4, updated_at = NOW()
-         WHERE seller_id = $5`,
-        [newAvailableKobo, koboToNaira(newAvailableKobo), newWithdrawnKobo, koboToNaira(newWithdrawnKobo), seller.id]
-      );
+        if (updRes.rowCount === 0) {
+          throw Object.assign(new Error('Insufficient Available balance (concurrent withdrawal blocked).'), {
+            statusCode: 400,
+          });
+        }
 
       const ledgerId = `LEDGER-WTD-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
       await client.query(
@@ -2071,7 +2256,8 @@ router.post('/payments/transfer', requirePayoutsEnabled, requireAuth, async (req
       );
 
       return { seller, account, newAvailableKobo };
-    });
+      })
+    );
 
     // 3. Call Flutterwave Transfers API v3; compensate atomically if gateway call fails or times out
     try {
@@ -2487,50 +2673,12 @@ router.patch('/reports/:id', requireModerator, async (req: AuthenticatedRequest,
 // ============================================================================
 
 async function verifyWithNigerianIdentityApi(nin: string, fullName: string, dob: string) {
-  const apiKey = (process.env.PREMBLY_API_KEY || '').trim();
-  if (apiKey) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
-    try {
-      const response = await fetch('https://api.prembly.com/identity-pass/verification/nin', {
-        method: 'POST',
-        headers: {
-          'x-api-key': apiKey,
-          'app-id': process.env.PREMBLY_APP_ID || '',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ number: nin }),
-        signal: controller.signal,
-      });
-      const data: any = await response.json();
-      if (data.status && data.data) {
-        const nimcName = `${data.data.firstname || ''} ${data.data.middlename || ''} ${data.data.surname || ''}`.trim();
-        const nimcDob = data.data.birthdate || data.data.dob || '';
-        const typedTokens = fullName.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(Boolean);
-        const regTokens = nimcName.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(Boolean);
-        const matches = typedTokens.filter(t => regTokens.includes(t)).length;
-        const nameScore = Math.round((matches / Math.max(typedTokens.length, 2)) * 100);
-        const dobMatch = Boolean(dob && nimcDob && dob.replace(/-/g, '') === nimcDob.replace(/-/g, ''));
-
-        return {
-          success: true,
-          provider: 'prembly',
-          status: nameScore >= 60 && dobMatch ? ('match' as const) : ('manual_review_required' as const),
-        };
-      }
-    } catch (err: any) {
-      console.warn('Prembly API check failed, routing to manual review queue:', err.message);
-    } finally {
-      clearTimeout(timeout);
-    }
-  }
-
-  // Never auto-verify solely from 11 digits without a live NIN verification API response
-  return {
-    success: false,
-    provider: 'manual_moderator_review',
-    status: 'manual_review_required' as const,
-  };
+  const provider = getKycProvider();
+  return provider.verifyNin({
+    nin,
+    fullName,
+    dateOfBirth: dob,
+  });
 }
 
 router.post(
@@ -2705,24 +2853,26 @@ router.post(
       const maskedNin = `***-***-${fullNinLast4}`;
 
       await withTransaction(async client => {
-        await client.query(
-          `INSERT INTO shopit_verification_documents (id, seller_id, doc_type, encrypted_data, created_at)
-           VALUES ($1, $2, 'id_document', $3, NOW()), ($4, $2, 'selfie', $5, NOW())`,
-          [
-            idDocId,
-            resolvedSellerId,
-            encryptSensitiveData(String(idDocumentPhoto)),
-            selfieDocId,
-            encryptSensitiveData(String(selfiePhoto)),
-          ]
-        );
-
-        if (guardianDocId && guardianIdDocumentPhoto) {
+        if (finalStatus === 'pending') {
           await client.query(
             `INSERT INTO shopit_verification_documents (id, seller_id, doc_type, encrypted_data, created_at)
-             VALUES ($1, $2, 'guardian_id', $3, NOW())`,
-            [guardianDocId, resolvedSellerId, encryptSensitiveData(String(guardianIdDocumentPhoto))]
+             VALUES ($1, $2, 'id_document', $3, NOW()), ($4, $2, 'selfie', $5, NOW())`,
+            [
+              idDocId,
+              resolvedSellerId,
+              encryptSensitiveData(String(idDocumentPhoto)),
+              selfieDocId,
+              encryptSensitiveData(String(selfiePhoto)),
+            ]
           );
+
+          if (guardianDocId && guardianIdDocumentPhoto) {
+            await client.query(
+              `INSERT INTO shopit_verification_documents (id, seller_id, doc_type, encrypted_data, created_at)
+               VALUES ($1, $2, 'guardian_id', $3, NOW())`,
+              [guardianDocId, resolvedSellerId, encryptSensitiveData(String(guardianIdDocumentPhoto))]
+            );
+          }
         }
 
         await client.query(
@@ -2730,8 +2880,8 @@ router.post(
             id, seller_id, user_id, shop_name, owner_name, id_type,
             id_number_masked, full_nin_last4, nin_last4, id_hash,
             document_url, selfie_url, under_18, guardian_name,
-            guardian_phone, status, notes, submitted_at, created_at, updated_at
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, NOW(), NOW(), NOW())`,
+            guardian_phone, status, notes, reviewed_by, reviewed_at, submitted_at, created_at, updated_at
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, NOW(), NOW(), NOW())`,
           [
             submissionId,
             resolvedSellerId,
@@ -2743,22 +2893,37 @@ router.post(
             fullNinLast4,
             fullNinLast4,
             ninDigest,
-            idDocSigned.url,
-            selfieDocSigned.url,
+            finalStatus === 'pending' ? idDocSigned.url : '[Deleted after automated verification]',
+            finalStatus === 'pending' ? selfieDocSigned.url : '[Deleted after automated verification]',
             Boolean(under18),
             guardianFullName ? String(guardianFullName).trim() : null,
             guardianNin ? String(guardianNin).slice(-4) : null,
             finalStatus,
             `Submission via portal (${apiResult.provider}). Liveness: ${Math.round(Number(livenessScore) || 90)}%`,
+            finalStatus === 'verified' ? apiResult.provider : null,
+            finalStatus === 'verified' ? new Date().toISOString() : null,
           ]
         );
 
         await client.query(
           `UPDATE shopit_sellers
            SET verification_status = $1, is_verified_seller = $2, verified_legal_name = $3,
-               verified_nin_last4 = $4, verified_at = CASE WHEN $2 = true THEN NOW() ELSE verified_at END, updated_at = NOW()
-           WHERE id = $5 OR user_id = $5`,
-          [finalStatus, finalStatus === 'verified', fullName.trim(), fullNinLast4, resolvedSellerId]
+               verified_nin_last4 = $4,
+               under_18 = COALESCE($5, under_18),
+               guardian_name = COALESCE($6, guardian_name),
+               guardian_consent = COALESCE($7, guardian_consent),
+               verified_at = CASE WHEN $2 = true THEN NOW() ELSE verified_at END, updated_at = NOW()
+           WHERE id = $8 OR user_id = $8`,
+          [
+            finalStatus,
+            finalStatus === 'verified',
+            fullName.trim(),
+            fullNinLast4,
+            under18 !== undefined ? Boolean(under18) : null,
+            guardianFullName ? String(guardianFullName).trim() : null,
+            under18 ? Boolean(guardianConsentSigned) : null,
+            resolvedSellerId,
+          ]
         );
       });
 
@@ -2943,9 +3108,21 @@ router.post('/verification/admin/review', requireModerator, async (req: Authenti
       await client.query(
         `UPDATE shopit_verifications
          SET status = $1, reviewed_by = $2, reviewed_at = NOW(),
-             rejection_reason = $3, admin_notes = $3, notes = $3, updated_at = NOW()
+             rejection_reason = $3, admin_notes = $3, notes = $3,
+             document_url = '[Deleted after review decision]',
+             selfie_url = '[Deleted after review decision]',
+             updated_at = NOW()
          WHERE seller_id = $4 OR user_id = $4 OR id = $4`,
         [action, reviewedBy, reason || null, sellerTarget]
+      );
+
+      // Rule 3: Immediately purge encrypted ID/selfie/guardian images after admin decision; retain only last 4, hash, decision, and date
+      await client.query(
+        `DELETE FROM shopit_verification_documents
+         WHERE seller_id = $1
+            OR seller_id IN (SELECT seller_id FROM shopit_verifications WHERE id = $1 OR seller_id = $1 OR user_id = $1)
+            OR seller_id IN (SELECT id FROM shopit_sellers WHERE id = $1 OR user_id = $1 OR LOWER(email) = LOWER($1))`,
+        [sellerTarget]
       );
     });
 
@@ -2953,7 +3130,7 @@ router.post('/verification/admin/review', requireModerator, async (req: Authenti
       action: `VERIFICATION_${action.toUpperCase()}`,
       actor: { id: user.userId, email: user.email, role: user.role },
       target: { type: 'seller', id: sellerTarget },
-      details: { reason },
+      details: { reason, imagesPurgedImmediately: true },
       ip: req.ip,
       userAgent: req.get('user-agent'),
     });
@@ -2963,7 +3140,8 @@ router.post('/verification/admin/review', requireModerator, async (req: Authenti
       sellerId: sellerTarget,
       isVerifiedSeller: isVerified,
       verificationStatus: action,
-      message: `Seller verification status updated to '${action}'.`,
+      imagesDeletedImmediately: true,
+      message: `Seller verification status updated to '${action}'. Uploaded ID/selfie images have been deleted immediately.`,
     });
   } catch (err: any) {
     return res.status(500).json({ status: false, message: err.message });
@@ -3055,6 +3233,12 @@ router.post(
 
 router.all('/cron/escrow', requireCronOrAdmin, async (_req, res) => {
   const result = await processEscrowAutoRelease();
+  const unshipped = await processUnshippedOrders();
+  return res.json({ status: true, ...result, unshipped });
+});
+
+router.all('/cron/unshipped', requireCronOrAdmin, async (_req, res) => {
+  const result = await processUnshippedOrders();
   return res.json({ status: true, ...result });
 });
 

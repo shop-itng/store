@@ -452,6 +452,7 @@ export async function commitPaidOrderTransaction(params: {
       `UPDATE shopit_orders
        SET status = 'paid',
            stock_reserved = true,
+           paid_at = COALESCE(paid_at, NOW()),
            auto_release_at = NOW() + INTERVAL '5 days',
            updated_at = NOW()
        WHERE id = $1 AND status = 'pending_payment'`,
@@ -646,4 +647,307 @@ export async function commitPaidOrderTransaction(params: {
   }
 
   return txResult;
+}
+
+// ============================================================================
+// Never-Shipped Orders Rule (Option A):
+// - Day 3: Reminder to seller (skips open disputes & admin holds)
+// - Day 5: Auto-cancel & full buyer refund via Flutterwave (skips open disputes & admin holds)
+// ============================================================================
+
+export async function processUnshippedOrders(): Promise<{
+  remindedCount: number;
+  remindedOrderIds: string[];
+  refundedCount: number;
+  refundedOrderIds: string[];
+}> {
+  const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
+  const fiveDaysAgo = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString();
+
+  const remindedOrderIds: string[] = [];
+  const refundedOrderIds: string[] = [];
+
+  try {
+    // 1. Day 3+ Reminders (orders >= 3 days and < 5 days unshipped, no open dispute, no admin hold, not yet reminded)
+    const remindCandidates = await dbQuery(
+      `SELECT o.id
+       FROM shopit_orders o
+       LEFT JOIN shopit_disputes d ON d.order_id = o.id AND d.status IN ('open', 'investigating')
+       WHERE o.status IN ('paid', 'packed')
+         AND COALESCE(o.admin_hold, false) = false
+         AND o.unshipped_reminder_sent_at IS NULL
+         AND COALESCE(o.paid_at, o.created_at) <= $1
+         AND COALESCE(o.paid_at, o.created_at) > $2
+         AND d.id IS NULL`,
+      [threeDaysAgo, fiveDaysAgo]
+    );
+
+    for (const row of remindCandidates.rows) {
+      const orderToRemind = await withTransaction(async client => {
+        const oRes = await client.query('SELECT * FROM shopit_orders WHERE id = $1 FOR UPDATE', [row.id]);
+        if (oRes.rows.length === 0) return null;
+        const ord = oRes.rows[0];
+        if (!['paid', 'packed'].includes(ord.status) || ord.admin_hold || ord.unshipped_reminder_sent_at) {
+          return null;
+        }
+        const disp = await client.query(
+          `SELECT id FROM shopit_disputes WHERE order_id = $1 AND status IN ('open', 'investigating') FOR UPDATE`,
+          [ord.id]
+        );
+        if (disp.rows.length > 0) return null;
+
+        await client.query(
+          `UPDATE shopit_orders SET unshipped_reminder_sent_at = NOW(), updated_at = NOW() WHERE id = $1`,
+          [ord.id]
+        );
+        return ord;
+      });
+
+      if (orderToRemind) {
+        remindedOrderIds.push(orderToRemind.id);
+        const items: any[] = Array.isArray(orderToRemind.items) ? orderToRemind.items : [];
+        const sellerIds = Array.from(new Set(items.map(i => i.sellerId).filter(Boolean)));
+
+        for (const sId of sellerIds) {
+          try {
+            const sRes = await dbQuery('SELECT user_id, email, shop_name FROM shopit_sellers WHERE id = $1 OR user_id = $1', [sId]);
+            const targetUserId = sRes.rows[0]?.user_id || sId;
+            const sellerEmail = sRes.rows[0]?.email;
+            const shopName = sRes.rows[0]?.shop_name || 'Artisan';
+
+            await dbQuery(
+              `INSERT INTO shopit_notifications (id, user_id, title, message, type, is_read, link, created_at)
+               VALUES ($1, $2, $3, $4, 'warning', false, '/dashboard', NOW())`,
+              [
+                `notif_unshipped_${Date.now()}_${crypto.randomBytes(2).toString('hex')}`,
+                targetUserId,
+                'Shipping Reminder (Day 3)',
+                `Order #${orderToRemind.id} has been awaiting dispatch for 3 days. Please ship within 48 hours or it will be auto-cancelled and refunded to the buyer on Day 5.`,
+              ]
+            );
+
+            if (sellerEmail) {
+              const subj = `Action Required: Ship Order #${orderToRemind.id} within 48 hours`;
+              const txt = `Hi ${shopName}, Order #${orderToRemind.id} was paid 3 days ago and has not been marked as shipped. Please upload your packing photo and mark it shipped within 48 hours, or it will be automatically cancelled and refunded to the buyer on Day 5.`;
+              await sendBrevoDirect(
+                sellerEmail,
+                subj,
+                txt,
+                `<p>Hi <strong>${escapeHtmlSafe(shopName)}</strong>,</p><p>Order <strong>#${escapeHtmlSafe(orderToRemind.id)}</strong> was paid 3 days ago and has not yet been marked as shipped.</p><p>Please upload your packing photo and dispatch within 48 hours, or the order will be automatically cancelled and refunded in full to the buyer on Day 5.</p>`,
+                shopName
+              );
+            }
+          } catch {}
+        }
+      }
+    }
+
+    // 2. Day 5+ Auto-Cancel & Full Buyer Refund (never shipped, no open dispute, no admin hold)
+    const refundCandidates = await dbQuery(
+      `SELECT o.*
+       FROM shopit_orders o
+       LEFT JOIN shopit_disputes d ON d.order_id = o.id AND d.status IN ('open', 'investigating')
+       WHERE o.status IN ('paid', 'packed')
+         AND COALESCE(o.admin_hold, false) = false
+         AND COALESCE(o.paid_at, o.created_at) <= $1
+         AND d.id IS NULL`,
+      [fiveDaysAgo]
+    );
+
+    const flwSecret = (process.env.FLW_SECRET_KEY || '').trim().replace(/^["']|["']$/g, '');
+    const paymentsEnabled = process.env.PAYMENTS_ENABLED === 'true';
+
+    for (const candidate of refundCandidates.rows) {
+      if (!paymentsEnabled || !flwSecret) {
+        console.warn(`[Unshipped Cron] Skipped Day-5 auto-refund for ${candidate.id}: payments or FLW_SECRET_KEY disabled.`);
+        continue;
+      }
+
+      const payRes = await dbQuery('SELECT * FROM shopit_payments WHERE reference = $1 OR order_id = $2 LIMIT 1', [
+        candidate.payment_reference,
+        candidate.id,
+      ]);
+      const paymentRow = payRes.rows[0];
+      let payData: any = {};
+      if (paymentRow?.data) {
+        payData =
+          typeof paymentRow.data === 'string'
+            ? (() => {
+                try {
+                  return JSON.parse(paymentRow.data);
+                } catch {
+                  return {};
+                }
+              })()
+            : paymentRow.data;
+      }
+
+      const flwTxId = payData?.flwTransactionId || payData?.id;
+      if (!flwTxId) {
+        console.warn(`[Unshipped Cron] Missing Flutterwave transaction ID for order ${candidate.id}; alerting admin.`);
+        await sendAdminAlert(
+          `unshipped_missing_tx_${candidate.id}`,
+          `Unshipped Order #${candidate.id} Missing Flutterwave TX ID`,
+          `Order #${escapeHtmlSafe(candidate.id)} exceeded 5 days unshipped but has no stored Flutterwave transaction ID for automatic refund.`
+        ).catch(() => {});
+        continue;
+      }
+
+      const refundNaira =
+        Number(candidate.grand_total_kobo) > 0
+          ? koboToNaira(candidate.grand_total_kobo)
+          : parseFloat(candidate.grand_total || '0');
+
+      // Call Flutterwave v3 refund endpoint BEFORE mutating escrow balances
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 12000);
+      let flwOk = false;
+      let flwRefundData: any = {};
+      try {
+        const flwRes = await fetch(
+          `https://api.flutterwave.com/v3/transactions/${encodeURIComponent(String(flwTxId))}/refund`,
+          {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${flwSecret}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              amount: refundNaira,
+              comments: `Auto-refund: Order #${candidate.id} not shipped within 5 days`,
+            }),
+            signal: controller.signal,
+          }
+        );
+        flwRefundData = await flwRes.json().catch(() => ({}));
+        flwOk = flwRes.ok && flwRefundData?.status === 'success';
+      } catch (err: any) {
+        console.warn(`[Unshipped Cron] Flutterwave refund timeout/error for ${candidate.id}:`, err.message);
+      } finally {
+        clearTimeout(timeout);
+      }
+
+      if (!flwOk) {
+        await sendAdminAlert(
+          `unshipped_flw_fail_${candidate.id}`,
+          `Auto-Refund Failed for Unshipped Order #${candidate.id}`,
+          `Order #${escapeHtmlSafe(candidate.id)} exceeded 5 days unshipped, but Flutterwave refund returned: ${escapeHtmlSafe(flwRefundData?.message || 'Gateway error')}`
+        ).catch(() => {});
+        continue;
+      }
+
+      const txCommitted = await withTransaction(async client => {
+        const oRes = await client.query('SELECT * FROM shopit_orders WHERE id = $1 FOR UPDATE', [candidate.id]);
+        if (oRes.rows.length === 0) return false;
+        const ord = oRes.rows[0];
+        if (!['paid', 'packed'].includes(ord.status) || ord.admin_hold) return false;
+
+        const dispCheck = await client.query(
+          `SELECT id FROM shopit_disputes WHERE order_id = $1 AND status IN ('open', 'investigating') FOR UPDATE`,
+          [ord.id]
+        );
+        if (dispCheck.rows.length > 0) return false;
+
+        await restoreOrderStockInTx(client, ord);
+
+        const items: any[] = Array.isArray(ord.items) ? ord.items : [];
+        const sellerTotalsKobo: Record<string, number> = {};
+        for (const item of items) {
+          if (item.sellerId) {
+            const qty = Math.max(1, Math.floor(Number(item.quantity) || 1));
+            const kobo = (Number(item.sellerPriceKobo) || Math.round(Number(item.sellerPrice || 0) * 100)) * qty;
+            sellerTotalsKobo[item.sellerId] = (sellerTotalsKobo[item.sellerId] || 0) + kobo;
+          }
+        }
+
+        for (const [sId, sellerEarningsKobo] of Object.entries(sellerTotalsKobo)) {
+          const wRes = await client.query(
+            'SELECT pending_balance_kobo FROM shopit_wallets WHERE seller_id = $1 FOR UPDATE',
+            [sId]
+          );
+          if (wRes.rows.length > 0) {
+            const curPending = parseInt(String(wRes.rows[0].pending_balance_kobo || '0'), 10);
+            const newPending = Math.max(0, curPending - sellerEarningsKobo);
+            const idempKey = `unshipped_refund:${ord.id}:${sId}`;
+            const ins = await client.query(
+              `INSERT INTO shopit_ledger_entries (
+                id, wallet_id, order_id, type, amount, fee, balance_after, balance_type, status,
+                amount_kobo, fee_kobo, balance_after_kobo, description, reference, idempotency_key, created_at
+              ) VALUES ($1, $2, $3, 'refund', $4, 0, $5, 'pending', 'completed', $6, 0, $7, $8, $9, $10, NOW())
+              ON CONFLICT (idempotency_key) DO NOTHING
+              RETURNING id`,
+              [
+                `LEDGER-UNSHP-${ord.id}-${sId.slice(-6)}`,
+                sId,
+                ord.id,
+                koboToNaira(sellerEarningsKobo),
+                koboToNaira(newPending),
+                sellerEarningsKobo,
+                newPending,
+                `Auto-refund for never-shipped Order #${ord.id} (Day 5)`,
+                ord.payment_reference || ord.id,
+                idempKey,
+              ]
+            );
+            if (ins.rows.length > 0) {
+              await client.query(
+                `UPDATE shopit_wallets
+                 SET pending_balance_kobo = $1, pending_balance = $2, updated_at = NOW()
+                 WHERE seller_id = $3`,
+                [newPending, koboToNaira(newPending), sId]
+              );
+            }
+          }
+        }
+
+        await client.query(
+          `UPDATE shopit_orders
+           SET status = 'refunded',
+               auto_release_at = NULL,
+               notes = COALESCE(notes || ' | ', '') || 'Auto-cancelled & refunded after 5 days unshipped',
+               updated_at = NOW()
+           WHERE id = $1`,
+          [ord.id]
+        );
+
+        if (ord.payment_reference) {
+          await client.query(
+            `UPDATE shopit_payments
+             SET status = 'refunded',
+                 data = $1,
+                 updated_at = NOW()
+             WHERE reference = $2`,
+            [JSON.stringify({ ...payData, refundId: flwRefundData?.data?.id, flwTransactionId: flwTxId }), ord.payment_reference]
+          );
+        }
+
+        await client.query(
+          `INSERT INTO shopit_order_status_history (id, order_id, previous_status, new_status, changed_by, notes, created_at)
+           VALUES ($1, $2, $3, 'refunded', 'unshipped_auto_refund_cron', 'Order auto-cancelled and full buyer refund issued after 5 days without dispatch.', NOW())`,
+          [`osh_unshp_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`, ord.id, ord.status]
+        );
+
+        return true;
+      });
+
+      if (txCommitted) {
+        refundedOrderIds.push(candidate.id);
+        if (candidate.buyer_email) {
+          await sendBrevoDirect(
+            candidate.buyer_email,
+            `Full Refund Issued for Unshipped Order #${candidate.id}`,
+            `Hi ${candidate.buyer_name || 'Customer'}, because the seller did not ship Order #${candidate.id} within 5 days, Shop It automatically cancelled the order and initiated a full refund of ₦${refundNaira.toLocaleString()} back to your original payment method.`,
+            `<p>Hi <strong>${escapeHtmlSafe(candidate.buyer_name || 'Customer')}</strong>,</p><p>Because the seller did not dispatch Order <strong>#${escapeHtmlSafe(candidate.id)}</strong> within 5 days, Shop It automatically cancelled the order and triggered a full refund of <strong>₦${refundNaira.toLocaleString()}</strong> to your payment method.</p>`,
+            candidate.buyer_name
+          ).catch(() => {});
+        }
+      }
+    }
+  } catch (err: any) {
+    console.warn('[processUnshippedOrders Error]:', err.message);
+  }
+
+  return {
+    remindedCount: remindedOrderIds.length,
+    remindedOrderIds,
+    refundedCount: refundedOrderIds.length,
+    refundedOrderIds,
+  };
 }

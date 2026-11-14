@@ -171,6 +171,13 @@ export const AdminPanel: React.FC = () => {
   const [reportActionNotes, setReportActionNotes] = useState<Record<string, string>>({});
   const [isExportingData, setIsExportingData] = useState(false);
 
+  // Under-18 Guardian Payout Approvals & Order Admin Hold state
+  const [pendingGuardianPayouts, setPendingGuardianPayouts] = useState<any[]>([]);
+  const [loadingGuardianPayouts, setLoadingGuardianPayouts] = useState(false);
+  const [approvingPayoutId, setApprovingPayoutId] = useState<string | null>(null);
+  const [togglingHoldOrderId, setTogglingHoldOrderId] = useState<string | null>(null);
+  const [heldOrderOverrides, setHeldOrderOverrides] = useState<Record<string, boolean>>({});
+
   const getAuthHeaders = (): Record<string, string> => {
     const token = typeof localStorage !== 'undefined' ? localStorage.getItem('shopit_session_token') : null;
     return token ? { Authorization: `Bearer ${token}`, 'x-session-token': token } : {};
@@ -351,12 +358,85 @@ export const AdminPanel: React.FC = () => {
     }
   };
 
+  const fetchPendingGuardianPayouts = async () => {
+    setLoadingGuardianPayouts(true);
+    try {
+      const res = await fetch('/api/admin/payout-accounts/pending', {
+        headers: getAuthHeaders(),
+        credentials: 'include',
+      });
+      const data = await res.json();
+      if (data.status && Array.isArray(data.pendingApprovals)) {
+        setPendingGuardianPayouts(data.pendingApprovals);
+      }
+    } catch (e) {
+      console.error('Failed to load pending guardian payouts:', e);
+    } finally {
+      setLoadingGuardianPayouts(false);
+    }
+  };
+
+  const handleApproveGuardianPayout = async (sellerId: string, accountId: string) => {
+    setApprovingPayoutId(accountId);
+    try {
+      const res = await fetch(
+        `/api/admin/wallets/${encodeURIComponent(sellerId)}/payout-accounts/${encodeURIComponent(accountId)}/approve`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+          credentials: 'include',
+        }
+      );
+      const data = await res.json();
+      if (data.status) {
+        notify('Guardian payout account approved for withdrawals (₦25,000/day minor cap active).', 'success');
+        await fetchPendingGuardianPayouts();
+      } else {
+        notify(data.message || 'Could not approve guardian payout account.', 'error');
+      }
+    } catch (e: any) {
+      notify(e?.message || 'Approval request failed.', 'error');
+    } finally {
+      setApprovingPayoutId(null);
+    }
+  };
+
+  const handleToggleOrderHold = async (orderId: string, currentlyHeld: boolean) => {
+    setTogglingHoldOrderId(orderId);
+    try {
+      const nextHold = !currentlyHeld;
+      const res = await fetch(`/api/admin/orders/${encodeURIComponent(orderId)}/hold`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        credentials: 'include',
+        body: JSON.stringify({ hold: nextHold }),
+      });
+      const data = await res.json();
+      if (data.status) {
+        setHeldOrderOverrides(prev => ({ ...prev, [orderId]: nextHold }));
+        notify(
+          nextHold
+            ? `Admin hold placed on ${orderId}. Day-5 auto-refund is paused.`
+            : `Admin hold removed from ${orderId}.`,
+          'success'
+        );
+      } else {
+        notify(data.message || 'Could not update order hold status.', 'error');
+      }
+    } catch (e: any) {
+      notify(e?.message || 'Hold toggle failed.', 'error');
+    } finally {
+      setTogglingHoldOrderId(null);
+    }
+  };
+
   React.useEffect(() => {
     if (currentUser?.role !== 'admin') return;
     fetchPayments();
     fetchReports();
     fetchMetrics();
     fetchDbUsers(1);
+    fetchPendingGuardianPayouts();
   }, [currentUser?.role]);
 
   // Calculate live financial figures
@@ -413,6 +493,7 @@ export const AdminPanel: React.FC = () => {
                     setAdminSubRole(tab.id as AdminSubRole);
                     if (tab.id === 'payments') fetchPayments();
                     if (tab.id === 'reports') fetchReports();
+                    if (tab.id === 'finance') fetchPendingGuardianPayouts();
                   }}
                   className={`flex items-center gap-2 px-3 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-black transition-all ${
                     isActive
@@ -1495,6 +1576,58 @@ export const AdminPanel: React.FC = () => {
             </div>
           </div>
 
+          {/* Under-18 Guardian Payout Approvals (One-Time Admin Verification) */}
+          <div className="bg-white rounded-2xl border border-stone-200 overflow-hidden shadow-xs">
+            <div className="p-4 sm:p-5 border-b border-stone-200 bg-amber-50/70 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div>
+                <h3 className="text-base font-bold font-heading text-stone-900 flex items-center gap-2">
+                  <UserCheck className="w-4 h-4 text-[#f95700]" />
+                  <span>Under-18 Guardian Payout Approvals</span>
+                </h3>
+                <p className="text-xs text-stone-600 mt-0.5">
+                  Minor sellers must link a parent/guardian bank account matching the verified guardian ID. Approve once here (₦25,000 daily withdrawal cap enforced server-side).
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={fetchPendingGuardianPayouts}
+                className="px-3 py-1.5 rounded-lg border border-stone-300 bg-white text-xs font-bold text-stone-700 hover:bg-stone-50"
+              >
+                {loadingGuardianPayouts ? 'Refreshing...' : `${pendingGuardianPayouts.length} Pending`}
+              </button>
+            </div>
+
+            {pendingGuardianPayouts.length > 0 ? (
+              <div className="divide-y divide-stone-200">
+                {pendingGuardianPayouts.map((item: any) => (
+                  <div key={item.accountId} className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+                    <div className="space-y-0.5">
+                      <div className="font-bold text-stone-900">
+                        {item.shopName} ({item.ownerName}{item.sellerAge ? `, age ${item.sellerAge}` : ''})
+                      </div>
+                      <div className="text-stone-600">
+                        Verified Guardian ID: <strong>{item.guardianName || 'Not specified'}</strong> · Linked Account:{' '}
+                        <strong>{item.accountName}</strong> ({item.bankName} · {item.accountNumber})
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={approvingPayoutId === item.accountId}
+                      onClick={() => handleApproveGuardianPayout(item.sellerId, item.accountId)}
+                      className="px-3.5 py-2 rounded-lg bg-[#111111] text-[#9FE870] font-bold text-xs hover:bg-stone-800 disabled:opacity-50 shrink-0"
+                    >
+                      {approvingPayoutId === item.accountId ? 'Approving...' : 'Approve Guardian Account'}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="p-4 text-xs text-stone-500">
+                No under-18 guardian payout accounts awaiting approval.
+              </div>
+            )}
+          </div>
+
           {/* Orders & Escrow Financial Super-Powers (Moderator Authority) */}
           <div className="bg-white rounded-2xl border border-stone-200 overflow-hidden shadow-xs">
             <div className="p-4 sm:p-5 border-b border-stone-200 bg-stone-50/60 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
@@ -1504,7 +1637,7 @@ export const AdminPanel: React.FC = () => {
                   <span>Escrow Vault Authority & Direct Intervention</span>
                 </h3>
                 <p className="text-xs text-stone-500 mt-0.5">
-                  Moderator authority over every transaction: bypass the 5-day release timer to instantly credit a seller, or force-refund a buyer immediately.
+                  Moderator authority over every transaction: place an Admin Hold (pauses Day-5 unshipped auto-refund), release escrow early, or force-refund a buyer.
                 </p>
               </div>
               <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200">
@@ -1528,8 +1661,9 @@ export const AdminPanel: React.FC = () => {
                   </thead>
                   <tbody className="divide-y divide-stone-200">
                     {orders.map(order => {
-                      const canRelease = order.status !== 'completed' && order.status !== 'cancelled';
-                      const canRefund = order.status !== 'completed' && order.status !== 'cancelled';
+                      const canRelease = order.status !== 'completed' && order.status !== 'cancelled' && order.status !== 'refunded';
+                      const canRefund = order.status !== 'completed' && order.status !== 'cancelled' && order.status !== 'refunded';
+                      const isHeld = heldOrderOverrides[order.id] !== undefined ? heldOrderOverrides[order.id] : Boolean(order.adminHold);
 
                       return (
                         <tr key={order.id} className="hover:bg-stone-50/50">
@@ -1551,22 +1685,29 @@ export const AdminPanel: React.FC = () => {
                             {formatNaira(order.grandTotal)}
                           </td>
                           <td className="p-3.5">
-                            <span className={`px-2 py-0.5 rounded-md font-bold text-[10px] uppercase tracking-wider ${
-                              order.status === 'completed'
-                                ? 'bg-emerald-100 text-emerald-800'
-                                : order.status === 'disputed'
-                                ? 'bg-rose-100 text-rose-800'
-                                : order.status === 'cancelled'
-                                ? 'bg-stone-200 text-stone-700'
-                                : 'bg-amber-100 text-amber-900'
-                            }`}>
-                              {order.status}
-                            </span>
+                            <div className="flex flex-wrap items-center gap-1">
+                              <span className={`px-2 py-0.5 rounded-md font-bold text-[10px] uppercase tracking-wider ${
+                                order.status === 'completed'
+                                  ? 'bg-emerald-100 text-emerald-800'
+                                  : order.status === 'disputed'
+                                  ? 'bg-rose-100 text-rose-800'
+                                  : order.status === 'cancelled' || order.status === 'refunded'
+                                  ? 'bg-stone-200 text-stone-700'
+                                  : 'bg-amber-100 text-amber-900'
+                              }`}>
+                                {order.status}
+                              </span>
+                              {isHeld && (
+                                <span className="px-1.5 py-0.5 rounded bg-purple-100 text-purple-900 font-bold text-[10px] uppercase">
+                                  ADMIN HOLD
+                                </span>
+                              )}
+                            </div>
                           </td>
                           <td className="p-3.5 text-[11px] font-mono text-stone-500">
                             {order.status === 'completed'
                               ? 'Funds Released'
-                              : order.status === 'cancelled'
+                              : order.status === 'cancelled' || order.status === 'refunded'
                               ? 'Refunded'
                               : new Date(order.autoReleaseAt).toLocaleDateString()}
                           </td>
@@ -1580,6 +1721,21 @@ export const AdminPanel: React.FC = () => {
                               >
                                 Safe Pass
                               </button>
+                              {canRelease && (
+                                <button
+                                  type="button"
+                                  disabled={togglingHoldOrderId === order.id}
+                                  onClick={() => handleToggleOrderHold(order.id, isHeld)}
+                                  className={`px-2.5 py-1.5 rounded-lg font-bold text-[11px] transition-colors border ${
+                                    isHeld
+                                      ? 'bg-purple-600 text-white border-purple-700 hover:bg-purple-700'
+                                      : 'bg-white text-purple-800 border-purple-300 hover:bg-purple-50'
+                                  }`}
+                                  title="Toggle Admin Hold to pause/resume Day-5 unshipped auto-refund"
+                                >
+                                  {isHeld ? 'Release Hold' : 'Admin Hold'}
+                                </button>
+                              )}
                               {canRelease && (
                                 <button
                                   type="button"

@@ -238,7 +238,7 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
                 Once the buyer receives the item and taps &quot;Item received&quot;, the payment is released into the seller&apos;s Available balance.
               </p>
               <p>
-                <strong>5-Day Auto-Release Rule:</strong> Once an order is dispatched (shipped or delivered) and 5 days pass after payment without an open dispute or buyer confirmation, the funds are automatically released to the seller. Orders never marked shipped by the seller never auto-release.
+                <strong>5-Day Auto-Release &amp; Unshipped Order Rule:</strong> Once an order is dispatched (shipped or delivered) and 5 days pass after payment without an open dispute or buyer confirmation, the funds are automatically released to the seller. If a paid order has not been shipped after <strong>3 days</strong>, we remind the seller; if still unshipped after <strong>5 days</strong> (with no open dispute or admin hold), the order is automatically cancelled and 100% refunded to the buyer.
               </p>
             </section>
 
@@ -261,7 +261,7 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
                 <strong>24-Hour Payout Cooling Period:</strong> When you add or change a payout account, you must wait 24 hours before you can withdraw to it. This security measure prevents unauthorized fund drainage if your account is ever compromised.
               </p>
               <p>
-                The legal name on your payout bank account must match your verified seller identity.
+                The legal name on your payout bank account must match your verified seller identity—or, for under-18 sellers, your parent or guardian&apos;s verified identity (approved once by Admin, with a ₦25,000 daily withdrawal limit for under-18 sellers).
               </p>
             </section>
 
@@ -271,10 +271,10 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
                 To sell products and withdraw earnings, sellers must complete identity verification. This requires submitting a National Identification Number (NIN), a photo of your valid ID slip/card, and a live selfie.
               </p>
               <p>
-                If the seller is under 18, a parent or guardian must provide consent and their details, and withdrawals must go to a verified account.
+                If the seller is under 18, a parent or guardian must provide consent and their verified ID, and all withdrawals must go to a bank account belonging to that parent/guardian after a one-time Admin approval (capped at ₦25,000 per day).
               </p>
               <p>
-                Your ID photos and selfie are permanently deleted within 30 days after your review is finished. Your full NIN is never displayed to anyone.
+                Your ID photos and selfie are permanently deleted <strong>immediately after the admin verification decision</strong>. We retain only the last 4 digits of the NIN, a cryptographic hash, the decision status, and the review date.
               </p>
             </section>
 
@@ -386,7 +386,7 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
               <h2 className="text-base font-black text-[#111111] dark:text-white">5. How Long We Keep Your Data</h2>
               <ul className="list-disc pl-5 space-y-1.5">
                 <li>
-                  <strong>ID photos and live selfies:</strong> Automatically deleted within <strong>30 days</strong> after your verification check is completed.
+                  <strong>ID photos and live selfies:</strong> Permanently deleted <strong>immediately</strong> after your verification decision is completed. Only the last 4 NIN digits, an encrypted hash, the decision, and the date are kept.
                 </li>
                 <li>
                   <strong>Full NIN:</strong> Your full NIN is never displayed to anyone and is only processed to verify identity.
@@ -795,8 +795,8 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
                   a: 'When you make a payment via Flutterwave, your order funds remain in escrow hold inside the platform ledger until you receive your order and tap "Item received" in the app.',
                 },
                 {
-                  q: 'What happens if I forget to tap "Item received"?',
-                  a: 'Once the seller marks your order shipped or delivered and 5 days pass after payment with no open dispute, the escrow automatically releases to the seller. Orders that were never marked shipped never auto-release.',
+                  q: 'What happens if I forget to tap "Item received" or the seller never ships?',
+                  a: 'Once the seller marks your order shipped or delivered and 5 days pass after payment with no open dispute, the escrow automatically releases to the seller. If a paid order is never marked shipped, we remind the seller at day 3, and at day 5 we automatically cancel and issue a 100% refund to you (unless there is an open dispute or an admin hold).',
                 },
                 {
                   q: 'How do I get verified as a seller?',
@@ -804,11 +804,11 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
                 },
                 {
                   q: 'What happens to my ID photo and selfie after verification?',
-                  a: 'Your ID photo and selfie are permanently deleted within 30 days after verification is completed. Your full NIN is never shown to anyone.',
+                  a: 'Your ID photo and selfie are permanently deleted immediately after the admin verification decision. Only the last 4 NIN digits, a cryptographic hash, the decision, and the review date are kept.',
                 },
                 {
                   q: 'How do sellers withdraw their earnings?',
-                  a: 'Sellers withdraw from their Available balance directly to any supported Nigerian bank account. The minimum withdrawal is ₦1,000, confirmed by an email code.',
+                  a: 'Sellers withdraw from their Available balance directly to any supported Nigerian bank account. The minimum withdrawal is ₦1,000, confirmed by an email code (₦0 transfer fee). For sellers under 18, the bank account must belong to the verified parent/guardian, requires a one-time Admin approval, and has a ₦25,000 daily withdrawal cap.',
                 },
                 {
                   q: 'Why is there a 24-hour wait on a new payout account?',

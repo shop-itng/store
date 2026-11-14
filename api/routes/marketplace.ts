@@ -8,7 +8,7 @@ import {
   AuthenticatedRequest,
 } from '../auth/middleware.js';
 import { logAuditEvent } from '../auth/sessionStore.js';
-import { nairaToKobo, koboToNaira, calculatePricingInKobo } from '../lib/payments.js';
+import { nairaToKobo, koboToNaira, calculatePricingInKobo, processUnshippedOrders } from '../lib/payments.js';
 
 const router = express.Router();
 
@@ -739,6 +739,7 @@ router.get('/orders', requireAuth, async (req: AuthenticatedRequest, res: Respon
         handshakeOtp: isBuyerOrAdmin ? row.handshake_otp : undefined,
         handshakeVerified: Boolean(row.handshake_verified),
         packedPhotoUrl: row.packed_photo_url || undefined,
+        adminHold: Boolean(row.admin_hold),
         autoReleaseAt: row.auto_release_at,
         createdAt: row.created_at,
         packedAt: row.packed_at,
@@ -1118,10 +1119,12 @@ export async function processEscrowAutoRelease(): Promise<{ releasedCount: numbe
 // POST /api/escrow/auto-release - Strictly guarded by Cron Secret or Admin Session (C2 & C8)
 router.post('/escrow/auto-release', requireCronOrAdmin, async (_req, res) => {
   const result = await processEscrowAutoRelease();
+  const unshipped = await processUnshippedOrders();
   return res.json({
     status: true,
-    message: `Escrow scan completed. ${result.releasedCount} orders auto-released.`,
+    message: `Escrow scan completed. ${result.releasedCount} orders auto-released; ${unshipped.remindedCount} unshipped reminders; ${unshipped.refundedCount} Day-5 auto-refunds.`,
     ...result,
+    unshipped,
   });
 });
 
@@ -1152,6 +1155,17 @@ router.get('/wallet', requirePaymentsEnabled, requireAuth, async (req: Authentic
       'SELECT * FROM shopit_ledger_entries WHERE wallet_id = $1 ORDER BY created_at DESC LIMIT 100',
       [requestedSellerId]
     );
+
+    const sellerMetaRes = await dbQuery(
+      `SELECT s.under_18, s.guardian_name, u.age
+       FROM shopit_sellers s
+       LEFT JOIN shopit_users u ON u.id = s.user_id
+       WHERE s.id = $1 OR s.user_id = $1 LIMIT 1`,
+      [requestedSellerId]
+    );
+    const metaRow = sellerMetaRes.rows[0];
+    const parsedAge = metaRow?.age !== null && metaRow?.age !== undefined ? Number(metaRow.age) : null;
+    const isMinorSeller = Boolean(metaRow?.under_18) || (parsedAge !== null && parsedAge < 18);
 
     const pendingKobo = parseInt(walletRow.pending_balance_kobo || '0', 10);
     const availableKobo = parseInt(walletRow.available_balance_kobo || '0', 10);
@@ -1184,6 +1198,9 @@ router.get('/wallet', requirePaymentsEnabled, requireAuth, async (req: Authentic
         totalWithdrawnKobo: withdrawnKobo,
         isFrozen: Boolean(walletRow.is_frozen),
         freezeReason: walletRow.freeze_reason,
+        isMinorSeller,
+        dailyWithdrawalCap: isMinorSeller ? 25000 : 300000,
+        guardianName: metaRow?.guardian_name || undefined,
         payoutAccounts: Array.isArray(walletRow.payout_accounts) ? walletRow.payout_accounts : [],
         activePayoutAccountId: walletRow.active_payout_account_id,
         ledger: ledgerEntries,
@@ -1264,18 +1281,47 @@ router.post('/wallet/payout-account', requirePaymentsEnabled, requireAuth, async
 
     const sellerId = user.sellerId || user.userId;
     const sellerRes = await dbQuery(
-      'SELECT verification_status, verified_legal_name, guardian_name FROM shopit_sellers WHERE id = $1 OR user_id = $2',
+      `SELECT s.verification_status, s.verified_legal_name, s.guardian_name, s.guardian_consent, s.under_18, u.age
+       FROM shopit_sellers s
+       LEFT JOIN shopit_users u ON u.id = s.user_id
+       WHERE s.id = $1 OR s.user_id = $2`,
       [sellerId, user.userId]
     );
     const sellerRow = sellerRes.rows[0];
-    const verifiedLegalName = sellerRow?.verified_legal_name || sellerRow?.guardian_name || user.name;
-    const resolvedTokens = resolvedAccountName.toLowerCase().split(/\s+/).filter(Boolean);
-    const legalTokens = String(verifiedLegalName).trim().toLowerCase().split(/\s+/).filter(Boolean);
-    const overlap = resolvedTokens.filter(t => t.length >= 2 && legalTokens.includes(t)).length;
-    if (overlap === 0 && user.role !== 'admin') {
+    const parsedAge = sellerRow?.age !== null && sellerRow?.age !== undefined ? Number(sellerRow.age) : null;
+    const isMinorSeller = Boolean(sellerRow?.under_18) || (parsedAge !== null && parsedAge < 18);
+
+    const isSellerVerified =
+      sellerRow?.verification_status === 'verified' || sellerRow?.verification_status === 'approved';
+    if (!isSellerVerified && user.role !== 'admin') {
       return res.status(403).json({
         status: false,
-        message: `Resolved bank account name (${resolvedAccountName}) must match verified identity (${verifiedLegalName}).`,
+        message: 'Complete NIN identity verification before linking a payout bank account.',
+      });
+    }
+
+    if (isMinorSeller && (!sellerRow?.guardian_name || !sellerRow?.guardian_consent)) {
+      return res.status(403).json({
+        status: false,
+        message: 'Under-18 sellers must submit verified parent/guardian identity and signed consent before linking a guardian payout account.',
+      });
+    }
+
+    const expectedLegalName = isMinorSeller
+      ? String(sellerRow.guardian_name).trim()
+      : String(sellerRow?.verified_legal_name || user.name).trim();
+
+    const resolvedTokens = resolvedAccountName.toLowerCase().split(/\s+/).filter(Boolean);
+    const legalTokens = expectedLegalName.toLowerCase().split(/\s+/).filter(Boolean);
+    const overlap = resolvedTokens.filter(t => t.length >= 2 && legalTokens.includes(t)).length;
+    const requiredMatches = legalTokens.length >= 2 ? 2 : 1;
+
+    if (overlap < requiredMatches && user.role !== 'admin') {
+      return res.status(403).json({
+        status: false,
+        message: isMinorSeller
+          ? `Under-18 payout account holder (${resolvedAccountName}) must match your guardian's verified ID name (${expectedLegalName}).`
+          : `Resolved bank account name (${resolvedAccountName}) must match verified identity (${expectedLegalName}).`,
       });
     }
 
@@ -1296,6 +1342,9 @@ router.post('/wallet/payout-account', requirePaymentsEnabled, requireAuth, async
       accountNumber: cleanAccountNumber,
       accountName: resolvedAccountName || String(accountName || '').trim().toUpperCase(),
       isVerified: true,
+      isMinorGuardianAccount: isMinorSeller,
+      guardianName: isMinorSeller ? expectedLegalName : undefined,
+      adminApproved: !isMinorSeller,
       coolingPeriodEndsAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
       createdAt: new Date().toISOString(),
     };
@@ -1312,15 +1361,27 @@ router.post('/wallet/payout-account', requirePaymentsEnabled, requireAuth, async
     );
 
     await logAuditEvent({
-      action: 'PAYOUT_ACCOUNT_LINKED',
+      action: isMinorSeller ? 'MINOR_GUARDIAN_PAYOUT_ACCOUNT_LINKED' : 'PAYOUT_ACCOUNT_LINKED',
       actor: { id: user.userId, email: user.email, role: user.role },
       target: { type: 'wallet', id: sellerId },
-      details: { bankName: newAccount.bankName, bankCode: newAccount.bankCode, last4: newAccount.accountNumber.slice(-4) },
+      details: {
+        bankName: newAccount.bankName,
+        bankCode: newAccount.bankCode,
+        last4: newAccount.accountNumber.slice(-4),
+        isMinorGuardianAccount: isMinorSeller,
+        adminApproved: newAccount.adminApproved,
+      },
       ip: req.ip,
       userAgent: req.get('user-agent'),
     });
 
-    return res.json({ status: true, account: newAccount, message: 'Payout account verified via Flutterwave and added with 24-hour cooling period.' });
+    return res.json({
+      status: true,
+      account: newAccount,
+      message: isMinorSeller
+        ? 'Guardian payout account verified via Flutterwave. Requires one-time Admin approval and 24-hour cooling period before withdrawals.'
+        : 'Payout account verified via Flutterwave and added with 24-hour cooling period.',
+    });
   } catch (err: any) {
     return res.status(500).json({ status: false, message: err.message });
   }

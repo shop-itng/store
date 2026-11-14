@@ -61,7 +61,17 @@ export const SellerWalletView: React.FC = () => {
   const [ledgerFilter, setLedgerFilter] = useState<'all' | LedgerEntryType>('all');
 
   // New payout account form & live Flutterwave banks
-  const verifiedIdName = currentUser?.name || currentSeller?.shopName || 'Seller Identity';
+  const isMinorSeller = Boolean(
+    currentWallet?.isMinorSeller ||
+      currentSeller?.under18 ||
+      (typeof currentUser?.age === 'number' && currentUser.age < 18)
+  );
+  const guardianLegalName =
+    currentWallet?.guardianName || currentSeller?.guardianName || currentUser?.guardianName || '';
+  const sellerLegalName =
+    currentSeller?.verifiedLegalName || currentUser?.name || currentSeller?.shopName || 'Seller Identity';
+  const expectedAccountHolderName = isMinorSeller ? guardianLegalName || 'Verified Guardian Identity' : sellerLegalName;
+  const dailyWithdrawalCap = currentWallet?.dailyWithdrawalCap || (isMinorSeller ? 25000 : 300000);
   const [supportedBanks, setSupportedBanks] = useState<SupportedBank[]>([]);
   const [loadingBanks, setLoadingBanks] = useState(false);
   const [banksError, setBanksError] = useState<string | null>(null);
@@ -150,6 +160,7 @@ export const SellerWalletView: React.FC = () => {
   );
 
   const isSelectedAccountCooled = selectedAccount ? isPayoutAccountCooled(selectedAccount) : { isCooled: true, hoursRemaining: 0 };
+  const isSelectedAccountAdminPending = Boolean(selectedAccount && selectedAccount.adminApproved === false);
 
   // Option 1: Shop It covers Flutterwave transfer fees (₦0 seller withdrawal fee)
   const withdrawalFee = 0;
@@ -213,6 +224,19 @@ export const SellerWalletView: React.FC = () => {
       return;
     }
 
+    if (isSelectedAccountAdminPending) {
+      notify('Under-18 seller guardian payout account is awaiting one-time Admin approval.', 'error');
+      return;
+    }
+
+    if (withdrawAmount > dailyWithdrawalCap) {
+      notify(
+        `Daily withdrawal limit is ${formatNaira(dailyWithdrawalCap)} per 24 hours${isMinorSeller ? ' for under-18 seller accounts' : ''}.`,
+        'error'
+      );
+      return;
+    }
+
     if (!withdrawalOtp.trim() || withdrawalOtp.trim().length !== 6) {
       notify('Please request and enter the 6-digit Email OTP sent to your registered email address.', 'error');
       return;
@@ -250,10 +274,21 @@ export const SellerWalletView: React.FC = () => {
       return;
     }
 
-    // Name match rule
-    const nameCheck = validateAccountNameMatch(accountName, verifiedIdName);
+    if (isMinorSeller && !guardianLegalName.trim()) {
+      notify('Under-18 sellers require a verified parent/guardian identity on file before linking a payout account.', 'error');
+      return;
+    }
+
+    // Name match rule (adult matches seller NIN name; under-18 matches guardian verified ID name)
+    const nameCheck = validateAccountNameMatch(accountName, expectedAccountHolderName);
     if (!nameCheck.isMatch) {
-      notify(nameCheck.reason || 'Account name does not match verified seller ID.', 'error');
+      notify(
+        nameCheck.reason ||
+          (isMinorSeller
+            ? 'Under-18 payout account name must match verified parent/guardian ID.'
+            : 'Account name does not match verified seller ID.'),
+        'error'
+      );
       return;
     }
 
@@ -414,34 +449,44 @@ export const SellerWalletView: React.FC = () => {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
             {currentWallet.payoutAccounts.map(acc => {
               const cooled = isPayoutAccountCooled(acc);
+              const awaitingAdmin = acc.adminApproved === false;
               return (
                 <div
                   key={acc.id}
                   className="p-3.5 rounded-xl border-2 border-slate-200 dark:border-[#27272A] bg-slate-50 dark:bg-[#1E2028] flex items-center justify-between gap-3 text-xs"
                 >
                   <div>
-                    <div className="flex items-center gap-1.5 font-black text-slate-900 dark:text-white">
+                    <div className="flex flex-wrap items-center gap-1.5 font-black text-slate-900 dark:text-white">
                       <span>{acc.bankName}</span>
                       <span className="text-[10px] bg-[#9FE870] text-[#111111] border border-[#111111] px-1.5 py-0.2 rounded font-bold">
-                        Verified Name Match
+                        {acc.isMinorGuardianAccount ? 'Guardian ID Match' : 'Verified Name Match'}
                       </span>
+                      {awaitingAdmin && (
+                        <span className="text-[10px] bg-amber-100 text-amber-900 border border-amber-400 px-1.5 py-0.2 rounded font-bold">
+                          Pending One-Time Admin Approval
+                        </span>
+                      )}
                     </div>
                     <div className="text-xs text-slate-600 dark:text-slate-300 font-mono-numbers mt-0.5">
                       {acc.accountNumber} · <strong>{acc.accountName}</strong>
                     </div>
-                    {!cooled.isCooled ? (
+                    {awaitingAdmin ? (
                       <span className="text-[11px] text-amber-800 font-bold block mt-1">
-                        ⏳ 24-hr cooling active ({cooled.hoursRemaining}h remaining)
+                        Awaiting one-time Shop It Admin review of guardian bank account
+                      </span>
+                    ) : !cooled.isCooled ? (
+                      <span className="text-[11px] text-amber-800 font-bold block mt-1">
+                        24-hr cooling active ({cooled.hoursRemaining}h remaining)
                       </span>
                     ) : (
                       <span className="text-[11px] text-emerald-800 font-bold block mt-1">
-                        ✓ Ready for Flutterwave Transfer
+                        Ready for Flutterwave Transfer ({formatNaira(dailyWithdrawalCap)}/day cap)
                       </span>
                     )}
                   </div>
 
                   <span className="text-[11px] font-bold text-slate-500 bg-white px-2 py-1 rounded border border-slate-200">
-                    Default
+                    {acc.isMinorGuardianAccount ? 'Guardian' : 'Default'}
                   </span>
                 </div>
               );
@@ -602,7 +647,7 @@ export const SellerWalletView: React.FC = () => {
                     type="number"
                     step={100}
                     min={1000}
-                    max={currentWallet.availableBalance}
+                    max={Math.min(currentWallet.availableBalance, dailyWithdrawalCap)}
                     required
                     value={withdrawAmount}
                     onChange={e => setWithdrawAmount(Number(e.target.value))}
@@ -612,7 +657,7 @@ export const SellerWalletView: React.FC = () => {
                 <div className="flex items-center justify-between text-[11px] text-slate-500 mt-1">
                   <span>Available: {formatNaira(currentWallet.availableBalance)}</span>
                   <span className="text-slate-700 font-bold">
-                    Min: ₦1,000 · ₦0 Transfer Fee (Covered by Shop It)
+                    Min: ₦1,000 · Cap: {formatNaira(dailyWithdrawalCap)}/day · ₦0 Fee
                   </span>
                 </div>
               </div>
@@ -650,6 +695,17 @@ export const SellerWalletView: React.FC = () => {
                   </button>
                 )}
               </div>
+
+              {/* Under-18 Guardian Approval Warning */}
+              {isSelectedAccountAdminPending && (
+                <div className="p-3 bg-amber-50 rounded-xl border border-amber-300 text-amber-900 text-[11px] flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                  <span>
+                    <strong>Pending One-Time Admin Guardian Approval: </strong>
+                    Under-18 seller guardian payout accounts must be approved once by a Shop It Admin before withdrawals open.
+                  </span>
+                </div>
+              )}
 
               {/* Cooling Period Warning */}
               {selectedAccount && !isSelectedAccountCooled.isCooled && (
@@ -738,7 +794,7 @@ export const SellerWalletView: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  disabled={isWithdrawing || !isSelectedAccountCooled.isCooled}
+                  disabled={isWithdrawing || !isSelectedAccountCooled.isCooled || isSelectedAccountAdminPending}
                   className="px-6 py-2.5 bg-[#FF6B00] hover:bg-[#ff7a1a] disabled:bg-stone-300 disabled:text-stone-500 text-[#111111] font-black rounded-xl border-2 border-[#111111] shadow-[0_3px_0_#111111] active:translate-y-0.5 transition-all flex items-center gap-2 text-xs"
                 >
                   <span className="w-2 h-2 rounded-full bg-[#9FE870] border border-[#111111]" />
@@ -834,7 +890,16 @@ export const SellerWalletView: React.FC = () => {
                   </span>
                 )}
                 <span className="text-[11px] text-slate-600 mt-1 block">
-                  Must match your verified seller identity: <strong>{verifiedIdName.toUpperCase()}</strong>.
+                  {isMinorSeller ? (
+                    <>
+                      Under-18 rule: Must belong to &amp; match verified guardian ID:{' '}
+                      <strong>{expectedAccountHolderName.toUpperCase()}</strong>. Requires one-time Admin approval (₦25,000/day cap).
+                    </>
+                  ) : (
+                    <>
+                      Must match your verified seller identity: <strong>{expectedAccountHolderName.toUpperCase()}</strong>.
+                    </>
+                  )}
                 </span>
               </div>
 

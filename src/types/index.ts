@@ -228,6 +228,7 @@ export interface Order {
   completedAt?: string;
   autoReleaseAt: string; // 5-day auto-release timer
   disputeReason?: string;
+  adminHold?: boolean;
   hasReview: boolean;
   // Phase 4: Campus Safe Logistics & Handshake Verification
   handshakeOtp?: string; // e.g. "4912"
@@ -280,9 +281,14 @@ export interface PayoutAccount {
   bankCode: string;
   bankName: string; // Opay, PalmPay, Kuda, GTBank, Access Bank, Zenith
   accountNumber: string;
-  accountName: string; // Must match verified ID name
+  accountName: string; // Must match verified ID name (or guardian ID for under-18)
   isVerified: boolean;
   coolingPeriodEndsAt: string; // 24-hr cooling period
+  isMinorGuardianAccount?: boolean;
+  guardianName?: string;
+  adminApproved?: boolean;
+  adminApprovedBy?: string;
+  adminApprovedAt?: string;
   createdAt: string;
 }
 
@@ -293,6 +299,9 @@ export interface SellerWallet {
   totalWithdrawn: number;
   isFrozen: boolean;
   freezeReason?: string;
+  isMinorSeller?: boolean;
+  dailyWithdrawalCap?: number;
+  guardianName?: string;
   payoutAccounts: PayoutAccount[];
   activePayoutAccountId?: string;
   ledger: LedgerEntry[];
