@@ -45,7 +45,7 @@ export const OrderTrackingModal: React.FC<Props> = ({
     {
       step: 1,
       title: 'Order Placed & Escrow Created',
-      desc: 'Payment confirmed via Paystack. Funds locked in secure Escrow.',
+      desc: 'Payment confirmed via Flutterwave. Funds locked in secure Escrow.',
       time: createdAtDate.toLocaleDateString('en-NG', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }),
       done: isStep1Done,
       active: order.status === 'paid',

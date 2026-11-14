@@ -86,32 +86,32 @@ async function main() {
     })
   );
 
-  // 4. POST /api/paystack/initialize
+  // 4. POST /api/payments/initialize
   tests.push(
-    await runTest('Payment Initialization', 'POST', '/api/paystack/initialize', {
+    await runTest('Payment Initialization', 'POST', '/api/payments/initialize', {
       email: 'buyer@test.ng',
       sellerPrice: 1000,
     })
   );
 
-  // 5. POST /api/paystack/webhook
+  // 5. POST /api/payments/webhook
   tests.push(
-    await runTest('Payment Webhook', 'POST', '/api/paystack/webhook', {
-      event: 'charge.success',
+    await runTest('Payment Webhook', 'POST', '/api/payments/webhook', {
+      event: 'charge.completed',
     })
   );
 
-  // 6. GET /api/paystack/verify/:reference
+  // 6. GET /api/payments/verify/:reference
   tests.push(
-    await runTest('Payment Verification Query', 'GET', '/api/paystack/verify/SAMPLE_REF_123')
+    await runTest('Payment Verification Query', 'GET', '/api/payments/verify/SAMPLE_REF_123')
   );
 
-  // 7. POST /api/paystack/transfer (Payout safety switch)
+  // 7. POST /api/payments/transfer (Payout safety switch)
   tests.push(
     await runTest(
       'Seller Withdrawal / Payout',
       'POST',
-      '/api/paystack/transfer',
+      '/api/payments/transfer',
       { amount: 5000, payoutAccountId: 'acc_123', otpCode: '123456' },
       undefined,
       'Payouts are currently disabled by system safety switch'

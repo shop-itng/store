@@ -28,20 +28,6 @@ async function startServer() {
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Shop It server running on http://0.0.0.0:${PORT}`);
   });
-
-  // Background 5-day escrow auto-release check every 5 minutes
-  import('./api/routes/marketplace.js').then(({ processEscrowAutoRelease }) => {
-    setInterval(async () => {
-      try {
-        const res = await processEscrowAutoRelease();
-        if (res.releasedCount > 0) {
-          console.log(`[Escrow Auto-Release] Auto-released ${res.releasedCount} order(s): ${res.orderIds.join(', ')}`);
-        }
-      } catch (err: any) {
-        console.warn('[Escrow Auto-Release Cron Error]:', err.message);
-      }
-    }, 5 * 60 * 1000);
-  });
 }
 
 // Only start the standalone HTTP listener when running server.ts directly

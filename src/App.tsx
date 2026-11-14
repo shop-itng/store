@@ -25,7 +25,6 @@ import { BroadcastBanner } from './components/BroadcastBanner';
 import { Analytics } from '@vercel/analytics/react';
 import { Loading } from './components/Loading';
 import { ErrorBoundary } from './components/ErrorBoundary';
-import { TestModeBanner } from './components/TestModeBanner';
 import { NotFoundView } from './components/NotFoundView';
 import { ResetPasswordPage } from './components/ResetPasswordPage';
 import { Store, ShieldCheck, MapPin, Star, ArrowRight, PackageOpen, PlusCircle, ShoppingBag, ShieldAlert } from 'lucide-react';
@@ -102,9 +101,6 @@ const MarketplaceContent: React.FC = () => {
 
   return (
     <div className="min-h-screen w-full max-w-full overflow-x-hidden flex flex-col bg-[#f9fafb] dark:bg-[#0D0E12] text-neutral-900 dark:text-[#F4F4F5] pb-20 md:pb-0 transition-colors duration-200">
-      {/* Global Paystack Test Mode Banner (Point 10) */}
-      <TestModeBanner />
-
       {/* Role Switcher Toolbar */}
       <RoleSwitcherBar />
 
@@ -435,7 +431,7 @@ const MarketplaceContent: React.FC = () => {
       {/* Authentication and Onboarding Modal */}
       <AuthModal />
 
-      {/* Paystack Escrow Checkout Modal */}
+      {/* Flutterwave Escrow Checkout Modal */}
       <CheckoutModal />
 
       {/* Escrow Dispute & Problem Modal */}

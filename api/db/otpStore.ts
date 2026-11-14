@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { getPool, query as dbQuery } from './postgres.js';
+import { getPool, withTransaction } from './postgres.js';
 
 export interface StoredOtpRecord {
   email: string;
@@ -17,12 +17,27 @@ const RESEND_COOLDOWN_MS = 60 * 1000; // 60 seconds
 const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
 const MAX_EMAIL_REQUESTS = 5; // 5 per email per 15 mins
 const MAX_DEVICE_REQUESTS = 10; // 10 per device per 15 mins
+const SIGNUP_PROOF_TTL_MS = 30 * 60 * 1000; // 30 minutes
 
-// Internal salt for hashing 6-digit codes
-const OTP_HASH_SALT = process.env.OTP_HASH_SALT || 'shopit_brevo_otp_salt_2026';
+const IS_PROD = process.env.NODE_ENV === 'production' || Boolean(process.env.VERCEL);
+const ENV_OTP_SALT = (process.env.OTP_HASH_SALT || '').trim();
+if (IS_PROD && !ENV_OTP_SALT) {
+  console.error('[SECURITY CRITICAL] OTP_HASH_SALT environment variable is missing in production.');
+}
+// In non-production dev/test environments, generate a random per-process salt (never a hardcoded string)
+const EPHEMERAL_DEV_SALT = crypto.randomBytes(32).toString('hex');
+
+function getOtpSalt(): string {
+  if (ENV_OTP_SALT) return ENV_OTP_SALT;
+  if (IS_PROD) {
+    throw new Error('OTP_HASH_SALT must be configured in production.');
+  }
+  return EPHEMERAL_DEV_SALT;
+}
 
 export function hashOtp(code: string): string {
-  return crypto.createHash('sha256').update(`${code.trim()}:${OTP_HASH_SALT}`).digest('hex');
+  const salt = getOtpSalt();
+  return crypto.createHash('sha256').update(`${code.trim()}:${salt}`).digest('hex');
 }
 
 export function verifyOtpHash(enteredCode: string, storedHash: string): boolean {
@@ -35,25 +50,18 @@ export function verifyOtpHash(enteredCode: string, storedHash: string): boolean 
   }
 }
 
-// -------------------------------------------------------------
-// Database Adapters: Vercel KV / Upstash Redis and PostgreSQL (Zero File System Dependencies)
-// -------------------------------------------------------------
 const KV_URL = (process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || '').trim();
 const KV_TOKEN = (process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || '').trim();
 
-// In-memory ephemeral fallback maps for local development/test execution
-const memoryOtps = new Map<string, StoredOtpRecord>();
-const memoryRateLimits = new Map<string, number[]>();
-const memoryPayments = new Map<string, any>();
-const memoryReports = new Map<string, any>();
-
-// KV / Redis REST command helper (uses POST array format for full JSON safety and zero truncation)
 async function runKvCommand(command: string, ...args: any[]): Promise<any> {
   if (!KV_URL || !KV_TOKEN) return null;
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 4000);
-    const commandPayload = [command.toUpperCase(), ...args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a)))];
+    const commandPayload = [
+      command.toUpperCase(),
+      ...args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))),
+    ];
     const url = KV_URL.replace(/\/$/, '');
 
     const res = await fetch(url, {
@@ -67,33 +75,66 @@ async function runKvCommand(command: string, ...args: any[]): Promise<any> {
     });
     clearTimeout(timeout);
 
-    if (!res.ok) {
-      console.warn(`[Upstash Redis OTP] ${command} returned HTTP ${res.status}. Falling back gracefully.`);
-      return null;
-    }
+    if (!res.ok) return null;
     const json: any = await res.json();
     return json.result;
-  } catch (err: any) {
-    console.warn(`[Upstash Redis OTP Error] ${command}: ${err.message}. Safely falling back to memory/db.`);
-    return null;
-  }
-}
-
-// Shared PostgreSQL Client Pool from centralized postgres.ts
-async function getPgPool() {
-  try {
-    return await getPool();
   } catch {
     return null;
   }
 }
 
-// -------------------------------------------------------------
-// Core OTP Database API
-// -------------------------------------------------------------
+/**
+ * Generic shared rate limit checker & recorder using Redis + PostgreSQL (zero in-memory Maps).
+ */
+export async function checkAndRecordRateLimit(
+  bucketKey: string,
+  maxRequests: number,
+  windowMs: number
+): Promise<{ allowed: boolean; retryAfterSeconds?: number }> {
+  const now = Date.now();
+  const cleanKey = `rl:${bucketKey}`;
+
+  if (KV_URL && KV_TOKEN) {
+    try {
+      const windowSec = Math.max(1, Math.ceil(windowMs / 1000));
+      const countRaw = await runKvCommand('INCR', cleanKey);
+      if (countRaw !== null) {
+        const count = Number(countRaw);
+        if (count === 1) {
+          await runKvCommand('EXPIRE', cleanKey, windowSec);
+        }
+        if (count > maxRequests) {
+          return { allowed: false, retryAfterSeconds: windowSec };
+        }
+        return { allowed: true };
+      }
+    } catch {}
+  }
+
+  return withTransaction(async client => {
+    const res = await client.query(
+      'SELECT timestamps FROM shopit_rate_limits WHERE key = $1 FOR UPDATE',
+      [cleanKey]
+    );
+    const recent: number[] = (res.rows[0]?.timestamps || []).filter(
+      (t: number) => now - t < windowMs
+    );
+    if (recent.length >= maxRequests) {
+      const oldest = recent[0];
+      const retryAfterSeconds = Math.max(1, Math.ceil((oldest + windowMs - now) / 1000));
+      return { allowed: false, retryAfterSeconds };
+    }
+    recent.push(now);
+    await client.query(
+      'INSERT INTO shopit_rate_limits (key, timestamps) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET timestamps = $2',
+      [cleanKey, JSON.stringify(recent)]
+    );
+    return { allowed: true };
+  });
+}
 
 /**
- * Checks email (5 / 15m) and device (10 / 15m) rate limits strictly on the database.
+ * Checks email (5 / 15m) and device (10 / 15m) rate limits strictly on the database / Redis.
  */
 export async function checkRateLimit(
   email: string,
@@ -106,7 +147,6 @@ export async function checkRateLimit(
   const emailKey = `shopit_rl_email_${cleanEmail}`;
   const devKey = `shopit_rl_dev_${cleanDevice}`;
 
-  // 1. Check Vercel KV / Upstash
   if (KV_URL && KV_TOKEN) {
     try {
       const emailRaw = await runKvCommand('GET', emailKey);
@@ -133,46 +173,14 @@ export async function checkRateLimit(
         }
       }
       return { allowed: true };
-    } catch (err: any) {
-      console.warn('[RateLimit KV Check Error]', err.message);
-    }
+    } catch {}
   }
 
-  // 2. Check PostgreSQL
-  const pool = await getPgPool();
-  if (pool) {
-    try {
-      const res = await pool.query('SELECT timestamps FROM shopit_rate_limits WHERE key = $1', [emailKey]);
-      const emailTimes: number[] = (res.rows[0]?.timestamps || []).filter(
-        (t: number) => now - t < RATE_LIMIT_WINDOW_MS
-      );
-      if (emailTimes.length >= MAX_EMAIL_REQUESTS) {
-        return {
-          allowed: false,
-          reason: 'Too many OTP requests for this email. Please wait before trying again.',
-        };
-      }
-
-      if (cleanDevice !== 'dev_unknown') {
-        const dRes = await pool.query('SELECT timestamps FROM shopit_rate_limits WHERE key = $1', [devKey]);
-        const devTimes: number[] = (dRes.rows[0]?.timestamps || []).filter(
-          (t: number) => now - t < RATE_LIMIT_WINDOW_MS
-        );
-        if (devTimes.length >= MAX_DEVICE_REQUESTS) {
-          return {
-            allowed: false,
-            reason: 'Too many OTP requests from this device. Please wait before trying again.',
-          };
-        }
-      }
-      return { allowed: true };
-    } catch (err: any) {
-      console.warn('[RateLimit PG Check Error]', err.message);
-    }
-  }
-
-  // 3. Fallback: In-memory store for local dev
-  const emailTimes = (memoryRateLimits.get(emailKey) || []).filter(t => now - t < RATE_LIMIT_WINDOW_MS);
+  const pool = await getPool();
+  const res = await pool.query('SELECT timestamps FROM shopit_rate_limits WHERE key = $1', [emailKey]);
+  const emailTimes: number[] = (res.rows[0]?.timestamps || []).filter(
+    (t: number) => now - t < RATE_LIMIT_WINDOW_MS
+  );
   if (emailTimes.length >= MAX_EMAIL_REQUESTS) {
     return {
       allowed: false,
@@ -181,7 +189,10 @@ export async function checkRateLimit(
   }
 
   if (cleanDevice !== 'dev_unknown') {
-    const devTimes = (memoryRateLimits.get(devKey) || []).filter(t => now - t < RATE_LIMIT_WINDOW_MS);
+    const dRes = await pool.query('SELECT timestamps FROM shopit_rate_limits WHERE key = $1', [devKey]);
+    const devTimes: number[] = (dRes.rows[0]?.timestamps || []).filter(
+      (t: number) => now - t < RATE_LIMIT_WINDOW_MS
+    );
     if (devTimes.length >= MAX_DEVICE_REQUESTS) {
       return {
         allowed: false,
@@ -189,13 +200,9 @@ export async function checkRateLimit(
       };
     }
   }
-
   return { allowed: true };
 }
 
-/**
- * Records an OTP request timestamp in the database for rate limiting.
- */
 export async function recordRateLimit(email: string, deviceId?: string): Promise<void> {
   const cleanEmail = email.trim().toLowerCase();
   const cleanDevice = (deviceId || 'dev_unknown').trim();
@@ -204,7 +211,6 @@ export async function recordRateLimit(email: string, deviceId?: string): Promise
   const emailKey = `shopit_rl_email_${cleanEmail}`;
   const devKey = `shopit_rl_dev_${cleanDevice}`;
 
-  // 1. KV
   if (KV_URL && KV_TOKEN) {
     try {
       const emailRaw = await runKvCommand('GET', emailKey);
@@ -226,50 +232,37 @@ export async function recordRateLimit(email: string, deviceId?: string): Promise
     } catch {}
   }
 
-  // 2. PG
-  const pool = await getPgPool();
-  if (pool) {
-    try {
-      const res = await pool.query('SELECT timestamps FROM shopit_rate_limits WHERE key = $1', [emailKey]);
-      const emailTimes: number[] = (res.rows[0]?.timestamps || []).filter(
+  await withTransaction(async client => {
+    const res = await client.query(
+      'SELECT timestamps FROM shopit_rate_limits WHERE key = $1 FOR UPDATE',
+      [emailKey]
+    );
+    const emailTimes: number[] = (res.rows[0]?.timestamps || []).filter(
+      (t: number) => now - t < RATE_LIMIT_WINDOW_MS
+    );
+    emailTimes.push(now);
+    await client.query(
+      'INSERT INTO shopit_rate_limits (key, timestamps) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET timestamps = $2',
+      [emailKey, JSON.stringify(emailTimes)]
+    );
+
+    if (cleanDevice !== 'dev_unknown') {
+      const dRes = await client.query(
+        'SELECT timestamps FROM shopit_rate_limits WHERE key = $1 FOR UPDATE',
+        [devKey]
+      );
+      const devTimes: number[] = (dRes.rows[0]?.timestamps || []).filter(
         (t: number) => now - t < RATE_LIMIT_WINDOW_MS
       );
-      emailTimes.push(now);
-      await pool.query(
+      devTimes.push(now);
+      await client.query(
         'INSERT INTO shopit_rate_limits (key, timestamps) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET timestamps = $2',
-        [emailKey, JSON.stringify(emailTimes)]
+        [devKey, JSON.stringify(devTimes)]
       );
-
-      if (cleanDevice !== 'dev_unknown') {
-        const dRes = await pool.query('SELECT timestamps FROM shopit_rate_limits WHERE key = $1', [devKey]);
-        const devTimes: number[] = (dRes.rows[0]?.timestamps || []).filter(
-          (t: number) => now - t < RATE_LIMIT_WINDOW_MS
-        );
-        devTimes.push(now);
-        await pool.query(
-          'INSERT INTO shopit_rate_limits (key, timestamps) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET timestamps = $2',
-          [devKey, JSON.stringify(devTimes)]
-        );
-      }
-      return;
-    } catch {}
-  }
-
-  // 3. Fallback: In-memory store
-  const emailTimes = (memoryRateLimits.get(emailKey) || []).filter(t => now - t < RATE_LIMIT_WINDOW_MS);
-  emailTimes.push(now);
-  memoryRateLimits.set(emailKey, emailTimes);
-
-  if (cleanDevice !== 'dev_unknown') {
-    const devTimes = (memoryRateLimits.get(devKey) || []).filter(t => now - t < RATE_LIMIT_WINDOW_MS);
-    devTimes.push(now);
-    memoryRateLimits.set(devKey, devTimes);
-  }
+    }
+  });
 }
 
-/**
- * Checks 60-second resend cooldown for an email and purpose.
- */
 export async function checkResendCooldown(
   email: string,
   purpose: string
@@ -280,16 +273,13 @@ export async function checkResendCooldown(
   const now = Date.now();
   if (now < record.resendAvailableAt) {
     const waitSeconds = Math.ceil((record.resendAvailableAt - now) / 1000);
-    return {
-      allowed: false,
-      waitSeconds,
-    };
+    return { allowed: false, waitSeconds };
   }
   return { allowed: true };
 }
 
 /**
- * Saves a hashed 6-digit OTP into the database with 10-minute expiry and 3 attempts.
+ * Saves hashed OTP into PostgreSQL shopit_otps (with row-level lockable consistency across instances).
  */
 export async function saveHashedOtp(
   email: string,
@@ -307,127 +297,175 @@ export async function saveHashedOtp(
     purpose: cleanPurpose,
     codeHash,
     createdAt: now,
-    expiresAt: now + OTP_EXPIRY_MS, // 10 minutes
-    resendAvailableAt: now + RESEND_COOLDOWN_MS, // 60 seconds
-    attemptsRemaining: 3, // 3 wrong tries before cancellation
+    expiresAt: now + OTP_EXPIRY_MS,
+    resendAvailableAt: now + RESEND_COOLDOWN_MS,
+    attemptsRemaining: 3,
     metadata,
   };
 
-  // 1. KV
-  if (KV_URL && KV_TOKEN) {
-    try {
-      await runKvCommand('SET', key, JSON.stringify(record));
-      return record;
-    } catch (err: any) {
-      console.warn('[Save OTP KV Error]', err.message);
-    }
-  }
-
-  // 2. PG
-  const pool = await getPgPool();
-  if (pool) {
-    try {
-      await pool.query(
-        'INSERT INTO shopit_otps (key, data, expires_at) VALUES ($1, $2, $3) ON CONFLICT (key) DO UPDATE SET data = $2, expires_at = $3',
-        [key, JSON.stringify(record), record.expiresAt]
-      );
-      return record;
-    } catch (err: any) {
-      console.warn('[Save OTP PG Error]', err.message);
-    }
-  }
-
-  // 3. Fallback: In-memory store
-  memoryOtps.set(key, record);
+  const pool = await getPool();
+  await pool.query(
+    'INSERT INTO shopit_otps (key, data, expires_at) VALUES ($1, $2, $3) ON CONFLICT (key) DO UPDATE SET data = $2, expires_at = $3',
+    [key, JSON.stringify(record), record.expiresAt]
+  );
   return record;
 }
 
-/**
- * Retrieves an active OTP record from the database.
- */
 export async function getOtpRecord(email: string, purpose: string): Promise<StoredOtpRecord | null> {
   const cleanEmail = email.trim().toLowerCase();
   const cleanPurpose = purpose.trim();
   const key = `shopit_otp_${cleanEmail}_${cleanPurpose}`;
 
-  // 1. KV
-  if (KV_URL && KV_TOKEN) {
-    try {
-      const raw = await runKvCommand('GET', key);
-      if (raw) return typeof raw === 'string' ? JSON.parse(raw) : raw;
-      return null;
-    } catch {}
+  const pool = await getPool();
+  const res = await pool.query('SELECT data, expires_at FROM shopit_otps WHERE key = $1', [key]);
+  if (res.rows[0]) {
+    const data = res.rows[0].data;
+    return typeof data === 'string' ? JSON.parse(data) : (data as StoredOtpRecord);
   }
-
-  // 2. PG
-  const pool = await getPgPool();
-  if (pool) {
-    try {
-      const res = await pool.query('SELECT data, expires_at FROM shopit_otps WHERE key = $1', [key]);
-      if (res.rows[0]) {
-        return res.rows[0].data as StoredOtpRecord;
-      }
-      return null;
-    } catch {}
-  }
-
-  // 3. Fallback: In-memory store
-  return memoryOtps.get(key) || null;
+  return null;
 }
 
-/**
- * Updates an OTP record (e.g. decrementing remaining tries).
- */
 export async function updateOtpRecord(record: StoredOtpRecord): Promise<void> {
   const key = `shopit_otp_${record.email}_${record.purpose}`;
-
-  if (KV_URL && KV_TOKEN) {
-    try {
-      await runKvCommand('SET', key, JSON.stringify(record));
-      return;
-    } catch {}
-  }
-
-  const pool = await getPgPool();
-  if (pool) {
-    try {
-      await pool.query(
-        'INSERT INTO shopit_otps (key, data, expires_at) VALUES ($1, $2, $3) ON CONFLICT (key) DO UPDATE SET data = $2, expires_at = $3',
-        [key, JSON.stringify(record), record.expiresAt]
-      );
-      return;
-    } catch {}
-  }
-
-  memoryOtps.set(key, record);
+  const pool = await getPool();
+  await pool.query(
+    'INSERT INTO shopit_otps (key, data, expires_at) VALUES ($1, $2, $3) ON CONFLICT (key) DO UPDATE SET data = $2, expires_at = $3',
+    [key, JSON.stringify(record), record.expiresAt]
+  );
 }
 
-/**
- * Deletes/consumes an OTP record upon successful verification or cancellation.
- */
 export async function deleteOtpRecord(email: string, purpose: string): Promise<void> {
   const cleanEmail = email.trim().toLowerCase();
   const cleanPurpose = purpose.trim();
   const key = `shopit_otp_${cleanEmail}_${cleanPurpose}`;
+  const pool = await getPool();
+  await pool.query('DELETE FROM shopit_otps WHERE key = $1', [key]);
+}
 
-  if (KV_URL && KV_TOKEN) {
-    try {
-      await runKvCommand('DEL', key);
-    } catch {}
+/**
+ * Atomic OTP verification & consumption inside a PostgreSQL transaction (`SELECT ... FOR UPDATE`).
+ * Prevents parallel brute-force race conditions on the 3-attempt limit.
+ */
+export async function verifyAndConsumeOtp(
+  email: string,
+  purpose: string,
+  enteredCode: string
+): Promise<{ success: boolean; error?: string; attemptsRemaining?: number; record?: StoredOtpRecord }> {
+  const cleanEmail = email.trim().toLowerCase();
+  const cleanPurpose = purpose.trim();
+  const key = `shopit_otp_${cleanEmail}_${cleanPurpose}`;
+
+  if (!enteredCode || !/^\d{6}$/.test(enteredCode.trim())) {
+    return { success: false, error: 'Please enter the 6-digit verification code.' };
   }
 
-  const pool = await getPgPool();
-  if (pool) {
-    try {
-      await pool.query('DELETE FROM shopit_otps WHERE key = $1', [key]);
-    } catch {}
-  }
+  return withTransaction(async client => {
+    const res = await client.query(
+      'SELECT data, expires_at FROM shopit_otps WHERE key = $1 FOR UPDATE',
+      [key]
+    );
 
-  memoryOtps.delete(key);
+    if (res.rows.length === 0) {
+      return { success: false, error: 'No active verification code found. Please request a new code.' };
+    }
+
+    const record: StoredOtpRecord =
+      typeof res.rows[0].data === 'string' ? JSON.parse(res.rows[0].data) : res.rows[0].data;
+
+    if (Date.now() > Number(record.expiresAt)) {
+      await client.query('DELETE FROM shopit_otps WHERE key = $1', [key]);
+      return { success: false, error: 'Verification code has expired. Please request a new code.' };
+    }
+
+    if (verifyOtpHash(enteredCode.trim(), record.codeHash)) {
+      await client.query('DELETE FROM shopit_otps WHERE key = $1', [key]);
+      return { success: true, record };
+    }
+
+    const nextAttempts = Math.max(0, Number(record.attemptsRemaining) - 1);
+    if (nextAttempts <= 0) {
+      await client.query('DELETE FROM shopit_otps WHERE key = $1', [key]);
+      return {
+        success: false,
+        attemptsRemaining: 0,
+        error: 'Too many incorrect attempts. This verification code has been invalidated. Request a new code.',
+      };
+    }
+
+    record.attemptsRemaining = nextAttempts;
+    await client.query(
+      'UPDATE shopit_otps SET data = $1 WHERE key = $2',
+      [JSON.stringify(record), key]
+    );
+
+    return {
+      success: false,
+      attemptsRemaining: nextAttempts,
+      error: `Invalid verification code. ${nextAttempts} attempt(s) remaining.`,
+    };
+  });
+}
+
+/**
+ * Issues a single-use server token proving an email passed OTP verification for 'signup'.
+ */
+export async function issueSignupVerificationToken(email: string): Promise<string> {
+  const cleanEmail = email.trim().toLowerCase();
+  const rawToken = 'sproof_' + crypto.randomBytes(32).toString('hex');
+  const tokenHash = crypto
+    .createHash('sha256')
+    .update(`${cleanEmail}:${rawToken}:${getOtpSalt()}`)
+    .digest('hex');
+  const expiresAt = Date.now() + SIGNUP_PROOF_TTL_MS;
+
+  const pool = await getPool();
+  await pool.query(
+    `INSERT INTO shopit_verified_signups (email, token_hash, expires_at)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (email) DO UPDATE SET token_hash = $2, expires_at = $3`,
+    [cleanEmail, tokenHash, expiresAt]
+  );
+  return rawToken;
+}
+
+/**
+ * Atomically consumes and validates a signup verification token before creating a user account.
+ */
+export async function consumeSignupVerificationToken(email: string, rawToken: string): Promise<boolean> {
+  const cleanEmail = email.trim().toLowerCase();
+  if (!rawToken || typeof rawToken !== 'string') return false;
+
+  const expectedHash = crypto
+    .createHash('sha256')
+    .update(`${cleanEmail}:${rawToken.trim()}:${getOtpSalt()}`)
+    .digest('hex');
+
+  return withTransaction(async client => {
+    const res = await client.query(
+      'SELECT token_hash, expires_at FROM shopit_verified_signups WHERE email = $1 FOR UPDATE',
+      [cleanEmail]
+    );
+    if (res.rows.length === 0) return false;
+
+    const row = res.rows[0];
+    if (Date.now() > Number(row.expires_at)) {
+      await client.query('DELETE FROM shopit_verified_signups WHERE email = $1', [cleanEmail]);
+      return false;
+    }
+
+    const storedBuf = Buffer.from(String(row.token_hash));
+    const expectedBuf = Buffer.from(expectedHash);
+    if (storedBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(storedBuf, expectedBuf)) {
+      return false;
+    }
+
+    await client.query('DELETE FROM shopit_verified_signups WHERE email = $1', [cleanEmail]);
+    return true;
+  });
 }
 
 // -------------------------------------------------------------
-// Payment Records Store (Server-Authoritative & Idempotent)
+// Payment Records Store (PostgreSQL Authoritative)
 // -------------------------------------------------------------
 
 export interface PaymentRecord {
@@ -446,113 +484,76 @@ export interface PaymentRecord {
 }
 
 export async function savePaymentRecord(record: PaymentRecord): Promise<void> {
-  const pool = await getPgPool();
-  if (pool) {
-    try {
-      await pool.query(
-        `INSERT INTO shopit_payments (
-          reference, order_id, amount_kobo, amount_naira, currency, channel, status, webhook_received, customer_email, data, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
-        ON CONFLICT (reference) DO UPDATE SET
-          status = $7,
-          webhook_received = $8,
-          channel = COALESCE($6, shopit_payments.channel),
-          updated_at = NOW(),
-          data = $10`,
-        [
-          record.reference,
-          record.orderId,
-          record.amountKobo,
-          record.amountNaira,
-          record.currency || 'NGN',
-          record.channel?.trim() || null,
-          record.status,
-          record.webhookReceived,
-          record.customerEmail,
-          JSON.stringify(record.data || {}),
-        ]
-      );
-      return;
-    } catch (err: any) {
-      console.warn('[Payments PG Save Error]', err.message);
-    }
-  }
-
-  if (KV_URL && KV_TOKEN) {
-    try {
-      await runKvCommand('SET', `shopit_payment_${record.reference}`, JSON.stringify(record));
-    } catch {}
-  }
-
-  memoryPayments.set(record.reference, record);
-}
-
-export async function getPaymentRecord(reference: string): Promise<PaymentRecord | null> {
-  const pool = await getPgPool();
-  if (pool) {
-    try {
-      const res = await pool.query('SELECT * FROM shopit_payments WHERE reference = $1', [reference]);
-      if (res.rows.length > 0) {
-        const row = res.rows[0];
-        return {
-          reference: row.reference,
-          orderId: row.order_id,
-          amountKobo: Number(row.amount_kobo),
-          amountNaira: Number(row.amount_naira),
-          currency: row.currency,
-          channel: row.channel,
-          status: row.status,
-          webhookReceived: Boolean(row.webhook_received),
-          customerEmail: row.customer_email,
-          data: row.data,
-          createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
-          updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : new Date().toISOString(),
-        };
-      }
-    } catch {}
-  }
-
-  if (KV_URL && KV_TOKEN) {
-    try {
-      const raw = await runKvCommand('GET', `shopit_payment_${reference}`);
-      if (raw) return typeof raw === 'string' ? JSON.parse(raw) : raw;
-    } catch {}
-  }
-
-  return memoryPayments.get(reference) || null;
-}
-
-export async function getAllPaymentRecords(): Promise<PaymentRecord[]> {
-  const pool = await getPgPool();
-  if (pool) {
-    try {
-      const res = await pool.query('SELECT * FROM shopit_payments ORDER BY created_at DESC LIMIT 200');
-      if (res.rows.length > 0) {
-        return res.rows.map((row: any) => ({
-          reference: row.reference,
-          orderId: row.order_id,
-          amountKobo: Number(row.amount_kobo),
-          amountNaira: Number(row.amount_naira),
-          currency: row.currency,
-          channel: row.channel,
-          status: row.status,
-          webhookReceived: Boolean(row.webhook_received),
-          customerEmail: row.customer_email,
-          data: row.data,
-          createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
-          updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : new Date().toISOString(),
-        }));
-      }
-    } catch {}
-  }
-
-  return Array.from(memoryPayments.values()).sort(
-    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+  const pool = await getPool();
+  await pool.query(
+    `INSERT INTO shopit_payments (
+      reference, order_id, amount_kobo, amount_naira, currency, channel, status, webhook_received, customer_email, data, updated_at
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+    ON CONFLICT (reference) DO UPDATE SET
+      status = $7,
+      webhook_received = $8,
+      channel = COALESCE($6, shopit_payments.channel),
+      updated_at = NOW(),
+      data = $10`,
+    [
+      record.reference,
+      record.orderId,
+      record.amountKobo,
+      record.amountNaira,
+      record.currency || 'NGN',
+      record.channel?.trim() || null,
+      record.status,
+      record.webhookReceived,
+      record.customerEmail,
+      JSON.stringify(record.data || {}),
+    ]
   );
 }
 
+export async function getPaymentRecord(reference: string): Promise<PaymentRecord | null> {
+  const pool = await getPool();
+  const res = await pool.query('SELECT * FROM shopit_payments WHERE reference = $1', [reference]);
+  if (res.rows.length > 0) {
+    const row = res.rows[0];
+    return {
+      reference: row.reference,
+      orderId: row.order_id,
+      amountKobo: Number(row.amount_kobo),
+      amountNaira: Number(row.amount_naira),
+      currency: row.currency,
+      channel: row.channel,
+      status: row.status,
+      webhookReceived: Boolean(row.webhook_received),
+      customerEmail: row.customer_email,
+      data: row.data,
+      createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
+      updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : new Date().toISOString(),
+    };
+  }
+  return null;
+}
+
+export async function getAllPaymentRecords(): Promise<PaymentRecord[]> {
+  const pool = await getPool();
+  const res = await pool.query('SELECT * FROM shopit_payments ORDER BY created_at DESC LIMIT 200');
+  return res.rows.map((row: any) => ({
+    reference: row.reference,
+    orderId: row.order_id,
+    amountKobo: Number(row.amount_kobo),
+    amountNaira: Number(row.amount_naira),
+    currency: row.currency,
+    channel: row.channel,
+    status: row.status,
+    webhookReceived: Boolean(row.webhook_received),
+    customerEmail: row.customer_email,
+    data: row.data,
+    createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
+    updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : new Date().toISOString(),
+  }));
+}
+
 // -------------------------------------------------------------
-// Report Records Store
+// Report Records Store (PostgreSQL Authoritative)
 // -------------------------------------------------------------
 
 export interface ReportRecord {
@@ -569,59 +570,40 @@ export interface ReportRecord {
 }
 
 export async function saveReportRecord(report: ReportRecord): Promise<void> {
-  const pool = await getPgPool();
-  if (pool) {
-    try {
-      await pool.query(
-        `INSERT INTO shopit_reports (id, target_type, target_id, target_title, reporter_email, reason, details, status, action_logs, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
-         ON CONFLICT (id) DO UPDATE SET status = $8, action_logs = $9`,
-        [
-          report.id,
-          report.targetType,
-          report.targetId,
-          report.targetTitle,
-          report.reporterEmail || null,
-          report.reason,
-          report.details,
-          report.status,
-          JSON.stringify(report.actionLogs || []),
-        ]
-      );
-      return;
-    } catch (err: any) {
-      console.warn('[Reports PG Save Error]', err.message);
-    }
-  }
-
-  memoryReports.set(report.id, report);
+  const pool = await getPool();
+  await pool.query(
+    `INSERT INTO shopit_reports (id, target_type, target_id, target_title, reporter_email, reason, details, status, action_logs, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+     ON CONFLICT (id) DO UPDATE SET status = $8, action_logs = $9`,
+    [
+      report.id,
+      report.targetType,
+      report.targetId,
+      report.targetTitle,
+      report.reporterEmail || null,
+      report.reason,
+      report.details,
+      report.status,
+      JSON.stringify(report.actionLogs || []),
+    ]
+  );
 }
 
 export async function getAllReportRecords(): Promise<ReportRecord[]> {
-  const pool = await getPgPool();
-  if (pool) {
-    try {
-      const res = await pool.query('SELECT * FROM shopit_reports ORDER BY created_at DESC LIMIT 200');
-      if (res.rows.length > 0) {
-        return res.rows.map((row: any) => ({
-          id: row.id,
-          targetType: row.target_type,
-          targetId: row.target_id,
-          targetTitle: row.target_title,
-          reporterEmail: row.reporter_email,
-          reason: row.reason,
-          details: row.details,
-          status: row.status,
-          actionLogs: row.action_logs || [],
-          createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
-        }));
-      }
-    } catch {}
-  }
-
-  return Array.from(memoryReports.values()).sort(
-    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-  );
+  const pool = await getPool();
+  const res = await pool.query('SELECT * FROM shopit_reports ORDER BY created_at DESC LIMIT 200');
+  return res.rows.map((row: any) => ({
+    id: row.id,
+    targetType: row.target_type,
+    targetId: row.target_id,
+    targetTitle: row.target_title,
+    reporterEmail: row.reporter_email,
+    reason: row.reason,
+    details: row.details,
+    status: row.status,
+    actionLogs: row.action_logs || [],
+    createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
+  }));
 }
 
 export async function updateReportStatus(
@@ -629,40 +611,18 @@ export async function updateReportStatus(
   status: 'open' | 'reviewing' | 'resolved',
   actionNote?: string
 ): Promise<void> {
-  const pool = await getPgPool();
-  if (pool) {
-    try {
-      const existing = await pool.query('SELECT action_logs FROM shopit_reports WHERE id = $1', [reportId]);
-      const logs = existing.rows[0]?.action_logs || [];
-      if (actionNote) {
-        logs.push({ action: `Status changed to ${status}`, note: actionNote, timestamp: new Date().toISOString() });
-      }
-      await pool.query('UPDATE shopit_reports SET status = $1, action_logs = $2 WHERE id = $3', [
-        status,
-        JSON.stringify(logs),
-        reportId,
-      ]);
-      return;
-    } catch {}
+  const pool = await getPool();
+  const existing = await pool.query('SELECT action_logs FROM shopit_reports WHERE id = $1', [reportId]);
+  const logs = existing.rows[0]?.action_logs || [];
+  if (actionNote) {
+    logs.push({ action: `Status changed to ${status}`, note: actionNote, timestamp: new Date().toISOString() });
   }
-
-  const existingReport = memoryReports.get(reportId);
-  if (existingReport) {
-    existingReport.status = status;
-    if (actionNote) {
-      existingReport.actionLogs = existingReport.actionLogs || [];
-      existingReport.actionLogs.push({
-        action: `Status changed to ${status}`,
-        note: actionNote,
-        timestamp: new Date().toISOString(),
-      });
-    }
-  }
+  await pool.query('UPDATE shopit_reports SET status = $1, action_logs = $2 WHERE id = $3', [
+    status,
+    JSON.stringify(logs),
+    reportId,
+  ]);
 }
-
-// -------------------------------------------------------------
-// Health Check Diagnostic Routine (Part 2 Item 2)
-// -------------------------------------------------------------
 
 export async function pingHealth(): Promise<{
   app: 'ok';
@@ -674,7 +634,7 @@ export async function pingHealth(): Promise<{
   let redisStatus: 'connected' | 'not_configured' | 'error' = 'not_configured';
 
   try {
-    const pool = await getPgPool();
+    const pool = await getPool();
     if (pool) {
       await pool.query('SELECT 1');
       dbStatus = 'connected';

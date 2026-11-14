@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
 import { formatNaira } from '../utils/pricing';
-import { NIGERIAN_BANKS } from '../data/mockData';
 import {
   Wallet,
   ArrowUpRight,
@@ -20,7 +19,13 @@ import {
   KeyRound,
   RotateCcw,
 } from 'lucide-react';
-import { isPayoutAccountCooled, validateAccountNameMatch } from '../utils/paystackService';
+import {
+  fetchSupportedBanks,
+  resolveBankAccount,
+  isPayoutAccountCooled,
+  validateAccountNameMatch,
+  SupportedBank,
+} from '../utils/paymentService';
 import { LedgerEntryType } from '../types';
 
 export const SellerWalletView: React.FC = () => {
@@ -55,14 +60,66 @@ export const SellerWalletView: React.FC = () => {
   // Ledger Filter
   const [ledgerFilter, setLedgerFilter] = useState<'all' | LedgerEntryType>('all');
 
-  // New payout account form
-  const verifiedIdName = currentUser?.name || currentSeller?.shopName || 'ADE YINKA';
-  const [selectedBankCode, setSelectedBankCode] = useState('999992'); // OPay default
+  // New payout account form & live Flutterwave banks
+  const verifiedIdName = currentUser?.name || currentSeller?.shopName || 'Seller Identity';
+  const [supportedBanks, setSupportedBanks] = useState<SupportedBank[]>([]);
+  const [loadingBanks, setLoadingBanks] = useState(false);
+  const [banksError, setBanksError] = useState<string | null>(null);
+  const [selectedBankCode, setSelectedBankCode] = useState('');
   const [accountNumber, setAccountNumber] = useState('');
-  const [accountName, setAccountName] = useState(verifiedIdName.toUpperCase());
+  const [accountName, setAccountName] = useState('');
+  const [resolvingAccount, setResolvingAccount] = useState(false);
+  const [resolveError, setResolveError] = useState<string | null>(null);
   const [accountOtp, setAccountOtp] = useState('');
   const [accountCooldown, setAccountCooldown] = useState(0);
   const [accountOtpSent, setAccountOtpSent] = useState(false);
+
+  // Load Flutterwave NG supported banks when add-account modal opens
+  useEffect(() => {
+    if (!isAddAccountModalOpen) return;
+    setLoadingBanks(true);
+    setBanksError(null);
+    fetchSupportedBanks()
+      .then(res => {
+        if (res.status && res.banks.length > 0) {
+          setSupportedBanks(res.banks);
+          if (!selectedBankCode) {
+            setSelectedBankCode(res.banks[0].code);
+          }
+        } else {
+          setSupportedBanks([]);
+          setBanksError(res.message || 'Supported bank list unavailable.');
+        }
+      })
+      .finally(() => setLoadingBanks(false));
+  }, [isAddAccountModalOpen]);
+
+  // Resolve Nigerian bank account holder name live via Flutterwave when 10 digits + bank selected
+  useEffect(() => {
+    setResolveError(null);
+    if (!isAddAccountModalOpen || !selectedBankCode || accountNumber.trim().length !== 10) {
+      return;
+    }
+    let cancelled = false;
+    setResolvingAccount(true);
+    resolveBankAccount(selectedBankCode, accountNumber.trim())
+      .then(res => {
+        if (cancelled) return;
+        if (res.status && res.accountName) {
+          setAccountName(res.accountName.toUpperCase());
+          setResolveError(null);
+        } else {
+          setAccountName('');
+          setResolveError(res.message || 'Could not resolve bank account name.');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setResolvingAccount(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isAddAccountModalOpen, selectedBankCode, accountNumber]);
 
   // 1-second interval for cooldown timers
   useEffect(() => {
@@ -94,8 +151,9 @@ export const SellerWalletView: React.FC = () => {
 
   const isSelectedAccountCooled = selectedAccount ? isPayoutAccountCooled(selectedAccount) : { isCooled: true, hoursRemaining: 0 };
 
-  const withdrawalFee = withdrawAmount >= 5000 ? 0 : 50;
-  const totalDeducted = withdrawAmount + withdrawalFee;
+  // Option 1: Shop It covers Flutterwave transfer fees (₦0 seller withdrawal fee)
+  const withdrawalFee = 0;
+  const totalDeducted = withdrawAmount;
 
   const handleOpenWithdrawModal = () => {
     if (!payoutsEnabled) {
@@ -123,9 +181,9 @@ export const SellerWalletView: React.FC = () => {
 
   const handleSendAccountOtpClick = async () => {
     if (accountCooldown > 0) return;
-    const bank = NIGERIAN_BANKS.find(b => b.code === selectedBankCode) || {
+    const bank = supportedBanks.find(b => b.code === selectedBankCode) || {
       code: selectedBankCode,
-      name: 'OPay Digital Services',
+      name: selectedBankCode || 'Selected Nigerian Bank',
     };
     const last4 = accountNumber.trim().length >= 4 ? accountNumber.trim().slice(-4) : '••••';
     const res = await sendPayoutAccountOtp({
@@ -146,7 +204,7 @@ export const SellerWalletView: React.FC = () => {
       return;
     }
     if (!selectedAccount) {
-      notify('Please select or add a payout bank account / OPay first.', 'error');
+      notify('Please select or add a verified Nigerian bank payout account first.', 'error');
       return;
     }
 
@@ -176,13 +234,19 @@ export const SellerWalletView: React.FC = () => {
 
   const handleAddAccountSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const bank = NIGERIAN_BANKS.find(b => b.code === selectedBankCode) || {
-      code: selectedBankCode,
-      name: 'OPay Digital Services',
-    };
+    const bank = supportedBanks.find(b => b.code === selectedBankCode);
+    if (!bank) {
+      notify('Please select a supported Nigerian bank from the verified Flutterwave list.', 'error');
+      return;
+    }
 
     if (accountNumber.trim().length !== 10) {
-      notify('Nigerian bank/OPay account numbers must be exactly 10 digits.', 'error');
+      notify('Nigerian bank account numbers must be exactly 10 digits.', 'error');
+      return;
+    }
+
+    if (!accountName.trim()) {
+      notify('Please wait for Flutterwave to verify the 10-digit bank account holder name.', 'error');
       return;
     }
 
@@ -202,6 +266,7 @@ export const SellerWalletView: React.FC = () => {
     if (success) {
       setIsAddAccountModalOpen(false);
       setAccountNumber('');
+      setAccountName('');
       setAccountOtp('');
       setAccountOtpSent(false);
     }
@@ -214,27 +279,27 @@ export const SellerWalletView: React.FC = () => {
 
   return (
     <div className="space-y-6">
-      {/* Test Mode & Rules Banner */}
+      {/* Escrow & Bank Payout Rules Banner */}
       <div className="bg-[#111111] text-white p-4 rounded-2xl border-2 border-[#111111] shadow-[0_3px_0_#111111] flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
         <div className="flex items-center gap-2.5">
           <span className="w-2.5 h-2.5 rounded-full bg-[#9FE870] animate-pulse shrink-0" />
           <div>
             <div className="flex items-center gap-2">
               <span className="text-xs font-black text-[#9FE870] uppercase tracking-wider">
-                Paystack Test Mode Active
+                Flutterwave Escrow &amp; Bank Payouts
               </span>
               <span className="text-[10px] bg-[#27272A] px-2 py-0.5 rounded text-white font-mono">
-                Transfers API v2
+                Verified Bank Payouts
               </span>
             </div>
             <p className="text-[11px] text-[#A1A1AA] mt-0.5">
-              Append-only double-entry ledger. Two balances: Pending (held in escrow) and Available (withdrawable to OPay/Banks).
+              Append-only double-entry ledger. Two balances: Pending (held in escrow) and Available (withdrawable to supported Nigerian Banks).
             </p>
           </div>
         </div>
 
         <div className="text-[11px] font-bold text-[#9FE870] bg-[#18181B] px-3 py-1 rounded-lg border border-[#27272A] shrink-0">
-          No Buyer Wallet · Paystack Direct Checkout
+          No Buyer Wallet · Flutterwave Direct Checkout
         </div>
       </div>
 
@@ -291,7 +356,7 @@ export const SellerWalletView: React.FC = () => {
               className="px-4 py-2.5 bg-[#18181B] hover:bg-black text-[#9FE870] rounded-xl text-xs font-black transition-all border-2 border-[#FF6B00] shadow-[0_2px_0_#FF6B00] flex items-center gap-1.5"
             >
               <Plus className="w-4 h-4 text-[#FF6B00]" />
-              <span>Add Bank / OPay</span>
+              <span>Add Payout Bank</span>
             </button>
           </div>
         </div>
@@ -329,12 +394,12 @@ export const SellerWalletView: React.FC = () => {
         </div>
       </div>
 
-      {/* Verified Payout Accounts Strip (Rule 4: OPay or Nigerian Bank via Paystack Transfers API) */}
+      {/* Verified Payout Accounts Strip */}
       <div className="bg-white dark:bg-[#15161C] rounded-2xl border-2 border-[#111111] dark:border-[#27272A] p-5 space-y-3 shadow-xs">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Building2 className="w-4 h-4 text-slate-900 dark:text-white" />
-            <h3 className="text-sm font-black text-slate-900 dark:text-white">Verified Payout Accounts (OPay / Banks)</h3>
+            <h3 className="text-sm font-black text-slate-900 dark:text-white">Verified Payout Accounts</h3>
           </div>
           <button
             onClick={() => setIsAddAccountModalOpen(true)}
@@ -355,13 +420,13 @@ export const SellerWalletView: React.FC = () => {
                   className="p-3.5 rounded-xl border-2 border-slate-200 dark:border-[#27272A] bg-slate-50 dark:bg-[#1E2028] flex items-center justify-between gap-3 text-xs"
                 >
                   <div>
-                    <div className="flex items-center gap-1.5 font-black text-slate-900">
+                    <div className="flex items-center gap-1.5 font-black text-slate-900 dark:text-white">
                       <span>{acc.bankName}</span>
                       <span className="text-[10px] bg-[#9FE870] text-[#111111] border border-[#111111] px-1.5 py-0.2 rounded font-bold">
                         Verified Name Match
                       </span>
                     </div>
-                    <div className="text-xs text-slate-600 font-mono-numbers mt-0.5">
+                    <div className="text-xs text-slate-600 dark:text-slate-300 font-mono-numbers mt-0.5">
                       {acc.accountNumber} · <strong>{acc.accountName}</strong>
                     </div>
                     {!cooled.isCooled ? (
@@ -370,7 +435,7 @@ export const SellerWalletView: React.FC = () => {
                       </span>
                     ) : (
                       <span className="text-[11px] text-emerald-800 font-bold block mt-1">
-                        ✓ Ready for Paystack Transfer
+                        ✓ Ready for Flutterwave Transfer
                       </span>
                     )}
                   </div>
@@ -384,7 +449,7 @@ export const SellerWalletView: React.FC = () => {
           </div>
         ) : (
           <div className="text-xs text-slate-500 italic py-2">
-            No payout accounts linked yet. Link your OPay or Nigerian bank account to withdraw sales.
+            No payout accounts linked yet. Link your verified Nigerian bank account to withdraw sales.
           </div>
         )}
       </div>
@@ -462,7 +527,7 @@ export const SellerWalletView: React.FC = () => {
                         <span>Ref: {entry.reference}</span>
                         <span>·</span>
                         <span>{new Date(entry.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                        {entry.fee > 0 && <span className="text-amber-800">· Paystack Fee: {formatNaira(entry.fee)}</span>}
+                        {entry.fee > 0 && <span className="text-amber-800">· Transfer Fee: {formatNaira(entry.fee)}</span>}
                       </div>
                     </div>
                   </div>
@@ -499,7 +564,7 @@ export const SellerWalletView: React.FC = () => {
         )}
       </div>
 
-      {/* WITHDRAW MODAL (Rule 4: Paystack Transfers API, ₦1,000 min, OTP, 24-hr cooling) */}
+      {/* WITHDRAW MODAL (Flutterwave Transfers API, ₦1,000 min, OTP, 24-hr cooling) */}
       {isWithdrawModalOpen && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
           <div className="bg-white rounded-3xl max-w-md w-full p-6 sm:p-7 space-y-5 shadow-2xl relative my-6 border-2 border-[#111111]">
@@ -510,9 +575,9 @@ export const SellerWalletView: React.FC = () => {
                 </div>
                 <div>
                   <h3 className="text-base font-black text-slate-900">
-                    Withdraw to OPay / Bank
+                    Withdraw to Nigerian Bank
                   </h3>
-                  <span className="text-[10px] text-slate-500">Paystack Transfers API (Test Mode)</span>
+                  <span className="text-[10px] text-slate-500">Flutterwave Transfers API v3</span>
                 </div>
               </div>
               <button
@@ -547,7 +612,7 @@ export const SellerWalletView: React.FC = () => {
                 <div className="flex items-center justify-between text-[11px] text-slate-500 mt-1">
                   <span>Available: {formatNaira(currentWallet.availableBalance)}</span>
                   <span className="text-slate-700 font-bold">
-                    Min: ₦1,000 · {withdrawAmount >= 5000 ? 'Free Transfer' : '₦50 network fee'}
+                    Min: ₦1,000 · ₦0 Transfer Fee (Covered by Shop It)
                   </span>
                 </div>
               </div>
@@ -581,7 +646,7 @@ export const SellerWalletView: React.FC = () => {
                     }}
                     className="w-full p-3 border-2 border-dashed border-[#FF6B00] rounded-xl text-center text-[#111111] font-bold hover:bg-[#FF6B00]/10"
                   >
-                    + Add OPay or Bank Account First
+                    + Add Verified Bank Account First
                   </button>
                 )}
               </div>
@@ -641,7 +706,7 @@ export const SellerWalletView: React.FC = () => {
                   )}
                 </div>
                 <span className="text-[10px] text-slate-500 block text-center">
-                  Rule 4: Security OTP sent to your registered email ({currentUser?.email || 'artisan@campus.ng'}). Valid for 10 mins (3 attempts max).
+                  Rule 4: Security OTP sent to your registered email ({currentUser?.email || 'your registered email'}). Valid for 10 mins (3 attempts max).
                 </span>
               </div>
 
@@ -652,9 +717,9 @@ export const SellerWalletView: React.FC = () => {
                   <span className="font-mono-numbers font-medium text-slate-900">{formatNaira(withdrawAmount)}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span>Paystack Transfer Network Fee</span>
+                  <span>Transfer Network Fee</span>
                   <span className="font-mono-numbers font-medium text-emerald-800">
-                    {withdrawalFee === 0 ? '₦0 (Free above ₦5k)' : formatNaira(withdrawalFee)}
+                    ₦0 (Covered by Shop It)
                   </span>
                 </div>
                 <div className="flex justify-between font-bold text-slate-900 pt-1 border-t border-slate-100">
@@ -677,7 +742,7 @@ export const SellerWalletView: React.FC = () => {
                   className="px-6 py-2.5 bg-[#FF6B00] hover:bg-[#ff7a1a] disabled:bg-stone-300 disabled:text-stone-500 text-[#111111] font-black rounded-xl border-2 border-[#111111] shadow-[0_3px_0_#111111] active:translate-y-0.5 transition-all flex items-center gap-2 text-xs"
                 >
                   <span className="w-2 h-2 rounded-full bg-[#9FE870] border border-[#111111]" />
-                  <span>{isWithdrawing ? 'Dispatching Paystack Transfer...' : `Authorize & Withdraw ${formatNaira(withdrawAmount)}`}</span>
+                  <span>{isWithdrawing ? 'Dispatching Flutterwave Transfer...' : `Authorize & Withdraw ${formatNaira(withdrawAmount)}`}</span>
                 </button>
               </div>
             </form>
@@ -685,7 +750,7 @@ export const SellerWalletView: React.FC = () => {
         </div>
       )}
 
-      {/* ADD PAYOUT ACCOUNT MODAL (Rule 4: Account name must match verified ID name; 24-hr cooling) */}
+      {/* ADD PAYOUT ACCOUNT MODAL (Live Flutterwave bank list + account resolution; 24-hr cooling) */}
       {isAddAccountModalOpen && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
           <div className="bg-white rounded-3xl max-w-md w-full p-6 sm:p-7 space-y-5 shadow-2xl relative my-6 border-2 border-[#111111]">
@@ -698,7 +763,7 @@ export const SellerWalletView: React.FC = () => {
                   <h3 className="text-base font-black text-slate-900">
                     Link Payout Account
                   </h3>
-                  <span className="text-[10px] text-slate-500">Paystack KYC Verification</span>
+                  <span className="text-[10px] text-slate-500">Flutterwave Bank Account Verification</span>
                 </div>
               </div>
               <button
@@ -711,18 +776,28 @@ export const SellerWalletView: React.FC = () => {
 
             <form onSubmit={handleAddAccountSubmit} className="space-y-4 text-xs">
               <div>
-                <label className="font-bold text-slate-800 block mb-1">Select Bank / Fintech *</label>
-                <select
-                  value={selectedBankCode}
-                  onChange={e => setSelectedBankCode(e.target.value)}
-                  className="w-full h-11 px-3 rounded-xl border-2 border-slate-200 bg-white text-xs font-bold text-slate-900"
-                >
-                  {NIGERIAN_BANKS.map(b => (
-                    <option key={b.code} value={b.code}>
-                      {b.icon} {b.name}
-                    </option>
-                  ))}
-                </select>
+                <label className="font-bold text-slate-800 block mb-1">Select Supported Nigerian Bank *</label>
+                {loadingBanks ? (
+                  <div className="h-11 px-3 rounded-xl border-2 border-slate-200 bg-slate-50 flex items-center text-slate-500 font-semibold">
+                    Loading supported banks from Flutterwave...
+                  </div>
+                ) : banksError || supportedBanks.length === 0 ? (
+                  <div className="p-3 rounded-xl border border-amber-300 bg-amber-50 text-amber-900 font-medium">
+                    {banksError || 'Unable to load supported banks right now. Please check Flutterwave server configuration.'}
+                  </div>
+                ) : (
+                  <select
+                    value={selectedBankCode}
+                    onChange={e => setSelectedBankCode(e.target.value)}
+                    className="w-full h-11 px-3 rounded-xl border-2 border-slate-200 bg-white text-xs font-bold text-slate-900"
+                  >
+                    {supportedBanks.map(b => (
+                      <option key={`${b.code}-${b.name}`} value={b.code}>
+                        {b.name}
+                      </option>
+                    ))}
+                  </select>
+                )}
               </div>
 
               <div>
@@ -735,29 +810,35 @@ export const SellerWalletView: React.FC = () => {
                   required
                   value={accountNumber}
                   onChange={e => setAccountNumber(e.target.value.replace(/\D/g, ''))}
-                  placeholder="e.g. 8098765432"
+                  placeholder="e.g. 0123456789"
                   className="w-full h-11 px-3.5 rounded-xl border-2 border-slate-200 text-sm font-bold font-mono-numbers text-slate-900 focus:outline-none focus:border-[#FF6B00]"
                 />
               </div>
 
-              {/* Rule 4: Account name must match verified ID name */}
+              {/* Account Holder Name resolved live via Flutterwave */}
               <div>
                 <label className="font-bold text-slate-800 block mb-1">
-                  Account Holder Name *
+                  Verified Account Holder Name *
                 </label>
                 <input
                   type="text"
+                  readOnly
                   required
-                  value={accountName}
-                  onChange={e => setAccountName(e.target.value.toUpperCase())}
-                  className="w-full h-11 px-3.5 rounded-xl border-2 border-slate-200 bg-slate-50 text-xs font-black text-slate-900 uppercase focus:outline-none focus:border-[#FF6B00]"
+                  value={resolvingAccount ? 'VERIFYING ACCOUNT WITH FLUTTERWAVE...' : accountName}
+                  placeholder="Enter 10-digit account number to auto-verify"
+                  className="w-full h-11 px-3.5 rounded-xl border-2 border-slate-200 bg-slate-50 text-xs font-black text-slate-900 uppercase focus:outline-none"
                 />
+                {resolveError && (
+                  <span className="text-[11px] text-rose-600 font-bold mt-1 block">
+                    {resolveError}
+                  </span>
+                )}
                 <span className="text-[11px] text-slate-600 mt-1 block">
-                  Rule 4: Must match your verified seller identity: <strong>{verifiedIdName.toUpperCase()}</strong>.
+                  Must match your verified seller identity: <strong>{verifiedIdName.toUpperCase()}</strong>.
                 </span>
               </div>
 
-              {/* Security Rule: Email Authorization OTP to add/change payout account */}
+              {/* Email Authorization OTP to add/change payout account */}
               <div className="p-3 bg-slate-50 rounded-xl border-2 border-slate-200 space-y-2">
                 <div className="flex items-center justify-between">
                   <span className="font-bold text-slate-900 flex items-center gap-1.5">
@@ -801,11 +882,11 @@ export const SellerWalletView: React.FC = () => {
                   )}
                 </div>
                 <span className="text-[10px] text-slate-500 block text-center">
-                  Paystack security code sent to your registered email ({currentUser?.email || 'artisan@campus.ng'}). Valid for 10 mins (3 attempts max).
+                  Security authorization code sent to your registered email ({currentUser?.email || 'your registered email'}). Valid for 10 mins (3 attempts max).
                 </span>
               </div>
 
-              {/* Rule 4: 24-Hour Cooling Period Notice */}
+              {/* 24-Hour Cooling Period Notice */}
               <div className="p-3 bg-amber-50 rounded-xl border border-amber-300 text-xs text-amber-950 flex items-start gap-2">
                 <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
                 <span>
@@ -824,9 +905,10 @@ export const SellerWalletView: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2.5 bg-[#FF6B00] hover:bg-[#ff7a1a] text-[#111111] font-black rounded-xl border-2 border-[#111111] shadow-[0_3px_0_#111111] active:translate-y-0.5 transition-all text-xs"
+                  disabled={supportedBanks.length === 0 || resolvingAccount || !accountName}
+                  className="px-5 py-2.5 bg-[#FF6B00] hover:bg-[#ff7a1a] disabled:bg-stone-300 disabled:text-stone-500 text-[#111111] font-black rounded-xl border-2 border-[#111111] shadow-[0_3px_0_#111111] active:translate-y-0.5 transition-all text-xs"
                 >
-                  Verify & Link Account
+                  Verify &amp; Link Account
                 </button>
               </div>
             </form>

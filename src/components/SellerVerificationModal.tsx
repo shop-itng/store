@@ -69,7 +69,11 @@ export const SellerVerificationModal: React.FC<SellerVerificationModalProps> = (
   // Sync initial verification status
   useEffect(() => {
     if (currentSeller?.id) {
-      fetch(`/api/verification/status/${currentSeller.id}`)
+      const token = typeof localStorage !== 'undefined' ? localStorage.getItem('shopit_session_token') : null;
+      fetch(`/api/verification/status/${encodeURIComponent(currentSeller.id)}`, {
+        headers: token ? { Authorization: `Bearer ${token}`, 'x-session-token': token } : {},
+        credentials: 'include',
+      })
         .then(res => res.json())
         .then(data => {
           if (data.status) {
@@ -266,9 +270,14 @@ export const SellerVerificationModal: React.FC<SellerVerificationModalProps> = (
     setIsSubmitting(true);
 
     try {
+      const token = typeof localStorage !== 'undefined' ? localStorage.getItem('shopit_session_token') : null;
       const response = await fetch('/api/verification/submit', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}`, 'x-session-token': token } : {}),
+        },
+        credentials: 'include',
         body: JSON.stringify({
           sellerId: currentSeller.id,
           shopName: currentSeller.shopName,
@@ -300,37 +309,40 @@ export const SellerVerificationModal: React.FC<SellerVerificationModalProps> = (
         throw new Error(data.message || 'Verification submission failed. Please check your details.');
       }
 
-      // Also sync AppContext state
-      submitVerificationRequest({
-        sellerId: currentSeller.id,
-        shopName: currentSeller.shopName,
-        ownerName: fullName.trim(),
-        dateOfBirth,
-        campus: currentSeller.campus || 'UNILAG (Akoka)',
-        idType: idDocumentType,
-        idNumber: data.maskedNin || `***-***-${nin.slice(-4)}`,
-        fullNinLast4: nin.slice(-4),
-        idCardPhotoUrl: idDocumentPhoto,
-        selfiePhotoUrl: selfiePhoto,
-        livenessVerified: true,
-        livenessScore,
-        under18: isUnder18,
-        guardianName: isUnder18 ? guardianFullName.trim() : undefined,
-        guardianPhone: isUnder18 ? guardianPhone : undefined,
-        guardianNinLast4: isUnder18 ? guardianNin.slice(-4) : undefined,
-        guardianIdCardPhotoUrl: isUnder18 ? guardianIdPhoto : undefined,
-        guardianConsentSigned: isUnder18 ? guardianConsentSigned : undefined,
-        ndpaConsentSigned: true,
-        ndpaConsentTimestamp: new Date().toISOString(),
-        attemptsCount: 1,
-        apiCheckResult: {
-          provider: 'nimc_direct_verification',
-          status: data.verificationStatus === 'verified' ? 'match' : 'manual_review_required',
-          nameMatchScore: 92,
-          dobMatch: true,
-          verifiedAt: new Date().toISOString(),
+      // Also sync AppContext state without duplicate server POST
+      submitVerificationRequest(
+        {
+          sellerId: currentSeller.id,
+          shopName: currentSeller.shopName,
+          ownerName: fullName.trim(),
+          dateOfBirth,
+          campus: currentSeller.campus || 'UNILAG (Akoka)',
+          idType: idDocumentType,
+          idNumber: data.maskedNin || `***-***-${nin.slice(-4)}`,
+          fullNinLast4: nin.slice(-4),
+          idCardPhotoUrl: idDocumentPhoto,
+          selfiePhotoUrl: selfiePhoto,
+          livenessVerified: true,
+          livenessScore,
+          under18: isUnder18,
+          guardianName: isUnder18 ? guardianFullName.trim() : undefined,
+          guardianPhone: isUnder18 ? guardianPhone : undefined,
+          guardianNinLast4: isUnder18 ? guardianNin.slice(-4) : undefined,
+          guardianIdCardPhotoUrl: isUnder18 ? guardianIdPhoto : undefined,
+          guardianConsentSigned: isUnder18 ? guardianConsentSigned : undefined,
+          ndpaConsentSigned: true,
+          ndpaConsentTimestamp: new Date().toISOString(),
+          attemptsCount: 1,
+          apiCheckResult: {
+            provider: 'nimc_direct_verification',
+            status: data.verificationStatus === 'verified' ? 'match' : 'manual_review_required',
+            nameMatchScore: 92,
+            dobMatch: true,
+            verifiedAt: new Date().toISOString(),
+          },
         },
-      });
+        { skipServerSubmit: true }
+      );
 
       setServerStatus(data.verificationStatus);
       notify(data.message || 'Verification submitted successfully!', 'success');
@@ -416,39 +428,10 @@ export const SellerVerificationModal: React.FC<SellerVerificationModalProps> = (
             )}
 
             {serverStatus === 'pending' && (
-              <div className="space-y-2.5">
+              <div className="space-y-2">
                 <p className="leading-relaxed">
-                  Your verification documents have been submitted. In testing and sandbox mode, you can activate your verified badge immediately or wait for automated queue processing.
+                  Your verification documents have been submitted and encrypted at rest. A platform moderator will review your NIN slip and live selfie before issuing your verified seller badge.
                 </p>
-                <button
-                  type="button"
-                  onClick={async () => {
-                    try {
-                      const res = await fetch('/api/verification/admin/review', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                          sellerId: currentSeller?.id,
-                          action: 'verified',
-                          adminName: 'Instant NIMC Verification',
-                        }),
-                      });
-                      const d = await res.json();
-                      if (d.status) {
-                        setServerStatus('verified');
-                        refreshCurrentUser();
-                        notify('NIN Identity Verified! Real Verified Maker Badge issued.', 'success');
-                      }
-                    } catch {
-                      setServerStatus('verified');
-                      notify('Identity verified!', 'success');
-                    }
-                  }}
-                  className="px-3.5 py-2 bg-[#9FE870] hover:bg-[#AEF083] text-[#111111] rounded-xl font-black text-xs border border-[#111111] shadow-[0_2px_0_#111111] flex items-center gap-1.5 cursor-pointer active:translate-y-0.5 transition-all"
-                >
-                  <ShieldCheck className="w-4 h-4 text-[#111111]" />
-                  <span>Activate Verified Maker Status Now</span>
-                </button>
               </div>
             )}
 

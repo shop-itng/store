@@ -9,28 +9,52 @@ export const ReportProblemModal: React.FC = () => {
     activeReportOrderId,
     orders,
     openDispute,
+    notify,
   } = useApp();
 
   const [reasonCategory, setReasonCategory] = useState<string>('damaged_in_transit');
   const [description, setDescription] = useState('');
   const [desiredOutcome, setDesiredOutcome] = useState<'refund' | 'replacement'>('refund');
-  const [evidencePhoto, setEvidencePhoto] = useState<string>(
-    'https://images.unsplash.com/photo-1594035910387-fea47794261f?w=600&auto=format&fit=crop&q=80'
-  );
+  const [evidencePhoto, setEvidencePhoto] = useState<string>('');
+  const [evidenceFileName, setEvidenceFileName] = useState<string>('');
 
   if (!isReportProblemModalOpen || !activeReportOrderId) return null;
 
   const order = orders.find(o => o.id === activeReportOrderId);
   if (!order) return null;
 
+  const handleEvidenceFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      notify('Please select a valid image file (PNG, JPG, WEBP).', 'error');
+      return;
+    }
+    if (file.size > 3 * 1024 * 1024) {
+      notify('Evidence photo must be under 3MB.', 'error');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = ev => {
+      if (typeof ev.target?.result === 'string') {
+        setEvidencePhoto(ev.target.result);
+        setEvidenceFileName(file.name);
+        notify('Evidence photo attached to dispute.', 'success');
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!description.trim()) return;
 
     const fullReason = `[${reasonCategory.toUpperCase()}] ${description.trim()} (Desired outcome: ${desiredOutcome})`;
-    openDispute(order.id, fullReason);
+    openDispute(order.id, fullReason, evidencePhoto || undefined);
     closeReportProblemModal();
     setDescription('');
+    setEvidencePhoto('');
+    setEvidenceFileName('');
   };
 
   return (
@@ -115,20 +139,37 @@ export const ReportProblemModal: React.FC = () => {
             />
           </div>
 
-          {/* Evidence photo preview */}
+          {/* Evidence photo upload */}
           <div>
             <label className="block font-semibold text-stone-900 mb-1.5">
               Evidence Photo (Admin inspects this against seller packed photo)
             </label>
             <div className="flex items-center gap-3 p-3 bg-stone-50 rounded-xl border border-dashed border-stone-300">
-              <img
-                src={evidencePhoto}
-                alt="Evidence preview"
-                className="w-16 h-16 rounded-lg object-cover border border-stone-200 shrink-0"
-              />
-              <div className="text-xs text-stone-600">
-                <p className="font-semibold text-stone-800">evidence_inspection_photo.jpg</p>
-                <p className="text-[11px] text-stone-400 mt-0.5">Uploaded & verified for moderation</p>
+              {evidencePhoto ? (
+                <img
+                  src={evidencePhoto}
+                  alt="Evidence preview"
+                  className="w-16 h-16 rounded-lg object-cover border border-stone-200 shrink-0"
+                />
+              ) : (
+                <div className="w-16 h-16 rounded-lg bg-stone-200/70 flex items-center justify-center text-stone-500 shrink-0">
+                  <Upload className="w-5 h-5" />
+                </div>
+              )}
+              <div className="flex-1 text-xs text-stone-600">
+                <p className="font-semibold text-stone-800">
+                  {evidenceFileName || 'Upload photo of package or item issue (optional)'}
+                </p>
+                <label className="inline-flex items-center gap-1.5 mt-1.5 px-3 py-1 bg-white border border-stone-300 rounded-lg font-bold text-stone-800 hover:bg-stone-100 cursor-pointer">
+                  <Upload className="w-3.5 h-3.5" />
+                  <span>{evidencePhoto ? 'Replace Photo' : 'Choose Image'}</span>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={handleEvidenceFileChange}
+                    className="hidden"
+                  />
+                </label>
               </div>
             </div>
           </div>

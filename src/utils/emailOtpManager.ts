@@ -116,6 +116,7 @@ export async function generateEmailOtp(
     const res = await fetch('/api/auth/send-otp', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
       body: JSON.stringify({
         email: cleanEmail,
         purpose,
@@ -156,6 +157,7 @@ export async function verifyEmailOtp(
   success: boolean;
   error?: string;
   attemptsRemaining?: number;
+  signupVerificationToken?: string;
 }> {
   const cleanEmail = email.trim().toLowerCase();
   const cleanCode = inputCode.trim();
@@ -168,6 +170,7 @@ export async function verifyEmailOtp(
     const res = await fetch('/api/auth/verify-otp', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
       body: JSON.stringify({
         email: cleanEmail,
         purpose,
@@ -186,6 +189,7 @@ export async function verifyEmailOtp(
 
     return {
       success: true,
+      signupVerificationToken: data.signupVerificationToken,
     };
   } catch (err: any) {
     return {

@@ -41,6 +41,15 @@ export const EMAIL_SIGNATURE_HTML = `
   </div>
 `;
 
+function escapeEmailHtml(val: unknown): string {
+  return String(val ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 /**
  * Resolves the subject and body for each of the 15 emails with dynamic variables.
  */
@@ -48,17 +57,24 @@ export function renderTransactionalEmail(
   template: EmailTemplateKey,
   data: Record<string, any>
 ): EmailRenderResult {
-  const code = (data.code || '').trim();
-  const orderId = (data.order_id || data.orderId || '').trim();
-  const total = (data.total !== undefined ? Number(data.total).toLocaleString() : '0');
-  const amount = (data.amount !== undefined ? Number(data.amount).toLocaleString() : '0');
-  const bankName = (data.bank_name || data.bankName || 'OPay / Bank').trim();
-  const last4 = (data.last4 || '••••').trim();
-  const item = (data.item || 'your item').trim();
+  const rawCode = String(data.code || '').trim();
+  const rawOrderId = String(data.order_id || data.orderId || '').trim();
+  const total = data.total !== undefined ? Number(data.total).toLocaleString() : '0';
+  const amount = data.amount !== undefined ? Number(data.amount).toLocaleString() : '0';
+  const rawBankName = String(data.bank_name || data.bankName || 'Nigerian Bank Account').trim();
+  const rawLast4 = String(data.last4 || '••••').trim();
+  const rawItem = String(data.item || 'your item').trim();
   const appUrl = (data.appUrl || (typeof window !== 'undefined' ? window.location.origin : '') || 'https://shop-itng-pied.vercel.app').replace(/\/$/, '');
-  const resetLink = (data.reset_link || data.resetLink || `${appUrl}/reset-password?code=${code}&email=${encodeURIComponent(data.email || '')}`).trim();
-  const decision = (data.decision || 'Refund processed').trim();
-  const reason = (data.reason || 'Document was unreadable or selfie could not be verified').trim();
+  const rawDecision = String(data.decision || 'Refund processed').trim();
+  const rawReason = String(data.reason || 'Document was unreadable or selfie could not be verified').trim();
+
+  const code = escapeEmailHtml(rawCode);
+  const orderId = escapeEmailHtml(rawOrderId);
+  const bankName = escapeEmailHtml(rawBankName);
+  const last4 = escapeEmailHtml(rawLast4);
+  const item = escapeEmailHtml(rawItem);
+  const decision = escapeEmailHtml(rawDecision);
+  const reason = escapeEmailHtml(rawReason);
 
   let subject = '';
   let bodyText = '';
@@ -295,12 +311,21 @@ export async function sendTransactionalEmail(
   }
 
   const rendered = renderTransactionalEmail(template, data);
+  const token = typeof localStorage !== 'undefined' ? localStorage.getItem('shopit_session_token') : null;
+  if (!token) {
+    return { success: false, error: 'Authentication required to send admin emails' };
+  }
 
   try {
     if (typeof fetch !== 'undefined') {
       const res = await fetch('/api/email/send', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+          'x-session-token': token,
+        },
+        credentials: 'include',
         body: JSON.stringify({
           to: cleanEmail,
           template,

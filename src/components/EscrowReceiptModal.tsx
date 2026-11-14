@@ -240,10 +240,10 @@ export const EscrowReceiptModal: React.FC<EscrowReceiptModalProps> = ({
                 </strong>
               </div>
               <div>
-                <span className="text-stone-500 block">Paystack Reference</span>
+                <span className="text-stone-500 block">Payment Reference</span>
                 <div className="flex items-center gap-1">
                   <code className="text-stone-800 font-mono text-[10px] truncate">
-                    {order.paymentReference || 'pstk_ref_auto'}
+                    {order.paymentReference || 'flw_ref_auto'}
                   </code>
                   <button
                     type="button"
@@ -288,7 +288,7 @@ export const EscrowReceiptModal: React.FC<EscrowReceiptModalProps> = ({
 
         {/* Footer print watermark */}
         <div className="bg-stone-50 px-6 py-2 border-t border-stone-200 text-center text-[10px] text-stone-400">
-          Shop It Escrow Protocol · NIMC Verified · Paystack Test Protected
+          Shop It Escrow Protocol · NIMC Verified · Flutterwave Escrow Protected
         </div>
       </div>
     </div>

@@ -174,12 +174,14 @@ export interface CartItem {
 }
 
 export type OrderStatus =
+  | 'pending_payment'
   | 'paid'
   | 'packed'
   | 'shipped'
   | 'delivered'
   | 'completed'
   | 'cancelled'
+  | 'refunded'
   | 'disputed';
 
 export interface OrderItem {
@@ -216,7 +218,7 @@ export interface Order {
   couponCode?: string;
   grandTotal: number;
   status: OrderStatus;
-  paymentMethod: 'paystack_card' | 'paystack_transfer' | 'flutterwave_card';
+  paymentMethod: 'flutterwave_card' | 'flutterwave_transfer' | 'flutterwave_ussd' | 'flutterwave_opay' | 'online';
   paymentReference: string;
   packedPhotoUrl?: string; // Uploaded by seller before dispatch
   createdAt: string;
@@ -244,10 +246,10 @@ export interface Coupon {
 }
 
 export type LedgerEntryType =
-  | 'sale_pending'      // Credit pending balance when buyer pays via Paystack
+  | 'sale_pending'      // Credit pending balance when buyer pays via Flutterwave
   | 'escrow_release'    // Debit pending balance, Credit available balance upon buyer confirmation or 5-day timeout
-  | 'withdrawal'        // Debit available balance when seller withdraws via Paystack Transfers API
-  | 'fee_deduction'     // Paystack transfer network fee
+  | 'withdrawal'        // Debit available balance when seller withdraws via Flutterwave Transfers API
+  | 'fee_deduction'     // Flutterwave transfer network fee
   | 'refund';           // Debit pending balance when order cancelled/refunded to buyer's card/bank
 
 export interface LedgerEntry {
@@ -262,7 +264,7 @@ export interface LedgerEntry {
   description: string;
   reference: string;
   status?: string;
-  paystackEventId?: string;
+  paymentEventId?: string;
   payoutBank?: string;
   payoutAccountNumber?: string;
   payoutAccountName?: string;
@@ -297,17 +299,17 @@ export interface SellerWallet {
   transactions: LedgerEntry[];
 }
 
-export interface PaystackWebhookEvent {
+export interface PaymentWebhookEvent {
   id: string; // evt_...
-  event: 'charge.success' | 'transfer.success' | 'transfer.failed' | 'refund.processed';
-  signature: string; // HMAC SHA-512 signature verified with sk_test_...
+  event: 'charge.completed' | 'transfer.completed' | 'refund.completed';
+  signature: string; // verif-hash verified against FLW_WEBHOOK_SECRET_HASH
   verified: boolean;
   processedAt: string;
   reference: string;
   amount: number;
   customerEmail: string;
   orderId: string;
-  channel: 'card' | 'bank_transfer' | 'ussd';
+  channel: 'card' | 'bank_transfer' | 'ussd' | 'opay';
 }
 
 export interface SecuritySession {

@@ -5,8 +5,8 @@
   "outputDirectory": "dist",
   "rewrites": [
     {
-      "source": "/api/paystack/webhook",
-      "destination": "/api/paystack/webhook"
+      "source": "/api/payments/webhook",
+      "destination": "/api/payments/webhook"
     },
     {
       "source": "/api/(.*)",
@@ -15,6 +15,16 @@
     {
       "source": "/(.*)",
       "destination": "/index.html"
+    }
+  ],
+  "crons": [
+    {
+      "path": "/api/cron/escrow",
+      "schedule": "0 * * * *"
+    },
+    {
+      "path": "/api/cron/expire-orders",
+      "schedule": "0 * * * *"
     }
   ]
 }

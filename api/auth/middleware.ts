@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import type { Request, Response, NextFunction } from 'express';
 import { getSession, UserSession, SESSION_COOKIE_NAME, logAuditEvent } from './sessionStore.js';
 
@@ -8,7 +9,8 @@ export interface AuthenticatedRequest extends Request {
 }
 
 /**
- * Extracts session token from httpOnly cookie, Authorization header, or x-session-token.
+ * Extracts session token ONLY from httpOnly cookie, Authorization Bearer header, or x-session-token.
+ * x-user-id fallback has been permanently removed.
  */
 export function extractToken(req: Request): string | null {
   // 1. Signed or plain httpOnly cookie
@@ -26,12 +28,6 @@ export function extractToken(req: Request): string | null {
   const customHeader = req.headers['x-session-token'];
   if (customHeader && typeof customHeader === 'string') {
     return customHeader.trim();
-  }
-
-  // 4. x-user-id direct session fallback
-  const userIdHeader = req.headers['x-user-id'];
-  if (userIdHeader && typeof userIdHeader === 'string' && userIdHeader.trim()) {
-    return `usr_direct_${userIdHeader.trim()}`;
   }
 
   return null;
@@ -120,7 +116,7 @@ export async function optionalAuth(
  * Rejects with 403 Forbidden if the user's role does not match.
  */
 export function requireRole(...allowedRoles: Array<'admin' | 'seller' | 'buyer'>) {
-  return async (req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<any> => {
+  const fn = async function requireRoleMiddleware(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<any> {
     if (!req.user) {
       // Run requireAuth first
       const authResult = await new Promise<boolean>(resolve => {
@@ -148,6 +144,8 @@ export function requireRole(...allowedRoles: Array<'admin' | 'seller' | 'buyer'>
       message: `Access denied. Requires one of [${allowedRoles.join(', ')}] role.`,
     });
   };
+  Object.defineProperty(fn, 'name', { value: `requireRole(${allowedRoles.join(',')})` });
+  return fn;
 }
 
 /**
@@ -178,9 +176,9 @@ export async function requireModerator(
     });
   }
 
-  // Moderator or Superadmin allowed
+  // Explicit Moderator or Superadmin sub-role required
   const sub = req.user.subRole;
-  if (!sub || sub === 'moderator' || sub === 'superadmin') {
+  if (sub === 'moderator' || sub === 'superadmin') {
     return next();
   }
 
@@ -214,9 +212,9 @@ export async function requireFinance(
     });
   }
 
-  // Finance or Superadmin allowed
+  // Explicit Finance or Superadmin sub-role required
   const sub = req.user.subRole;
-  if (!sub || sub === 'finance' || sub === 'superadmin') {
+  if (sub === 'finance' || sub === 'superadmin') {
     return next();
   }
 
@@ -225,6 +223,27 @@ export async function requireFinance(
     error: 'FORBIDDEN',
     message: 'Access denied. Finance sub-role required.',
   });
+}
+
+/**
+ * Middleware: Requires valid CRON_SECRET Bearer token (for Vercel Crons) OR Admin session.
+ */
+export async function requireCronOrAdmin(
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+): Promise<any> {
+  const cronSecret = (process.env.CRON_SECRET || '').trim();
+  const authHeader = (req.headers.authorization || '').trim();
+  if (cronSecret && authHeader.toLowerCase().startsWith('bearer ')) {
+    const provided = authHeader.substring(7).trim();
+    const expectedDigest = crypto.createHash('sha256').update(cronSecret).digest();
+    const providedDigest = crypto.createHash('sha256').update(provided).digest();
+    if (crypto.timingSafeEqual(expectedDigest, providedDigest)) {
+      return next();
+    }
+  }
+  return requireAdmin(req, res, next);
 }
 
 /**
@@ -238,7 +257,7 @@ export const requireSeller = requireRole('seller', 'admin');
 export function requireOwnershipOrAdmin(
   getTargetUserId: (req: AuthenticatedRequest) => string | undefined
 ) {
-  return async (req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<any> => {
+  return async function requireOwnershipOrAdmin(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<any> {
     if (!req.user) {
       const authResult = await new Promise<boolean>(resolve => {
         requireAuth(req, res, () => resolve(true));
@@ -270,3 +289,40 @@ export function requireOwnershipOrAdmin(
     });
   };
 }
+
+/**
+ * Safety switch middleware: returns HTTP 503 when PAYMENTS_ENABLED is not 'true'.
+ */
+export function requirePaymentsEnabled(
+  _req: Request,
+  res: Response,
+  next: NextFunction
+): any {
+  if (process.env.PAYMENTS_ENABLED !== 'true') {
+    return res.status(503).json({
+      status: false,
+      error: 'PAYMENTS_DISABLED',
+      message: 'Online payments are coming soon. Arrange directly with the seller',
+    });
+  }
+  return next();
+}
+
+/**
+ * Safety switch middleware: returns HTTP 503 when PAYOUTS_ENABLED is not 'true'.
+ */
+export function requirePayoutsEnabled(
+  _req: Request,
+  res: Response,
+  next: NextFunction
+): any {
+  if (process.env.PAYOUTS_ENABLED !== 'true') {
+    return res.status(503).json({
+      status: false,
+      error: 'PAYOUTS_DISABLED',
+      message: 'Seller withdrawals are currently paused by safety switch. No balance was debited.',
+    });
+  }
+  return next();
+}
+

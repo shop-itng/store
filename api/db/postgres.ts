@@ -69,6 +69,7 @@ export async function getPool(): Promise<any> {
   if (activePool) return activePool;
 
   const dbUrl = getDatabaseUrl();
+  const isProduction = process.env.NODE_ENV === 'production' || Boolean(process.env.VERCEL);
 
   if (dbUrl) {
     try {
@@ -89,12 +90,16 @@ export async function getPool(): Promise<any> {
     }
   }
 
-  // Fallback for local development or sandbox environment before Vercel env var injection
+  // Fail closed in production / Vercel environments — never fall back to in-memory database
+  if (isProduction) {
+    throw new Error('CRITICAL: DATABASE_URL is not configured in production environment.');
+  }
+
+  // Local development / test fallback only
   try {
     const { newDb } = await import('pg-mem');
     const memDb = newDb();
-    
-    // Register standard postgres functions if needed
+
     memDb.public.registerFunction({
       name: 'now',
       implementation: () => new Date(),
@@ -103,11 +108,11 @@ export async function getPool(): Promise<any> {
       name: 'nullif',
       implementation: (a: any, b: any) => (a === b ? null : a),
     });
-    
+
     const { Pool } = memDb.adapters.createPg();
     activePool = new Pool();
     isPgMem = true;
-    console.log('[Database] Initialized in-memory PostgreSQL engine for local development.');
+    console.log('[Database] Initialized in-memory PostgreSQL engine for local development/tests.');
     return activePool;
   } catch (err: any) {
     console.error('[pg-mem init error]', err.message);
@@ -127,9 +132,29 @@ export async function query(text: string, params?: any[]): Promise<any> {
   try {
     return await pool.query(text, params);
   } catch (err: any) {
-    // Log error to server log without exposing secrets
     console.error('[PostgreSQL Query Error]:', err.message);
     throw err;
+  }
+}
+
+export async function withTransaction<T>(fn: (client: any) => Promise<T>): Promise<T> {
+  const pool = await getPool();
+  if (!migrationCompleted) {
+    await runMigration();
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await fn(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (err) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {}
+    throw err;
+  } finally {
+    client.release();
   }
 }
 
@@ -155,11 +180,14 @@ export async function pingRedis(): Promise<{ ok: boolean; error?: string }> {
   if (!kvUrl || !kvToken) {
     return { ok: false, error: 'KV_REST_API_URL not configured' };
   }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 4000);
   try {
     const url = `${kvUrl.replace(/\/$/, '')}/ping`;
     const res = await fetch(url, {
       method: 'GET',
       headers: { Authorization: `Bearer ${kvToken}` },
+      signal: controller.signal,
     });
     if (!res.ok) {
       return { ok: false, error: `Upstash returned HTTP ${res.status}` };
@@ -168,6 +196,8 @@ export async function pingRedis(): Promise<{ ok: boolean; error?: string }> {
     return { ok: data.result === 'PONG' || !!data.result };
   } catch (err: any) {
     return { ok: false, error: err.message };
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
@@ -190,7 +220,9 @@ export async function runMigration(): Promise<void> {
       name VARCHAR(255) NOT NULL,
       password_hash VARCHAR(255) NOT NULL,
       role VARCHAR(32) NOT NULL DEFAULT 'buyer',
-      is_verified_email BOOLEAN NOT NULL DEFAULT true,
+      sub_role VARCHAR(50),
+      token_version INTEGER NOT NULL DEFAULT 1,
+      is_verified_email BOOLEAN NOT NULL DEFAULT false,
       age INTEGER,
       has_guardian_consent BOOLEAN DEFAULT false,
       guardian_name VARCHAR(255),
@@ -309,19 +341,30 @@ export async function runMigration(): Promise<void> {
       buyer_masked_id VARCHAR(64),
       items JSONB NOT NULL DEFAULT '[]'::jsonb,
       subtotal NUMERIC(12,2) NOT NULL,
+      subtotal_kobo BIGINT DEFAULT 0,
       service_fee_total NUMERIC(12,2) NOT NULL,
+      service_fee_kobo BIGINT DEFAULT 0,
       delivery_total NUMERIC(12,2) NOT NULL,
+      delivery_fee_kobo BIGINT DEFAULT 0,
       discount_total NUMERIC(12,2) DEFAULT 0,
+      discount_total_kobo BIGINT DEFAULT 0,
+      coupon_code VARCHAR(50),
       grand_total NUMERIC(12,2) NOT NULL,
-      payment_method VARCHAR(50) DEFAULT 'paystack',
-      payment_reference VARCHAR(255),
+      grand_total_kobo BIGINT DEFAULT 0,
+      payment_method VARCHAR(50) DEFAULT 'online',
+      payment_reference VARCHAR(255) UNIQUE,
       handshake_otp VARCHAR(10),
       handshake_verified BOOLEAN DEFAULT false,
       status VARCHAR(50) NOT NULL DEFAULT 'pending_payment',
       campus VARCHAR(255),
       delivery_area VARCHAR(255),
       pickup_point VARCHAR(255),
+      notes TEXT,
+      packed_photo_url TEXT,
+      stock_reserved BOOLEAN DEFAULT false,
+      expires_at TIMESTAMPTZ,
       auto_release_at TIMESTAMPTZ,
+      packed_at TIMESTAMPTZ,
       shipped_at TIMESTAMPTZ,
       delivered_at TIMESTAMPTZ,
       completed_at TIMESTAMPTZ,
@@ -329,7 +372,7 @@ export async function runMigration(): Promise<void> {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
-    CREATE INDEX IF NOT EXISTS idx_shopit_orders_ref ON shopit_orders (payment_reference);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_shopit_orders_ref ON shopit_orders (payment_reference);
     CREATE INDEX IF NOT EXISTS idx_shopit_orders_status ON shopit_orders (status);
     CREATE INDEX IF NOT EXISTS idx_shopit_orders_created ON shopit_orders (created_at DESC);
 
@@ -355,27 +398,39 @@ export async function runMigration(): Promise<void> {
     CREATE TABLE IF NOT EXISTS shopit_wallets (
       seller_id VARCHAR(64) PRIMARY KEY,
       pending_balance NUMERIC(12,2) NOT NULL DEFAULT 0,
+      pending_balance_kobo BIGINT NOT NULL DEFAULT 0,
       available_balance NUMERIC(12,2) NOT NULL DEFAULT 0,
+      available_balance_kobo BIGINT NOT NULL DEFAULT 0,
       total_withdrawn NUMERIC(12,2) NOT NULL DEFAULT 0,
+      total_withdrawn_kobo BIGINT NOT NULL DEFAULT 0,
       is_frozen BOOLEAN NOT NULL DEFAULT false,
       freeze_reason TEXT,
       payout_accounts JSONB DEFAULT '[]'::jsonb,
       active_payout_account_id VARCHAR(64),
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT chk_shopit_wallet_non_negative CHECK (
+        pending_balance_kobo >= 0 AND available_balance_kobo >= 0 AND total_withdrawn_kobo >= 0
+      )
     );
 
     -- 8. Ledger Entries Table (Append-only immutable)
     CREATE TABLE IF NOT EXISTS shopit_ledger_entries (
       id VARCHAR(64) PRIMARY KEY,
       wallet_id VARCHAR(64) NOT NULL,
+      order_id VARCHAR(64),
       type VARCHAR(50) NOT NULL,
       amount NUMERIC(12,2) NOT NULL,
+      amount_kobo BIGINT NOT NULL DEFAULT 0,
       fee NUMERIC(12,2) DEFAULT 0,
+      fee_kobo BIGINT DEFAULT 0,
       balance_after NUMERIC(12,2) NOT NULL,
+      balance_after_kobo BIGINT NOT NULL DEFAULT 0,
       balance_type VARCHAR(20) NOT NULL DEFAULT 'pending',
+      status VARCHAR(50) DEFAULT 'completed',
       description TEXT NOT NULL,
       reference VARCHAR(255),
+      idempotency_key VARCHAR(255) UNIQUE,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
@@ -546,6 +601,71 @@ export async function runMigration(): Promise<void> {
       key VARCHAR(255) PRIMARY KEY,
       timestamps JSONB NOT NULL
     );
+
+    -- 21. Persistent Sessions Table (Shared across Vercel serverless instances)
+    CREATE TABLE IF NOT EXISTS shopit_sessions (
+      token VARCHAR(255) PRIMARY KEY,
+      user_id VARCHAR(64) NOT NULL,
+      data JSONB NOT NULL,
+      expires_at BIGINT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_shopit_sessions_user ON shopit_sessions (user_id);
+
+    -- 22. Verified Signup OTP Tokens (Server-side proof required by /auth/register)
+    CREATE TABLE IF NOT EXISTS shopit_verified_signups (
+      email VARCHAR(255) PRIMARY KEY,
+      token_hash VARCHAR(255) NOT NULL,
+      expires_at BIGINT NOT NULL
+    );
+
+    -- 23. Coupons Table (Database-authoritative discounts)
+    CREATE TABLE IF NOT EXISTS shopit_coupons (
+      code VARCHAR(50) PRIMARY KEY,
+      discount_kobo BIGINT NOT NULL,
+      min_subtotal_kobo BIGINT NOT NULL DEFAULT 0,
+      is_active BOOLEAN NOT NULL DEFAULT true,
+      max_uses INTEGER,
+      current_uses INTEGER NOT NULL DEFAULT 0,
+      expires_at TIMESTAMPTZ
+    );
+
+    -- 24. Payouts Table
+    CREATE TABLE IF NOT EXISTS shopit_payouts (
+      id VARCHAR(64) PRIMARY KEY,
+      seller_id VARCHAR(64) NOT NULL,
+      amount_kobo BIGINT NOT NULL,
+      fee_kobo BIGINT NOT NULL DEFAULT 0,
+      total_deduction_kobo BIGINT NOT NULL,
+      reference VARCHAR(255) UNIQUE NOT NULL,
+      bank_name VARCHAR(255),
+      bank_code VARCHAR(32),
+      account_number VARCHAR(32),
+      account_name VARCHAR(255),
+      transfer_code VARCHAR(128),
+      flw_transfer_id VARCHAR(64),
+      status VARCHAR(32) NOT NULL DEFAULT 'pending',
+      provider_response JSONB,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_shopit_payouts_seller ON shopit_payouts (seller_id, created_at DESC);
+
+    -- 25. Encrypted Identity Verification Documents
+    CREATE TABLE IF NOT EXISTS shopit_verification_documents (
+      id VARCHAR(128) PRIMARY KEY,
+      seller_id VARCHAR(64) NOT NULL,
+      doc_type VARCHAR(64) NOT NULL,
+      encrypted_data TEXT NOT NULL,
+      mime_type VARCHAR(64),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_shopit_verif_docs_seller ON shopit_verification_documents (seller_id);
+
+    -- 26. Admin Alert Deduplication Table
+    CREATE TABLE IF NOT EXISTS shopit_admin_alerts (
+      alert_key VARCHAR(255) PRIMARY KEY,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
   `;
 
   // Comprehensive column healing: ensures every table has all required columns regardless of initial creation schema
@@ -555,8 +675,12 @@ export async function runMigration(): Promise<void> {
     'ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS name VARCHAR(255);',
     'ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255);',
     'ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS role VARCHAR(32) DEFAULT \'buyer\';',
-    'ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS sub_role VARCHAR(50) DEFAULT \'superadmin\';',
-    'ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS is_verified_email BOOLEAN DEFAULT true;',
+    'ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS sub_role VARCHAR(50);',
+    'ALTER TABLE shopit_users ALTER COLUMN sub_role DROP DEFAULT;',
+    'UPDATE shopit_users SET sub_role = NULL WHERE role != \'admin\' AND sub_role = \'superadmin\';',
+    'ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS token_version INTEGER DEFAULT 1;',
+    'ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS is_verified_email BOOLEAN DEFAULT false;',
+    'ALTER TABLE shopit_users ALTER COLUMN is_verified_email SET DEFAULT false;',
     'ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS age INTEGER;',
     'ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS has_guardian_consent BOOLEAN DEFAULT false;',
     'ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS guardian_name VARCHAR(255);',
@@ -665,9 +789,11 @@ export async function runMigration(): Promise<void> {
     'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS delivery_total NUMERIC(12,2) DEFAULT 0;',
     'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS delivery_fee_kobo BIGINT DEFAULT 0;',
     'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS discount_total NUMERIC(12,2) DEFAULT 0;',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS discount_total_kobo BIGINT DEFAULT 0;',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS coupon_code VARCHAR(50);',
     'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS grand_total NUMERIC(12,2) DEFAULT 0;',
     'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS grand_total_kobo BIGINT DEFAULT 0;',
-    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS payment_method VARCHAR(50) DEFAULT \'paystack\';',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS payment_method VARCHAR(50) DEFAULT \'online\';',
     'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS payment_reference VARCHAR(255);',
     'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS handshake_otp VARCHAR(10);',
     'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS handshake_verified BOOLEAN DEFAULT false;',
@@ -675,12 +801,21 @@ export async function runMigration(): Promise<void> {
     'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS campus VARCHAR(255);',
     'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS delivery_area VARCHAR(255);',
     'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS pickup_point VARCHAR(255);',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS notes TEXT;',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS packed_photo_url TEXT;',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS stock_reserved BOOLEAN DEFAULT false;',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;',
     'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS auto_release_at TIMESTAMPTZ;',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS packed_at TIMESTAMPTZ;',
     'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS shipped_at TIMESTAMPTZ;',
     'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ;',
     'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;',
     'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();',
     'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();',
+    'CREATE UNIQUE INDEX IF NOT EXISTS idx_shopit_orders_ref_unique ON shopit_orders (payment_reference);',
+    'ALTER TABLE shopit_payouts ADD COLUMN IF NOT EXISTS account_name VARCHAR(255);',
+    'ALTER TABLE shopit_payouts ADD COLUMN IF NOT EXISTS transfer_code VARCHAR(128);',
+    'ALTER TABLE shopit_payouts ADD COLUMN IF NOT EXISTS flw_transfer_id VARCHAR(64);',
 
     // 6. shopit_wallets
     'ALTER TABLE shopit_wallets ADD COLUMN IF NOT EXISTS pending_balance NUMERIC(12,2) DEFAULT 0;',
@@ -695,6 +830,8 @@ export async function runMigration(): Promise<void> {
     'ALTER TABLE shopit_wallets ADD COLUMN IF NOT EXISTS active_payout_account_id VARCHAR(64);',
     'ALTER TABLE shopit_wallets ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();',
     'ALTER TABLE shopit_wallets ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();',
+    'ALTER TABLE shopit_wallets DROP CONSTRAINT IF EXISTS chk_shopit_wallet_non_negative;',
+    'ALTER TABLE shopit_wallets ADD CONSTRAINT chk_shopit_wallet_non_negative CHECK (pending_balance_kobo >= 0 AND available_balance_kobo >= 0 AND total_withdrawn_kobo >= 0);',
 
     // 7. shopit_payments
     'ALTER TABLE shopit_payments ADD COLUMN IF NOT EXISTS order_id VARCHAR(64);',
@@ -711,6 +848,7 @@ export async function runMigration(): Promise<void> {
 
     // 8. shopit_ledger_entries
     'ALTER TABLE shopit_ledger_entries ADD COLUMN IF NOT EXISTS wallet_id VARCHAR(64);',
+    'ALTER TABLE shopit_ledger_entries ADD COLUMN IF NOT EXISTS order_id VARCHAR(64);',
     'ALTER TABLE shopit_ledger_entries ADD COLUMN IF NOT EXISTS type VARCHAR(50);',
     'ALTER TABLE shopit_ledger_entries ADD COLUMN IF NOT EXISTS amount NUMERIC(12,2) DEFAULT 0;',
     'ALTER TABLE shopit_ledger_entries ADD COLUMN IF NOT EXISTS amount_kobo BIGINT DEFAULT 0;',
@@ -719,10 +857,12 @@ export async function runMigration(): Promise<void> {
     'ALTER TABLE shopit_ledger_entries ADD COLUMN IF NOT EXISTS balance_after NUMERIC(12,2) DEFAULT 0;',
     'ALTER TABLE shopit_ledger_entries ADD COLUMN IF NOT EXISTS balance_after_kobo BIGINT DEFAULT 0;',
     'ALTER TABLE shopit_ledger_entries ADD COLUMN IF NOT EXISTS balance_type VARCHAR(20) DEFAULT \'pending\';',
+    'ALTER TABLE shopit_ledger_entries ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT \'completed\';',
     'ALTER TABLE shopit_ledger_entries ADD COLUMN IF NOT EXISTS description TEXT;',
     'ALTER TABLE shopit_ledger_entries ADD COLUMN IF NOT EXISTS reference VARCHAR(255);',
     'ALTER TABLE shopit_ledger_entries ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(255);',
     'ALTER TABLE shopit_ledger_entries ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();',
+    'CREATE UNIQUE INDEX IF NOT EXISTS idx_shopit_ledger_idemp_unique ON shopit_ledger_entries (idempotency_key);',
 
     // 9. shopit_disputes
     'ALTER TABLE shopit_disputes ADD COLUMN IF NOT EXISTS order_id VARCHAR(64);',
@@ -789,6 +929,24 @@ export async function runMigration(): Promise<void> {
     } catch (alterErr: any) {
       console.warn('[Migration Column Note]:', alterErr.message);
     }
+  }
+
+  // Seed default coupons into PostgreSQL (DB-authoritative coupon validation)
+  const seedCoupons = [
+    { code: 'TEEDS', discountKobo: 50000, minSubtotalKobo: 250000 },
+    { code: 'FIRSTORDER', discountKobo: 30000, minSubtotalKobo: 150000 },
+    { code: 'CAMPUSLOVE', discountKobo: 50000, minSubtotalKobo: 300000 },
+    { code: 'FIRSTCRAFT', discountKobo: 40000, minSubtotalKobo: 200000 },
+  ];
+  for (const c of seedCoupons) {
+    try {
+      await pool.query(
+        `INSERT INTO shopit_coupons (code, discount_kobo, min_subtotal_kobo, is_active, current_uses)
+         VALUES ($1, $2, $3, true, 0)
+         ON CONFLICT (code) DO NOTHING`,
+        [c.code, c.discountKobo, c.minSubtotalKobo]
+      );
+    } catch {}
   }
 
   // Create First Administrator strictly from server environment secrets

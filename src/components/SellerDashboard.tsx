@@ -64,6 +64,10 @@ export const SellerDashboard: React.FC = () => {
   const [packPhotoUrl, setPackPhotoUrl] = useState<string>('');
   const [isUploadingPackPhoto, setIsUploadingPackPhoto] = useState(false);
 
+  // Handshake delivery OTP modal
+  const [handshakeOrder, setHandshakeOrder] = useState<Order | null>(null);
+  const [handshakePin, setHandshakePin] = useState<string>('');
+
   // Product form state
   const [formTitle, setFormTitle] = useState('');
   const [formDescription, setFormDescription] = useState('');
@@ -166,21 +170,67 @@ export const SellerDashboard: React.FC = () => {
     setIsAddModalOpen(true);
   };
 
-  const handleSimulatedImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleProductImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      setIsCompressing(true);
-      setTimeout(() => {
-        setIsCompressing(false);
-        const objectUrl = URL.createObjectURL(file);
-        setFormImage(objectUrl);
-        notify('Photo auto-compressed for slow campus 2G/3G networks!', 'success');
-      }, 700);
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      notify('Please select a valid image file (PNG, JPG, WEBP).', 'error');
+      return;
     }
+    if (file.size > 3 * 1024 * 1024) {
+      notify('Product photo must be under 3MB.', 'error');
+      return;
+    }
+    setIsCompressing(true);
+    const reader = new FileReader();
+    reader.onload = ev => {
+      setIsCompressing(false);
+      if (typeof ev.target?.result === 'string') {
+        setFormImage(ev.target.result);
+        notify('Product photo loaded cleanly for persistent listing!', 'success');
+      }
+    };
+    reader.onerror = () => {
+      setIsCompressing(false);
+      notify('Could not read photo file. Please try again.', 'error');
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handlePackPhotoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      notify('Please select a valid image file (PNG, JPG, WEBP).', 'error');
+      return;
+    }
+    if (file.size > 3 * 1024 * 1024) {
+      notify('Packing proof photo must be under 3MB.', 'error');
+      return;
+    }
+    setIsUploadingPackPhoto(true);
+    const reader = new FileReader();
+    reader.onload = ev => {
+      setIsUploadingPackPhoto(false);
+      if (typeof ev.target?.result === 'string') {
+        setPackPhotoUrl(ev.target.result);
+        notify('Packing proof photo attached.', 'success');
+      }
+    };
+    reader.onerror = () => {
+      setIsUploadingPackPhoto(false);
+      notify('Could not read packing photo. Please try again.', 'error');
+    };
+    reader.readAsDataURL(file);
   };
 
   const handleFormSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+
+    if (!formImage || formImage.startsWith('blob:')) {
+      notify('Please upload a real photo of your handmade product.', 'error');
+      return;
+    }
 
     const colorsArray = availableColors
       .split(',')
@@ -243,8 +293,26 @@ export const SellerDashboard: React.FC = () => {
   const handlePackPhotoSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!packingOrder) return;
+    if (!packPhotoUrl) {
+      notify('Please upload a packing photo before marking the order packed.', 'error');
+      return;
+    }
     updateOrderStatus(packingOrder.id, 'packed', { packedPhotoUrl: packPhotoUrl });
     setPackingOrder(null);
+    setPackPhotoUrl('');
+  };
+
+  const handleHandshakeSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!handshakeOrder) return;
+    const cleanPin = handshakePin.trim();
+    if (!/^\d{4}$/.test(cleanPin)) {
+      notify('Enter the buyer’s 4-digit Handshake OTP to confirm delivery.', 'error');
+      return;
+    }
+    updateOrderStatus(handshakeOrder.id, 'delivered', { handshakeOtp: cleanPin });
+    setHandshakeOrder(null);
+    setHandshakePin('');
   };
 
   return (
@@ -731,7 +799,10 @@ export const SellerDashboard: React.FC = () => {
                     <div className="pt-3 border-t border-slate-100 flex items-center justify-end gap-2 text-xs">
                       {order.status === 'paid' && (
                         <button
-                          onClick={() => setPackingOrder(order)}
+                          onClick={() => {
+                            setPackPhotoUrl('');
+                            setPackingOrder(order);
+                          }}
                           className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-xl flex items-center gap-1.5 transition-colors"
                         >
                           <Camera className="w-3.5 h-3.5" />
@@ -751,11 +822,14 @@ export const SellerDashboard: React.FC = () => {
 
                       {order.status === 'shipped' && (
                         <button
-                          onClick={() => updateOrderStatus(order.id, 'delivered')}
+                          onClick={() => {
+                            setHandshakePin('');
+                            setHandshakeOrder(order);
+                          }}
                           className="px-4 py-2 bg-emerald-700 hover:bg-emerald-800 text-white font-bold rounded-xl flex items-center gap-1.5 transition-colors"
                         >
                           <CheckCircle2 className="w-3.5 h-3.5" />
-                          <span>Mark as Delivered at Hub</span>
+                          <span>Confirm Delivery with Handshake OTP</span>
                         </button>
                       )}
 
@@ -796,23 +870,86 @@ export const SellerDashboard: React.FC = () => {
               Per Shop It trust guidelines, upload a quick photo of the packed handmade item before dispatch to protect yourself against disputes.
             </p>
             <form onSubmit={handlePackPhotoSubmit} className="space-y-4 text-xs">
-              <div className="w-full h-36 rounded-xl bg-slate-100 overflow-hidden border border-slate-200 flex items-center justify-center">
-                <img src={packPhotoUrl} alt="Packed proof" className="w-full h-full object-cover" />
-              </div>
+              <label className="block w-full h-40 rounded-xl bg-slate-100 overflow-hidden border-2 border-dashed border-slate-300 hover:border-[#FF6B00] flex items-center justify-center cursor-pointer transition-colors">
+                {packPhotoUrl ? (
+                  <img src={packPhotoUrl} alt="Packed proof" className="w-full h-full object-cover" />
+                ) : (
+                  <div className="text-center text-slate-500 px-4">
+                    <Upload className="w-6 h-6 mx-auto mb-1 text-slate-400" />
+                    <span className="font-bold text-slate-700 block">
+                      {isUploadingPackPhoto ? 'Loading packing photo...' : 'Tap to upload packed order photo'}
+                    </span>
+                    <span className="text-[11px] text-slate-400">PNG, JPG, WEBP up to 3MB</span>
+                  </div>
+                )}
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={handlePackPhotoUpload}
+                  className="hidden"
+                />
+              </label>
 
               <div className="flex justify-end gap-2 pt-2">
                 <button
                   type="button"
-                  onClick={() => setPackingOrder(null)}
+                  onClick={() => {
+                    setPackingOrder(null);
+                    setPackPhotoUrl('');
+                  }}
                   className="px-4 py-2 font-medium text-slate-600 hover:text-slate-900"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 bg-slate-900 text-white font-bold rounded-xl hover:bg-slate-800"
+                  disabled={!packPhotoUrl || isUploadingPackPhoto}
+                  className="px-4 py-2 bg-slate-900 disabled:bg-slate-400 text-white font-bold rounded-xl hover:bg-slate-800"
                 >
                   Confirm & Mark as Packed
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Handshake OTP Delivery Confirmation Modal */}
+      {handshakeOrder && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-md w-full p-6 space-y-4 shadow-2xl">
+            <h3 className="text-base font-bold text-slate-900">
+              Confirm Handshake Delivery for #{handshakeOrder.id}
+            </h3>
+            <p className="text-xs text-slate-600">
+              Ask the buyer (or campus runner with the buyer) for their 4-digit Handshake PIN from their Orders tab to mark delivered and release escrow.
+            </p>
+            <form onSubmit={handleHandshakeSubmit} className="space-y-4 text-xs">
+              <input
+                type="text"
+                maxLength={4}
+                required
+                value={handshakePin}
+                onChange={e => setHandshakePin(e.target.value.replace(/\D/g, ''))}
+                placeholder="4-digit PIN (e.g. 4821)"
+                className="w-full h-11 px-4 text-center tracking-[0.4em] text-lg font-black font-mono-numbers rounded-xl border-2 border-slate-200 focus:border-emerald-600 focus:outline-none"
+              />
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setHandshakeOrder(null);
+                    setHandshakePin('');
+                  }}
+                  className="px-4 py-2 font-medium text-slate-600 hover:text-slate-900"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 bg-emerald-700 text-white font-bold rounded-xl hover:bg-emerald-800"
+                >
+                  Verify PIN & Confirm Delivery
                 </button>
               </div>
             </form>
@@ -931,18 +1068,22 @@ export const SellerDashboard: React.FC = () => {
                   Product Photo (Auto-compressed for 2G/3G campus networks)
                 </label>
                 <div className="flex items-center gap-3">
-                  <div className="w-14 h-14 rounded-lg bg-slate-100 overflow-hidden border border-slate-200 shrink-0">
-                    <img src={formImage} alt="Preview" className="w-full h-full object-cover" />
+                  <div className="w-14 h-14 rounded-lg bg-slate-100 overflow-hidden border border-slate-200 shrink-0 flex items-center justify-center">
+                    {formImage ? (
+                      <img src={formImage} alt="Preview" className="w-full h-full object-cover" />
+                    ) : (
+                      <Camera className="w-5 h-5 text-slate-400" />
+                    )}
                   </div>
                   <label className="flex-1 cursor-pointer border border-dashed border-slate-300 rounded-lg p-2.5 text-center hover:bg-slate-50 transition-colors">
                     <div className="flex items-center justify-center gap-1.5 text-slate-600 font-medium">
                       <Upload className="w-4 h-4" />
-                      <span>{isCompressing ? 'Compressing photo...' : 'Upload Craft Photo'}</span>
+                      <span>{isCompressing ? 'Loading photo...' : 'Upload Craft Photo'}</span>
                     </div>
                     <input
                       type="file"
                       accept="image/*"
-                      onChange={handleSimulatedImageUpload}
+                      onChange={handleProductImageUpload}
                       className="hidden"
                     />
                   </label>

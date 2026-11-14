@@ -1,11 +1,14 @@
 import express, { Response } from 'express';
-import { query as dbQuery } from '../db/postgres.js';
+import crypto from 'crypto';
+import { query as dbQuery, withTransaction } from '../db/postgres.js';
+import { verifyAndConsumeOtp } from '../db/otpStore.js';
 import {
   requireAuth,
-  optionalAuth,
+  requireCronOrAdmin,
   AuthenticatedRequest,
 } from '../auth/middleware.js';
 import { logAuditEvent } from '../auth/sessionStore.js';
+import { nairaToKobo, koboToNaira, calculatePricingInKobo } from '../lib/payments.js';
 
 const router = express.Router();
 
@@ -21,30 +24,58 @@ const requirePaymentsEnabled = (_req: express.Request, res: express.Response, ne
   next();
 };
 
-// Helper: Convert Naira to integer Kobo
-function nairaToKobo(naira: number | string): number {
-  const num = typeof naira === 'string' ? parseFloat(naira) : naira;
-  return Math.round((Number.isFinite(num) ? num : 0) * 100);
+// Helper: Match seller identity against userId or sellerId
+function isUserSellerOwner(user: NonNullable<AuthenticatedRequest['user']>, sellerId?: string): boolean {
+  if (!sellerId) return false;
+  return sellerId === user.userId || (Boolean(user.sellerId) && sellerId === user.sellerId);
 }
 
-// Helper: Convert integer Kobo to Naira
-function koboToNaira(kobo: number | string): number {
-  const num = typeof kobo === 'string' ? parseInt(kobo, 10) : kobo;
-  return (Number.isFinite(num) ? num : 0) / 100;
+// Helper: Validate image URL / base64 upload against XSS or unsafe schemes (blocks javascript:, blob:, svg+xml, text/html)
+function isValidImageSource(raw: unknown): boolean {
+  if (typeof raw !== 'string') return false;
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed.length > 4_200_000) return false;
+  const lower = trimmed.toLowerCase();
+  if (
+    lower.startsWith('javascript:') ||
+    lower.startsWith('vbscript:') ||
+    lower.startsWith('blob:') ||
+    lower.startsWith('data:text/') ||
+    lower.includes('image/svg+xml') ||
+    lower.includes('<script')
+  ) {
+    return false;
+  }
+  if (trimmed.startsWith('/')) return true;
+  if (lower.startsWith('https://')) return true;
+  if (/^data:image\/(png|jpeg|jpg|webp|gif);base64,[a-z0-9+/=]+$/i.test(trimmed)) return true;
+  return false;
 }
 
-// Helper: Calculate standard platform service fee (5%) in integer kobo
-function calculatePricingInKobo(sellerPriceKobo: number) {
-  const serviceFeeKobo = Math.round(sellerPriceKobo * 0.05);
-  const displayPriceKobo = sellerPriceKobo + serviceFeeKobo;
-  return {
-    sellerPriceKobo,
-    serviceFeeKobo,
-    displayPriceKobo,
-    sellerPriceNaira: koboToNaira(sellerPriceKobo),
-    serviceFeeNaira: koboToNaira(serviceFeeKobo),
-    displayPriceNaira: koboToNaira(displayPriceKobo),
-  };
+function sanitizeImageUrls(
+  input: unknown,
+  allowFallback = false
+): { valid: boolean; urls: string[]; error?: string } {
+  if (input === undefined || input === null) {
+    return allowFallback ? { valid: true, urls: ['/shopit-logo.png'] } : { valid: false, urls: [], error: 'Product images are required.' };
+  }
+  if (!Array.isArray(input)) {
+    return { valid: false, urls: [], error: 'Images must be provided as an array.' };
+  }
+  const cleaned = input.map(v => String(v || '').trim()).filter(Boolean).slice(0, 6);
+  if (cleaned.length === 0) {
+    return allowFallback ? { valid: true, urls: ['/shopit-logo.png'] } : { valid: false, urls: [], error: 'At least one valid image is required.' };
+  }
+  for (const url of cleaned) {
+    if (!isValidImageSource(url)) {
+      return {
+        valid: false,
+        urls: [],
+        error: 'Invalid or unsafe image URL. Use an uploaded photo (PNG/JPG/WEBP), https:// URL, or local asset path.',
+      };
+    }
+  }
+  return { valid: true, urls: cleaned };
 }
 
 // ============================================================================
@@ -54,12 +85,12 @@ function calculatePricingInKobo(sellerPriceKobo: number) {
 // GET /api/products - Public listing with filters & pagination
 router.get('/products', async (req, res) => {
   try {
-    const page = Math.max(1, parseInt(String(req.query.page || '1'), 10));
-    const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit || '50'), 10)));
+    const page = Math.max(1, parseInt(String(req.query.page || '1'), 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit || '50'), 10) || 50));
     const offset = (page - 1) * limit;
 
     const category = req.query.category ? String(req.query.category).trim() : '';
-    const search = req.query.search ? String(req.query.search).trim() : '';
+    const search = req.query.search ? String(req.query.search).trim().slice(0, 100) : '';
     const sellerId = req.query.sellerId ? String(req.query.sellerId).trim() : '';
     const campus = req.query.campus ? String(req.query.campus).trim() : '';
     const state = req.query.state ? String(req.query.state).trim() : '';
@@ -75,32 +106,26 @@ router.get('/products', async (req, res) => {
       conditions.push(`category = $${pIdx++}`);
       params.push(category);
     }
-
     if (sellerId) {
       conditions.push(`seller_id = $${pIdx++}`);
       params.push(sellerId);
     }
-
     if (campus && campus !== 'All Campuses') {
       conditions.push(`seller_campus = $${pIdx++}`);
       params.push(campus);
     }
-
     if (state && state !== 'all') {
       conditions.push(`location_state = $${pIdx++}`);
       params.push(state);
     }
-
     if (city && city !== 'all') {
       conditions.push(`location_city = $${pIdx++}`);
       params.push(city);
     }
-
     if (area && area !== 'all') {
       conditions.push(`location_area = $${pIdx++}`);
       params.push(area);
     }
-
     if (search) {
       conditions.push(`(title ILIKE $${pIdx} OR description ILIKE $${pIdx})`);
       params.push(`%${search}%`);
@@ -117,13 +142,10 @@ router.get('/products', async (req, res) => {
     const countRes = await dbQuery(`SELECT COUNT(*) as count FROM shopit_products ${whereClause}`, params);
     const total = parseInt(countRes.rows[0].count, 10);
 
-    const querySql = `
-      SELECT * FROM shopit_products
-      ${whereClause}
-      ${orderClause}
-      LIMIT $${pIdx++} OFFSET $${pIdx++}
-    `;
-    const rowsRes = await dbQuery(querySql, [...params, limit, offset]);
+    const rowsRes = await dbQuery(
+      `SELECT * FROM shopit_products ${whereClause} ${orderClause} LIMIT $${pIdx++} OFFSET $${pIdx++}`,
+      [...params, limit, offset]
+    );
 
     const products = rowsRes.rows.map((row: any) => ({
       id: row.id,
@@ -184,49 +206,50 @@ router.get('/products/:id', async (req, res) => {
     }
 
     const row = result.rows[0];
-    const product = {
-      id: row.id,
-      sellerId: row.seller_id,
-      sellerShopName: row.seller_shop_name,
-      sellerCampus: row.seller_campus,
-      location: {
-        state: row.location_state,
-        city: row.location_city,
-        area: row.location_area,
+    return res.json({
+      status: true,
+      product: {
+        id: row.id,
+        sellerId: row.seller_id,
+        sellerShopName: row.seller_shop_name,
+        sellerCampus: row.seller_campus,
+        location: {
+          state: row.location_state,
+          city: row.location_city,
+          area: row.location_area,
+        },
+        locationArea: row.location_area,
+        sellerBadges: row.seller_badges || [],
+        title: row.title,
+        description: row.description,
+        category: row.category,
+        sellerPrice: parseFloat(row.seller_price),
+        serviceFee: parseFloat(row.service_fee),
+        displayPrice: parseFloat(row.display_price),
+        images: Array.isArray(row.images) ? row.images : [],
+        stock: parseInt(row.stock, 10),
+        rating: parseFloat(row.rating || 5.0),
+        reviewCount: parseInt(row.review_count, 10) || 0,
+        reviews: [],
+        delivery: {
+          allowsPickup: true,
+          pickupLocation: `${row.location_area || 'Hub'} Safe Handoff Spot`,
+          pickupFee: parseFloat(row.delivery_pickup_fee || 0),
+          allowsLocalDelivery: true,
+          localDeliveryFee: parseFloat(row.delivery_local_fee || 500),
+          minOrderForDelivery: 1000,
+        },
+        isSoldOut: Boolean(row.is_sold_out || row.stock <= 0),
+        isNewArrival: Boolean(row.is_new_arrival),
+        createdAt: row.created_at,
       },
-      locationArea: row.location_area,
-      sellerBadges: row.seller_badges || [],
-      title: row.title,
-      description: row.description,
-      category: row.category,
-      sellerPrice: parseFloat(row.seller_price),
-      serviceFee: parseFloat(row.service_fee),
-      displayPrice: parseFloat(row.display_price),
-      images: Array.isArray(row.images) ? row.images : [],
-      stock: parseInt(row.stock, 10),
-      rating: parseFloat(row.rating || 5.0),
-      reviewCount: parseInt(row.review_count, 10) || 0,
-      reviews: [],
-      delivery: {
-        allowsPickup: true,
-        pickupLocation: `${row.location_area || 'Hub'} Safe Handoff Spot`,
-        pickupFee: parseFloat(row.delivery_pickup_fee || 0),
-        allowsLocalDelivery: true,
-        localDeliveryFee: parseFloat(row.delivery_local_fee || 500),
-        minOrderForDelivery: 1000,
-      },
-      isSoldOut: Boolean(row.is_sold_out || row.stock <= 0),
-      isNewArrival: Boolean(row.is_new_arrival),
-      createdAt: row.created_at,
-    };
-
-    return res.json({ status: true, product });
+    });
   } catch (err: any) {
     return res.status(500).json({ status: false, message: err.message });
   }
 });
 
-// POST /api/products - Create a product (Protected)
+// POST /api/products - Create a product (Protected; sellerId derived strictly from session)
 router.post('/products', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const user = req.user!;
@@ -241,19 +264,29 @@ router.post('/products', requireAuth, async (req: AuthenticatedRequest, res: Res
       delivery,
     } = req.body;
 
-    if (!title || !sellerPrice) {
-      return res.status(400).json({ status: false, message: 'Title and seller price are required.' });
+    const cleanTitle = typeof title === 'string' ? title.trim() : '';
+    if (!cleanTitle || sellerPrice === undefined || sellerPrice === null) {
+      return res.status(400).json({ status: false, message: 'A non-empty product title and seller price are required.' });
     }
 
     const rawSellerPriceNaira = parseFloat(sellerPrice);
-    if (isNaN(rawSellerPriceNaira) || rawSellerPriceNaira < 100) {
-      return res.status(400).json({ status: false, message: 'Minimum seller price is ₦100.' });
+    if (isNaN(rawSellerPriceNaira) || rawSellerPriceNaira < 100 || rawSellerPriceNaira > 10000000) {
+      return res.status(400).json({ status: false, message: 'Seller price must be between ₦100 and ₦10,000,000.' });
+    }
+
+    const imgCheck = sanitizeImageUrls(images, true);
+    if (!imgCheck.valid) {
+      return res.status(400).json({ status: false, message: imgCheck.error });
     }
 
     const sellerPriceKobo = nairaToKobo(rawSellerPriceNaira);
     const pricing = calculatePricingInKobo(sellerPriceKobo);
 
-    const sellerId = user.role === 'seller' ? (user.sellerId || user.userId) : (req.body.sellerId || user.userId);
+    // Derive sellerId strictly from session (only admin can override on behalf of another seller)
+    const sellerId =
+      user.role === 'admin' && req.body.sellerId
+        ? String(req.body.sellerId).trim()
+        : user.sellerId || user.userId;
 
     const sellerRes = await dbQuery('SELECT * FROM shopit_sellers WHERE id = $1 OR user_id = $1', [sellerId]);
     let seller = sellerRes.rows[0];
@@ -269,8 +302,8 @@ router.post('/products', requireAuth, async (req: AuthenticatedRequest, res: Res
           req.body.sellerShopName || `${user.name}'s Shop`,
           user.name,
           user.email,
-          user.isVerifiedSeller || false,
-          user.isVerifiedSeller ? 'verified' : 'pending',
+          false,
+          'not_started',
           req.body.sellerCampus || 'Lagos Mainland',
         ]
       );
@@ -278,7 +311,7 @@ router.post('/products', requireAuth, async (req: AuthenticatedRequest, res: Res
         id: sellerId,
         user_id: user.userId,
         shop_name: req.body.sellerShopName || `${user.name}'s Shop`,
-        is_verified_seller: user.isVerifiedSeller || false,
+        is_verified_seller: false,
       };
     }
 
@@ -288,18 +321,21 @@ router.post('/products', requireAuth, async (req: AuthenticatedRequest, res: Res
 
     const shopName = seller?.shop_name || req.body.sellerShopName || `${user.name}'s Shop`;
     const campus = seller?.campus || req.body.sellerCampus || 'Lagos Mainland';
-    const isVerified = Boolean(seller?.is_verified_seller || seller?.verification_status === 'verified' || user.isVerifiedSeller);
+    const isVerified = Boolean(seller?.is_verified_seller || seller?.verification_status === 'verified');
 
-    const badges: string[] = Array.isArray(req.body.sellerBadges) ? req.body.sellerBadges : [];
-    if (isVerified && !badges.includes('verified')) {
+    const badges: string[] = Array.isArray(req.body.sellerBadges)
+      ? req.body.sellerBadges.filter((b: any) => b !== 'verified')
+      : [];
+    if (isVerified) {
       badges.push('verified');
     }
 
-    const productId = `prod_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-    const imagesArray = Array.isArray(images) && images.length > 0 ? images : ['/shopit-logo.png'];
+    const productId = `prod_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
+    const imagesArray = imgCheck.urls;
 
-    const pickupFee = delivery?.pickupFee !== undefined ? parseFloat(delivery.pickupFee) : 0;
-    const localDeliveryFee = delivery?.localDeliveryFee !== undefined ? parseFloat(delivery.localDeliveryFee) : 500;
+    const parsedStock = Math.max(0, Math.min(10000, parseInt(String(stock), 10) || 1));
+    const pickupFee = Math.max(0, Math.min(1000000, parseFloat(delivery?.pickupFee ?? '0') || 0));
+    const localDeliveryFee = Math.max(0, Math.min(1000000, parseFloat(delivery?.localDeliveryFee ?? '500') || 500));
 
     await dbQuery(
       `INSERT INTO shopit_products (
@@ -320,13 +356,13 @@ router.post('/products', requireAuth, async (req: AuthenticatedRequest, res: Res
         sellerId,
         shopName,
         campus,
-        title.trim(),
-        description ? description.trim() : `${title} crafted with care.`,
+        String(title).trim().slice(0, 200),
+        description ? String(description).trim().slice(0, 2000) : `${String(title).trim()} crafted with care.`,
         category || 'crafts',
         pricing.sellerPriceNaira,
         pricing.serviceFeeNaira,
         pricing.displayPriceNaira,
-        parseInt(String(stock), 10) || 1,
+        parsedStock,
         JSON.stringify(imagesArray),
         pickupFee,
         localDeliveryFee,
@@ -334,7 +370,7 @@ router.post('/products', requireAuth, async (req: AuthenticatedRequest, res: Res
         location?.city || 'Lagos Mainland',
         location?.area || 'Yaba',
         JSON.stringify(badges),
-        parseInt(String(stock), 10) <= 0,
+        parsedStock <= 0,
       ]
     );
 
@@ -369,7 +405,7 @@ router.put('/products/:id', requireAuth, async (req: AuthenticatedRequest, res: 
     }
 
     const row = existing.rows[0];
-    if (row.seller_id !== user.userId && user.role !== 'admin') {
+    if (!isUserSellerOwner(user, row.seller_id) && user.role !== 'admin') {
       return res.status(403).json({ status: false, message: 'You do not have permission to modify this product.' });
     }
 
@@ -379,18 +415,37 @@ router.put('/products/:id', requireAuth, async (req: AuthenticatedRequest, res: 
     let displayPrice = row.display_price;
 
     if (updates.sellerPrice !== undefined) {
-      const p = calculatePricingInKobo(nairaToKobo(updates.sellerPrice));
+      const parsedPrice = parseFloat(updates.sellerPrice);
+      if (isNaN(parsedPrice) || parsedPrice < 100) {
+        return res.status(400).json({ status: false, message: 'Minimum seller price is ₦100.' });
+      }
+      const p = calculatePricingInKobo(nairaToKobo(parsedPrice));
       sellerPrice = p.sellerPriceNaira;
       serviceFee = p.serviceFeeNaira;
       displayPrice = p.displayPriceNaira;
     }
 
-    const title = updates.title !== undefined ? updates.title : row.title;
-    const description = updates.description !== undefined ? updates.description : row.description;
+    let title = row.title;
+    if (updates.title !== undefined) {
+      const cleanUpdateTitle = String(updates.title).trim().slice(0, 200);
+      if (!cleanUpdateTitle) {
+        return res.status(400).json({ status: false, message: 'Product title cannot be empty.' });
+      }
+      title = cleanUpdateTitle;
+    }
+    const description = updates.description !== undefined ? String(updates.description).trim().slice(0, 2000) : row.description;
     const category = updates.category !== undefined ? updates.category : row.category;
-    const stock = updates.stock !== undefined ? parseInt(String(updates.stock), 10) : row.stock;
+    const stock = updates.stock !== undefined ? Math.max(0, Math.min(10000, parseInt(String(updates.stock), 10) || 0)) : row.stock;
     const isSoldOut = stock <= 0;
-    const images = updates.images !== undefined ? JSON.stringify(updates.images) : JSON.stringify(row.images);
+
+    let images = JSON.stringify(row.images);
+    if (updates.images !== undefined) {
+      const imgUpdate = sanitizeImageUrls(updates.images, false);
+      if (!imgUpdate.valid) {
+        return res.status(400).json({ status: false, message: imgUpdate.error });
+      }
+      images = JSON.stringify(imgUpdate.urls);
+    }
 
     await dbQuery(
       `UPDATE shopit_products
@@ -417,7 +472,7 @@ router.delete('/products/:id', requireAuth, async (req: AuthenticatedRequest, re
     }
 
     const row = existing.rows[0];
-    if (row.seller_id !== user.userId && user.role !== 'admin') {
+    if (!isUserSellerOwner(user, row.seller_id) && user.role !== 'admin') {
       return res.status(403).json({ status: false, message: 'You do not have permission to delete this product.' });
     }
 
@@ -441,13 +496,12 @@ router.delete('/products/:id', requireAuth, async (req: AuthenticatedRequest, re
 // 2. SELLERS API (PostgreSQL: shopit_sellers)
 // ============================================================================
 
-// GET /api/sellers - List all registered sellers
+// GET /api/sellers - Public catalog seller profiles (no sensitive email/phone leaked)
 router.get('/sellers', async (_req, res) => {
   try {
     const result = await dbQuery(`
-      SELECT s.*, u.email as user_email
+      SELECT s.*
       FROM shopit_sellers s
-      LEFT JOIN shopit_users u ON s.user_id = u.id
       ORDER BY s.created_at DESC
     `);
 
@@ -455,7 +509,6 @@ router.get('/sellers', async (_req, res) => {
       id: row.id,
       shopName: row.shop_name,
       ownerName: row.owner_name,
-      email: row.email || row.user_email,
       bio: row.bio || '',
       campus: row.campus || 'Lagos Mainland',
       location: {
@@ -467,12 +520,7 @@ router.get('/sellers', async (_req, res) => {
       isVerifiedSeller: Boolean(row.is_verified_seller),
       verificationStatus: row.verification_status || 'not_started',
       verifiedAt: row.verified_at,
-      verifiedNinLast4: row.verified_nin_last4,
-      verifiedLegalName: row.verified_legal_name,
       under18: Boolean(row.under_18),
-      guardianConsent: Boolean(row.guardian_consent),
-      guardianName: row.guardian_name,
-      guardianPhone: row.guardian_phone,
       badges: Array.isArray(row.badges)
         ? (row.is_verified_seller && !row.badges.includes('verified') ? [...row.badges, 'verified'] : row.badges)
         : (row.is_verified_seller ? ['verified'] : []),
@@ -496,10 +544,9 @@ router.get('/sellers/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const result = await dbQuery(
-      `SELECT s.*, u.email as user_email
+      `SELECT s.*
        FROM shopit_sellers s
-       LEFT JOIN shopit_users u ON s.user_id = u.id
-       WHERE s.id = $1 OR s.user_id = $1 OR LOWER(s.email) = LOWER($1)`,
+       WHERE s.id = $1 OR s.user_id = $1`,
       [id]
     );
 
@@ -508,48 +555,45 @@ router.get('/sellers/:id', async (req, res) => {
     }
 
     const row = result.rows[0];
-    const seller = {
-      id: row.id,
-      shopName: row.shop_name,
-      ownerName: row.owner_name,
-      email: row.email || row.user_email,
-      bio: row.bio || '',
-      campus: row.campus || 'Lagos Mainland',
-      location: {
-        state: row.location_state || 'Lagos',
-        city: row.location_city || 'Lagos Mainland',
-        area: row.location_area || 'Yaba',
+    return res.json({
+      status: true,
+      seller: {
+        id: row.id,
+        shopName: row.shop_name,
+        ownerName: row.owner_name,
+        bio: row.bio || '',
+        campus: row.campus || 'Lagos Mainland',
+        location: {
+          state: row.location_state || 'Lagos',
+          city: row.location_city || 'Lagos Mainland',
+          area: row.location_area || 'Yaba',
+        },
+        locationArea: row.location_area || 'Yaba',
+        isVerifiedSeller: Boolean(row.is_verified_seller),
+        verificationStatus: row.verification_status || 'not_started',
+        verifiedAt: row.verified_at,
+        under18: Boolean(row.under_18),
+        badges: Array.isArray(row.badges)
+          ? (row.is_verified_seller && !row.badges.includes('verified') ? [...row.badges, 'verified'] : row.badges)
+          : (row.is_verified_seller ? ['verified'] : []),
+        rating: parseFloat(row.rating || 5.0),
+        salesCount: parseInt(row.sales_count, 10) || 0,
+        viewsCount: parseInt(row.views_count, 10) || 0,
+        vacationMode: Boolean(row.vacation_mode),
+        joinedDate: row.created_at ? new Date(row.created_at).toISOString().split('T')[0] : '2026-01-01',
       },
-      locationArea: row.location_area || 'Yaba',
-      isVerifiedSeller: Boolean(row.is_verified_seller),
-      verificationStatus: row.verification_status || 'not_started',
-      verifiedAt: row.verified_at,
-      verifiedNinLast4: row.verified_nin_last4,
-      verifiedLegalName: row.verified_legal_name,
-      under18: Boolean(row.under_18),
-      guardianConsent: Boolean(row.guardian_consent),
-      badges: Array.isArray(row.badges)
-        ? (row.is_verified_seller && !row.badges.includes('verified') ? [...row.badges, 'verified'] : row.badges)
-        : (row.is_verified_seller ? ['verified'] : []),
-      rating: parseFloat(row.rating || 5.0),
-      salesCount: parseInt(row.sales_count, 10) || 0,
-      viewsCount: parseInt(row.views_count, 10) || 0,
-      vacationMode: Boolean(row.vacation_mode),
-      joinedDate: row.created_at ? new Date(row.created_at).toISOString().split('T')[0] : '2026-01-01',
-    };
-
-    return res.json({ status: true, seller });
+    });
   } catch (err: any) {
     return res.status(500).json({ status: false, message: err.message });
   }
 });
 
-// PUT /api/sellers/:id - Update seller profile
+// PUT /api/sellers/:id - Update seller profile (Owner or Admin only)
 router.put('/sellers/:id', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const user = req.user!;
     const { id } = req.params;
-    if (user.userId !== id && user.role !== 'admin') {
+    if (!isUserSellerOwner(user, id) && user.role !== 'admin') {
       return res.status(403).json({ status: false, message: 'Forbidden.' });
     }
 
@@ -579,7 +623,6 @@ router.put('/sellers/:id', requireAuth, async (req: AuthenticatedRequest, res: R
 // 3. CARTS & WISHLISTS API (PostgreSQL: shopit_carts, shopit_wishlists)
 // ============================================================================
 
-// GET /api/cart
 router.get('/cart', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const user = req.user!;
@@ -591,7 +634,6 @@ router.get('/cart', requireAuth, async (req: AuthenticatedRequest, res: Response
   }
 });
 
-// PUT /api/cart - Save cart items to PostgreSQL
 router.put('/cart', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const user = req.user!;
@@ -600,7 +642,7 @@ router.put('/cart', requireAuth, async (req: AuthenticatedRequest, res: Response
       `INSERT INTO shopit_carts (user_id, items, updated_at)
        VALUES ($1, $2, NOW())
        ON CONFLICT (user_id) DO UPDATE SET items = $2, updated_at = NOW()`,
-      [user.userId, JSON.stringify(items)]
+      [user.userId, JSON.stringify(Array.isArray(items) ? items.slice(0, 50) : [])]
     );
     return res.json({ status: true, message: 'Cart saved to database.' });
   } catch (err: any) {
@@ -608,7 +650,6 @@ router.put('/cart', requireAuth, async (req: AuthenticatedRequest, res: Response
   }
 });
 
-// GET /api/wishlist
 router.get('/wishlist', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const user = req.user!;
@@ -620,7 +661,6 @@ router.get('/wishlist', requireAuth, async (req: AuthenticatedRequest, res: Resp
   }
 });
 
-// PUT /api/wishlist - Save wishlist to PostgreSQL
 router.put('/wishlist', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const user = req.user!;
@@ -629,7 +669,7 @@ router.put('/wishlist', requireAuth, async (req: AuthenticatedRequest, res: Resp
       `INSERT INTO shopit_wishlists (user_id, product_ids, updated_at)
        VALUES ($1, $2, NOW())
        ON CONFLICT (user_id) DO UPDATE SET product_ids = $2, updated_at = NOW()`,
-      [user.userId, JSON.stringify(productIds)]
+      [user.userId, JSON.stringify(Array.isArray(productIds) ? productIds.slice(0, 100) : [])]
     );
     return res.json({ status: true, message: 'Wishlist saved to database.' });
   } catch (err: any) {
@@ -638,67 +678,76 @@ router.put('/wishlist', requireAuth, async (req: AuthenticatedRequest, res: Resp
 });
 
 // ============================================================================
-// 4. ORDERS & STATUS HISTORY API (PostgreSQL: shopit_orders, shopit_order_status_history)
+// 4. ORDERS & ESCROW STATE MACHINE (PostgreSQL Authoritative)
 // ============================================================================
 
-// GET /api/orders - List user orders or all orders for admin
+// GET /api/orders - List user orders (handshakeOtp hidden from sellers; PII hidden from non-admins)
 router.get('/orders', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const user = req.user!;
-    const page = Math.max(1, parseInt(String(req.query.page || '1'), 10));
-    const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit || '50'), 10)));
+    const page = Math.max(1, parseInt(String(req.query.page || '1'), 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit || '50'), 10) || 50));
     const offset = (page - 1) * limit;
 
     let querySql = '';
     let countSql = '';
     let params: any[] = [];
+    let countParams: any[] = [];
 
     if (user.role === 'admin') {
       countSql = 'SELECT COUNT(*) as count FROM shopit_orders';
       querySql = 'SELECT * FROM shopit_orders ORDER BY created_at DESC LIMIT $1 OFFSET $2';
       params = [limit, offset];
+      countParams = [];
     } else if (user.role === 'seller') {
-      countSql = `SELECT COUNT(*) as count FROM shopit_orders WHERE buyer_id = $1 OR items::text LIKE $2`;
-      querySql = `SELECT * FROM shopit_orders WHERE buyer_id = $1 OR items::text LIKE $2 ORDER BY created_at DESC LIMIT $3 OFFSET $4`;
-      params = [user.userId, `%"sellerId":"${user.userId}"%`, limit, offset];
+      const sellerLookupId = user.sellerId || user.userId;
+      countSql = `SELECT COUNT(*) as count FROM shopit_orders WHERE buyer_id = $1 OR items::text LIKE $2 OR items::text LIKE $3`;
+      querySql = `SELECT * FROM shopit_orders WHERE buyer_id = $1 OR items::text LIKE $2 OR items::text LIKE $3 ORDER BY created_at DESC LIMIT $4 OFFSET $5`;
+      countParams = [user.userId, `%"sellerId":"${user.userId}"%`, `%"sellerId":"${sellerLookupId}"%`];
+      params = [...countParams, limit, offset];
     } else {
       countSql = 'SELECT COUNT(*) as count FROM shopit_orders WHERE buyer_id = $1';
       querySql = 'SELECT * FROM shopit_orders WHERE buyer_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3';
+      countParams = [user.userId];
       params = [user.userId, limit, offset];
     }
 
-    const countRes = await dbQuery(countSql, params.slice(0, countSql.includes('$2') ? 2 : (countSql.includes('$1') ? 1 : 0)));
+    const countRes = await dbQuery(countSql, countParams);
     const total = parseInt(countRes.rows[0].count, 10);
-
     const rowsRes = await dbQuery(querySql, params);
 
-    const orders = rowsRes.rows.map((row: any) => ({
-      id: row.id,
-      buyerId: row.buyer_id,
-      buyerMaskedId: row.buyer_masked_id || `Buyer #${row.id.slice(-4)}`,
-      buyerName: user.role === 'admin' ? row.buyer_name : undefined,
-      buyerEmail: user.role === 'admin' ? row.buyer_email : undefined,
-      deliveryArea: row.delivery_area || 'Yaba',
-      pickupPoint: row.pickup_point,
-      items: Array.isArray(row.items) ? row.items : [],
-      itemsSubtotal: parseFloat(row.subtotal),
-      serviceFeeTotal: parseFloat(row.service_fee_total),
-      deliveryTotal: parseFloat(row.delivery_total),
-      discountTotal: parseFloat(row.discount_total || 0),
-      grandTotal: parseFloat(row.grand_total),
-      status: row.status,
-      paymentMethod: row.payment_method || 'paystack',
-      paymentReference: row.payment_reference,
-      handshakeOtp: row.handshake_otp,
-      handshakeVerified: Boolean(row.handshake_verified),
-      autoReleaseAt: row.auto_release_at || new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString(),
-      createdAt: row.created_at,
-      packedAt: row.packed_at,
-      shippedAt: row.shipped_at,
-      deliveredAt: row.delivered_at,
-      completedAt: row.completed_at,
-      hasReview: false,
-    }));
+    const orders = rowsRes.rows.map((row: any) => {
+      const isBuyerOrAdmin = row.buyer_id === user.userId || user.role === 'admin';
+      return {
+        id: row.id,
+        buyerId: row.buyer_id,
+        buyerMaskedId: row.buyer_masked_id || `Buyer #${row.id.slice(-4)}`,
+        buyerName: user.role === 'admin' ? row.buyer_name : undefined,
+        buyerEmail: user.role === 'admin' ? row.buyer_email : undefined,
+        deliveryArea: row.delivery_area || 'Yaba',
+        pickupPoint: row.pickup_point,
+        items: Array.isArray(row.items) ? row.items : [],
+        itemsSubtotal: parseFloat(row.subtotal),
+        serviceFeeTotal: parseFloat(row.service_fee_total),
+        deliveryTotal: parseFloat(row.delivery_total),
+        discountTotal: parseFloat(row.discount_total || 0),
+        grandTotal: parseFloat(row.grand_total),
+        status: row.status,
+        paymentMethod: row.payment_method || 'online',
+        paymentReference: row.payment_reference,
+        // C8 Security: Never expose handshakeOtp to seller
+        handshakeOtp: isBuyerOrAdmin ? row.handshake_otp : undefined,
+        handshakeVerified: Boolean(row.handshake_verified),
+        packedPhotoUrl: row.packed_photo_url || undefined,
+        autoReleaseAt: row.auto_release_at,
+        createdAt: row.created_at,
+        packedAt: row.packed_at,
+        shippedAt: row.shipped_at,
+        deliveredAt: row.delivered_at,
+        completedAt: row.completed_at,
+        hasReview: false,
+      };
+    });
 
     return res.json({
       status: true,
@@ -712,279 +761,248 @@ router.get('/orders', requireAuth, async (req: AuthenticatedRequest, res: Respon
   }
 });
 
-// POST /api/orders - Create an order with integer kobo & status history
-router.post('/orders', requirePaymentsEnabled, optionalAuth, async (req: AuthenticatedRequest, res: Response) => {
-  if (process.env.PAYMENTS_ENABLED !== 'true') {
-    return res.status(503).json({
-      status: false,
-      error: 'PAYMENTS_DISABLED',
-      message: 'Online payments are coming soon. Arrange directly with the seller',
-    });
-  }
-
-  try {
-    const user = req.user;
-    const {
-      id: requestedId,
-      items = [],
-      subtotal,
-      serviceFeeTotal,
-      deliveryTotal,
-      discountTotal = 0,
-      grandTotal,
-      deliveryArea,
-      pickupPoint,
-      paymentMethod = 'paystack',
-      paymentReference,
-    } = req.body;
-
-    const orderId = requestedId || `ORD-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
-
-    const buyerEmail = user?.email || (req.body.buyerEmail ? String(req.body.buyerEmail).trim().toLowerCase() : (req.body.email ? String(req.body.email).trim().toLowerCase() : 'customer@shopit.ng'));
-    const buyerName = user?.name || (req.body.buyerName ? String(req.body.buyerName).trim() : (req.body.name ? String(req.body.name).trim() : 'Customer'));
-    const buyerId = user?.userId || `guest_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-
-    const subtotalKobo = nairaToKobo(subtotal);
-    const serviceFeeKobo = nairaToKobo(serviceFeeTotal);
-    const deliveryFeeKobo = nairaToKobo(deliveryTotal);
-    const discountKobo = nairaToKobo(discountTotal);
-    const grandTotalKobo = nairaToKobo(grandTotal);
-
-    const autoReleaseDate = new Date(Date.now() + 5 * 24 * 60 * 60 * 1000);
-    const handshakeOtp = String(Math.floor(1000 + Math.random() * 9000));
-    const buyerMaskedId = `Buyer #${orderId.slice(-4)}`;
-
-    await dbQuery(
-      `INSERT INTO shopit_orders (
-        id, buyer_id, buyer_name, buyer_email, buyer_masked_id, items,
-        subtotal, service_fee_total, delivery_total, discount_total, grand_total,
-        subtotal_kobo, service_fee_kobo, delivery_fee_kobo, grand_total_kobo,
-        payment_method, payment_reference, handshake_otp, handshake_verified,
-        status, delivery_area, pickup_point, auto_release_at, created_at, updated_at
-      ) VALUES (
-        $1, $2, $3, $4, $5, $6,
-        $7, $8, $9, $10, $11,
-        $12, $13, $14, $15,
-        $16, $17, $18, false,
-        'paid', $19, $20, $21, NOW(), NOW()
-      )`,
-      [
-        orderId,
-        buyerId,
-        buyerName,
-        buyerEmail,
-        buyerMaskedId,
-        JSON.stringify(items),
-        koboToNaira(subtotalKobo),
-        koboToNaira(serviceFeeKobo),
-        koboToNaira(deliveryFeeKobo),
-        koboToNaira(discountKobo),
-        koboToNaira(grandTotalKobo),
-        subtotalKobo,
-        serviceFeeKobo,
-        deliveryFeeKobo,
-        grandTotalKobo,
-        paymentMethod,
-        paymentReference || `pay_${Date.now()}`,
-        handshakeOtp,
-        deliveryArea || 'Yaba',
-        pickupPoint || 'Campus Safe Hub',
-        autoReleaseDate.toISOString(),
-      ]
-    );
-
-    const historyId = `osh_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-    await dbQuery(
-      `INSERT INTO shopit_order_status_history (
-        id, order_id, previous_status, new_status, changed_by, notes, created_at
-      ) VALUES ($1, $2, NULL, 'paid', $3, 'Order created and paid via Paystack escrow.', NOW())`,
-      [historyId, orderId, user?.userId || buyerId]
-    );
-
-    const sellerTotals: Record<string, number> = {};
-    for (const item of items) {
-      const sId = item.sellerId;
-      if (sId) {
-        const itemAmountKobo = nairaToKobo(item.sellerPrice * item.quantity);
-        sellerTotals[sId] = (sellerTotals[sId] || 0) + itemAmountKobo;
-      }
-    }
-
-    for (const [sId, sellerEarningsKobo] of Object.entries(sellerTotals)) {
-      await dbQuery(
-        `INSERT INTO shopit_wallets (seller_id, pending_balance, available_balance, total_withdrawn, is_frozen, pending_balance_kobo, available_balance_kobo, total_withdrawn_kobo, created_at, updated_at)
-         VALUES ($1, 0, 0, 0, false, 0, 0, 0, NOW(), NOW())
-         ON CONFLICT (seller_id) DO NOTHING`,
-        [sId]
-      );
-
-      const wRes = await dbQuery('SELECT pending_balance_kobo, available_balance_kobo FROM shopit_wallets WHERE seller_id = $1', [sId]);
-      const currentPendingKobo = parseInt(wRes.rows[0]?.pending_balance_kobo || '0', 10);
-      const newPendingKobo = currentPendingKobo + sellerEarningsKobo;
-
-      await dbQuery(
-        `UPDATE shopit_wallets
-         SET pending_balance_kobo = $1,
-             pending_balance = $2,
-             updated_at = NOW()
-         WHERE seller_id = $3`,
-        [newPendingKobo, koboToNaira(newPendingKobo), sId]
-      );
-
-      const ledgerId = `LEDGER-${orderId}-${sId.slice(-4)}`;
-      await dbQuery(
-        `INSERT INTO shopit_ledger_entries (
-          id, wallet_id, type, amount, fee, balance_after, balance_type,
-          amount_kobo, fee_kobo, balance_after_kobo, description, reference, created_at
-        ) VALUES (
-          $1, $2, 'sale_pending', $3, 0, $4, 'pending',
-          $5, 0, $6, $7, $8, NOW()
-        )`,
-        [
-          ledgerId,
-          sId,
-          koboToNaira(sellerEarningsKobo),
-          koboToNaira(newPendingKobo),
-          sellerEarningsKobo,
-          newPendingKobo,
-          `Escrow holding for Order #${orderId}`,
-          paymentReference || orderId,
-        ]
-      );
-    }
-
-    if (user?.userId) {
-      await dbQuery('DELETE FROM shopit_carts WHERE user_id = $1', [user.userId]);
-    }
-
-    return res.status(201).json({
-      status: true,
-      orderId,
-      handshakeOtp,
-      message: 'Order created and persisted to PostgreSQL.',
-    });
-  } catch (err: any) {
-    console.error('[Order Create Error]:', err.message);
-    return res.status(500).json({ status: false, message: 'Database error saving order.' });
-  }
+// POST /api/orders - C3 Security: Direct client-side paid order creation is permanently disabled
+router.post('/orders', requirePaymentsEnabled, requireAuth, async (_req: AuthenticatedRequest, res: Response) => {
+  return res.status(403).json({
+    status: false,
+    error: 'DIRECT_ORDER_CREATION_DISABLED',
+    message: 'Orders cannot be created directly by the browser. Use payment checkout initialization instead.',
+  });
 });
 
-// PATCH /api/orders/:id/status - Update order status
+// PATCH /api/orders/:id/status - C8 Strict role-enforced state machine & atomic escrow release
 router.patch('/orders/:id/status', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const user = req.user!;
     const { id } = req.params;
-    const { status: newStatus, notes, handshakeOtp } = req.body;
+    const { status: newStatus, notes, handshakeOtp, packedPhotoUrl } = req.body;
 
-    const existing = await dbQuery('SELECT * FROM shopit_orders WHERE id = $1', [id]);
-    if (existing.rows.length === 0) {
-      return res.status(404).json({ status: false, message: 'Order not found.' });
+    const validTargets = ['packed', 'shipped', 'delivered', 'completed', 'disputed', 'cancelled'];
+    if (!newStatus || !validTargets.includes(newStatus)) {
+      return res.status(400).json({ status: false, message: 'Invalid order target status.' });
+    }
+    if (packedPhotoUrl !== undefined && packedPhotoUrl !== null && String(packedPhotoUrl).trim() !== '' && !isValidImageSource(packedPhotoUrl)) {
+      return res.status(400).json({ status: false, message: 'Invalid packing verification image format.' });
     }
 
-    const order = existing.rows[0];
-    const prevStatus = order.status;
+    const result = await withTransaction(async client => {
+      const existing = await client.query('SELECT * FROM shopit_orders WHERE id = $1 FOR UPDATE', [id]);
+      if (existing.rows.length === 0) {
+        return { code: 404, body: { status: false, message: 'Order not found.' } };
+      }
 
-    let handshakeVerified = order.handshake_verified;
-    if (newStatus === 'delivered' && handshakeOtp) {
-      if (order.handshake_otp && String(handshakeOtp).trim() === String(order.handshake_otp).trim()) {
+      const order = existing.rows[0];
+      const prevStatus: string = order.status;
+      const items: any[] = Array.isArray(order.items) ? order.items : [];
+
+      const isAdmin = user.role === 'admin';
+      const isBuyer = order.buyer_id === user.userId;
+      const isOrderSeller = items.some(item => isUserSellerOwner(user, item.sellerId));
+
+      if (!isAdmin && !isBuyer && !isOrderSeller) {
+        await logAuditEvent({
+          action: 'ORDER_STATUS_IDOR_BLOCKED',
+          actor: { id: user.userId, email: user.email, role: user.role },
+          target: { type: 'order', id },
+          details: { attemptedStatus: newStatus },
+          ip: req.ip,
+          userAgent: req.get('user-agent'),
+        });
+        return { code: 403, body: { status: false, message: 'You are not authorized to modify this order.' } };
+      }
+
+      // Enforce transitions + role permissions
+      if (newStatus === 'packed') {
+        if (!isOrderSeller && !isAdmin) {
+          return { code: 403, body: { status: false, message: 'Only the seller can mark an order as packed.' } };
+        }
+        if (prevStatus !== 'paid') {
+          return { code: 400, body: { status: false, message: `Cannot mark as packed from status '${prevStatus}'.` } };
+        }
+      } else if (newStatus === 'shipped') {
+        if (!isOrderSeller && !isAdmin) {
+          return { code: 403, body: { status: false, message: 'Only the seller can mark an order as shipped.' } };
+        }
+        if (prevStatus !== 'paid' && prevStatus !== 'packed') {
+          return { code: 400, body: { status: false, message: `Cannot mark as shipped from status '${prevStatus}'.` } };
+        }
+      } else if (newStatus === 'delivered' || newStatus === 'completed') {
+        const allowedFrom =
+          newStatus === 'delivered' ? ['shipped', ...(isAdmin ? ['packed'] : [])] : ['shipped', 'delivered'];
+        if (!allowedFrom.includes(prevStatus)) {
+          return { code: 400, body: { status: false, message: `Cannot transition order from '${prevStatus}' to '${newStatus}'.` } };
+        }
+
+        // Only buyer, admin, OR seller WITH matching handshakeOtp may confirm delivery / completion
+        let otpMatched = false;
+        if (handshakeOtp && order.handshake_otp) {
+          const suppliedBuf = Buffer.from(String(handshakeOtp).trim());
+          const expectedBuf = Buffer.from(String(order.handshake_otp).trim());
+          otpMatched = suppliedBuf.length === expectedBuf.length && crypto.timingSafeEqual(suppliedBuf, expectedBuf);
+        }
+
+        if (!isBuyer && !isAdmin && !(isOrderSeller && otpMatched)) {
+          return {
+            code: 403,
+            body: {
+              status: false,
+              message: 'Only the buyer or a seller presenting the buyer’s valid 4-digit Handshake OTP may confirm delivery.',
+            },
+          };
+        }
+      } else if (newStatus === 'disputed') {
+        if (!['paid', 'packed', 'shipped', 'delivered'].includes(prevStatus)) {
+          return { code: 400, body: { status: false, message: `Cannot dispute an order in '${prevStatus}' status.` } };
+        }
+      } else if (newStatus === 'cancelled') {
+        if (!isAdmin) {
+          return { code: 403, body: { status: false, message: 'Only an administrator can cancel or refund a paid order.' } };
+        }
+        if (!['pending_payment', 'paid'].includes(prevStatus)) {
+          return { code: 400, body: { status: false, message: `Cannot cancel order from status '${prevStatus}'.` } };
+        }
+      }
+
+      // If releasing escrow, block when an open dispute exists unless admin override
+      const isReleasingEscrow =
+        (newStatus === 'delivered' || newStatus === 'completed') &&
+        prevStatus !== 'delivered' &&
+        prevStatus !== 'completed';
+
+      if (isReleasingEscrow && !isAdmin) {
+        const disputeCheck = await client.query(
+          `SELECT id FROM shopit_disputes WHERE order_id = $1 AND status IN ('open', 'investigating') FOR UPDATE`,
+          [id]
+        );
+        if (disputeCheck.rows.length > 0) {
+          return {
+            code: 409,
+            body: { status: false, message: 'Cannot release escrow while an active dispute exists on this order.' },
+          };
+        }
+      }
+
+      let handshakeVerified = Boolean(order.handshake_verified);
+      if ((newStatus === 'delivered' || newStatus === 'completed') && (isBuyer || handshakeOtp)) {
         handshakeVerified = true;
       }
-    }
 
-    await dbQuery(
-      `UPDATE shopit_orders
-       SET status = $1,
-           handshake_verified = $2,
-           packed_at = CASE WHEN $1 = 'packed' THEN NOW() ELSE packed_at END,
-           shipped_at = CASE WHEN $1 = 'shipped' THEN NOW() ELSE shipped_at END,
-           delivered_at = CASE WHEN $1 = 'delivered' THEN NOW() ELSE delivered_at END,
-           completed_at = CASE WHEN $1 = 'completed' THEN NOW() ELSE completed_at END,
-           updated_at = NOW()
-       WHERE id = $3`,
-      [newStatus, handshakeVerified, id]
-    );
+      const cleanPackedPhoto =
+        newStatus === 'packed' && packedPhotoUrl && String(packedPhotoUrl).trim()
+          ? String(packedPhotoUrl).trim()
+          : null;
 
-    const historyId = `osh_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-    await dbQuery(
-      `INSERT INTO shopit_order_status_history (
-        id, order_id, previous_status, new_status, changed_by, notes, created_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
-      [historyId, id, prevStatus, newStatus, user.userId, notes || `Status updated from ${prevStatus} to ${newStatus}`]
-    );
+      await client.query(
+        `UPDATE shopit_orders
+         SET status = $1,
+             handshake_verified = $2,
+             packed_photo_url = COALESCE($3, packed_photo_url),
+             packed_at = CASE WHEN $1 = 'packed' THEN NOW() ELSE packed_at END,
+             shipped_at = CASE WHEN $1 = 'shipped' THEN NOW() ELSE shipped_at END,
+             delivered_at = CASE WHEN $1 = 'delivered' THEN NOW() ELSE delivered_at END,
+             completed_at = CASE WHEN $1 = 'completed' THEN NOW() ELSE completed_at END,
+             updated_at = NOW()
+         WHERE id = $4`,
+        [newStatus, handshakeVerified, cleanPackedPhoto, id]
+      );
 
-    if ((newStatus === 'delivered' || newStatus === 'completed') && prevStatus !== 'delivered' && prevStatus !== 'completed') {
-      const items = Array.isArray(order.items) ? order.items : [];
-      const sellerTotals: Record<string, number> = {};
+      await client.query(
+        `INSERT INTO shopit_order_status_history (
+          id, order_id, previous_status, new_status, changed_by, notes, created_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
+        [
+          `osh_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
+          id,
+          prevStatus,
+          newStatus,
+          user.userId,
+          notes || `Status updated from ${prevStatus} to ${newStatus}`,
+        ]
+      );
 
-      for (const item of items) {
-        if (item.sellerId) {
-          const itemKobo = nairaToKobo(item.sellerPrice * item.quantity);
-          sellerTotals[item.sellerId] = (sellerTotals[item.sellerId] || 0) + itemKobo;
+      if (isReleasingEscrow) {
+        const sellerTotals: Record<string, number> = {};
+        for (const item of items) {
+          if (item.sellerId) {
+            const qty = Math.max(1, Math.floor(Number(item.quantity) || 1));
+            const itemKobo = Math.round(Number(item.sellerPrice || 0) * 100) * qty;
+            sellerTotals[item.sellerId] = (sellerTotals[item.sellerId] || 0) + itemKobo;
+          }
+        }
+
+        for (const [sId, amountKobo] of Object.entries(sellerTotals)) {
+          const wRes = await client.query(
+            'SELECT pending_balance_kobo, available_balance_kobo FROM shopit_wallets WHERE seller_id = $1 FOR UPDATE',
+            [sId]
+          );
+          if (wRes.rows.length > 0) {
+            const currentPending = parseInt(wRes.rows[0].pending_balance_kobo || '0', 10);
+            const currentAvailable = parseInt(wRes.rows[0].available_balance_kobo || '0', 10);
+            const newPending = Math.max(0, currentPending - amountKobo);
+            const newAvailable = currentAvailable + amountKobo;
+
+            const idempotencyKey = `escrow_release:${id}:${sId}`;
+            const ledgerIns = await client.query(
+              `INSERT INTO shopit_ledger_entries (
+                id, wallet_id, order_id, type, amount, fee, balance_after, balance_type, status,
+                amount_kobo, fee_kobo, balance_after_kobo, description, reference, idempotency_key, created_at
+              ) VALUES (
+                $1, $2, $3, 'escrow_release', $4, 0, $5, 'available', 'completed',
+                $6, 0, $7, $8, $9, $10, NOW()
+              )
+              ON CONFLICT (idempotency_key) DO NOTHING
+              RETURNING id`,
+              [
+                `ESCROW-REL-${id}-${sId.slice(-6)}`,
+                sId,
+                id,
+                koboToNaira(amountKobo),
+                koboToNaira(newAvailable),
+                amountKobo,
+                newAvailable,
+                `Escrow released for delivered Order #${id}`,
+                order.payment_reference || id,
+                idempotencyKey,
+              ]
+            );
+
+            if (ledgerIns.rows.length > 0) {
+              await client.query(
+                `UPDATE shopit_wallets
+                 SET pending_balance_kobo = $1,
+                     available_balance_kobo = $2,
+                     pending_balance = $3,
+                     available_balance = $4,
+                     updated_at = NOW()
+                 WHERE seller_id = $5`,
+                [newPending, newAvailable, koboToNaira(newPending), koboToNaira(newAvailable), sId]
+              );
+            }
+          }
         }
       }
 
-      for (const [sId, amountKobo] of Object.entries(sellerTotals)) {
-        const wRes = await dbQuery('SELECT pending_balance_kobo, available_balance_kobo FROM shopit_wallets WHERE seller_id = $1', [sId]);
-        if (wRes.rows.length > 0) {
-          const currentPending = parseInt(wRes.rows[0].pending_balance_kobo || '0', 10);
-          const currentAvailable = parseInt(wRes.rows[0].available_balance_kobo || '0', 10);
+      return { code: 200, body: { status: true, message: `Order status updated to ${newStatus}.` } };
+    });
 
-          const newPending = Math.max(0, currentPending - amountKobo);
-          const newAvailable = currentAvailable + amountKobo;
-
-          await dbQuery(
-            `UPDATE shopit_wallets
-             SET pending_balance_kobo = $1,
-                 available_balance_kobo = $2,
-                 pending_balance = $3,
-                 available_balance = $4,
-                 updated_at = NOW()
-             WHERE seller_id = $5`,
-            [newPending, newAvailable, koboToNaira(newPending), koboToNaira(newAvailable), sId]
-          );
-
-          const releaseId = `ESCROW-REL-${id}-${sId.slice(-4)}`;
-          await dbQuery(
-            `INSERT INTO shopit_ledger_entries (
-              id, wallet_id, type, amount, fee, balance_after, balance_type,
-              amount_kobo, fee_kobo, balance_after_kobo, description, reference, created_at
-            ) VALUES (
-              $1, $2, 'escrow_release', $3, 0, $4, 'available',
-              $5, 0, $6, $7, $8, NOW()
-            )`,
-            [
-              releaseId,
-              sId,
-              koboToNaira(amountKobo),
-              koboToNaira(newAvailable),
-              amountKobo,
-              newAvailable,
-              `Escrow released for delivered Order #${id}`,
-              order.payment_reference || id,
-            ]
-          );
-        }
-      }
-    }
-
-    return res.json({ status: true, message: `Order status updated to ${newStatus}.` });
+    return res.status(result.code).json(result.body);
   } catch (err: any) {
     return res.status(500).json({ status: false, message: err.message });
   }
 });
 
 /**
- * Escrow Auto-Release Routine:
- * Inspects all paid orders where the 5-day inspection window has elapsed (auto_release_at <= NOW()).
- * Ensures no unresolved disputes are blocking the funds, then releases the pending funds to the sellers'
- * available balances and marks the order completed in the double-entry ledger.
+ * Escrow Auto-Release Routine (C8):
+ * Only releases orders that are 'shipped' or 'delivered' (NEVER never-shipped 'paid' orders!)
+ * when auto_release_at <= NOW() and no dispute is open.
+ * Every order release executes in a single atomic transaction with an idempotent ledger key.
  */
 export async function processEscrowAutoRelease(): Promise<{ releasedCount: number; orderIds: string[] }> {
   try {
-    const eligibleOrders = await dbQuery(`
-      SELECT o.* FROM shopit_orders o
+    const candidateRes = await dbQuery(`
+      SELECT o.id FROM shopit_orders o
       LEFT JOIN shopit_disputes d ON d.order_id = o.id AND d.status IN ('open', 'investigating')
-      WHERE o.status = 'paid'
+      WHERE o.status IN ('shipped', 'delivered')
         AND o.auto_release_at IS NOT NULL
         AND o.auto_release_at <= NOW()
         AND d.id IS NULL
@@ -992,80 +1010,102 @@ export async function processEscrowAutoRelease(): Promise<{ releasedCount: numbe
 
     const releasedIds: string[] = [];
 
-    for (const order of eligibleOrders.rows) {
-      const items = Array.isArray(order.items) ? order.items : [];
-      const sellerTotals: Record<string, number> = {};
+    for (const candidate of candidateRes.rows) {
+      const released = await withTransaction(async client => {
+        const orderRes = await client.query('SELECT * FROM shopit_orders WHERE id = $1 FOR UPDATE', [candidate.id]);
+        if (orderRes.rows.length === 0) return false;
+        const order = orderRes.rows[0];
+        if (order.status !== 'shipped' && order.status !== 'delivered') return false;
 
-      for (const item of items) {
-        if (item.sellerId) {
-          const itemKobo = nairaToKobo(item.sellerPrice * item.quantity);
-          sellerTotals[item.sellerId] = (sellerTotals[item.sellerId] || 0) + itemKobo;
+        const disputeCheck = await client.query(
+          `SELECT id FROM shopit_disputes WHERE order_id = $1 AND status IN ('open', 'investigating') FOR UPDATE`,
+          [order.id]
+        );
+        if (disputeCheck.rows.length > 0) return false;
+
+        const items = Array.isArray(order.items) ? order.items : [];
+        const sellerTotals: Record<string, number> = {};
+        for (const item of items) {
+          if (item.sellerId) {
+            const qty = Math.max(1, Math.floor(Number(item.quantity) || 1));
+            const itemKobo = Math.round(Number(item.sellerPrice || 0) * 100) * qty;
+            sellerTotals[item.sellerId] = (sellerTotals[item.sellerId] || 0) + itemKobo;
+          }
         }
-      }
 
-      for (const [sId, amountKobo] of Object.entries(sellerTotals)) {
-        const wRes = await dbQuery('SELECT pending_balance_kobo, available_balance_kobo FROM shopit_wallets WHERE seller_id = $1', [sId]);
-        if (wRes.rows.length > 0) {
-          const currentPending = parseInt(wRes.rows[0].pending_balance_kobo || '0', 10);
-          const currentAvailable = parseInt(wRes.rows[0].available_balance_kobo || '0', 10);
-
-          const newPending = Math.max(0, currentPending - amountKobo);
-          const newAvailable = currentAvailable + amountKobo;
-
-          await dbQuery(
-            `UPDATE shopit_wallets
-             SET pending_balance_kobo = $1,
-                 available_balance_kobo = $2,
-                 pending_balance = $3,
-                 available_balance = $4,
-                 updated_at = NOW()
-             WHERE seller_id = $5`,
-            [newPending, newAvailable, koboToNaira(newPending), koboToNaira(newAvailable), sId]
+        for (const [sId, amountKobo] of Object.entries(sellerTotals)) {
+          const wRes = await client.query(
+            'SELECT pending_balance_kobo, available_balance_kobo FROM shopit_wallets WHERE seller_id = $1 FOR UPDATE',
+            [sId]
           );
+          if (wRes.rows.length > 0) {
+            const currentPending = parseInt(wRes.rows[0].pending_balance_kobo || '0', 10);
+            const currentAvailable = parseInt(wRes.rows[0].available_balance_kobo || '0', 10);
+            const newPending = Math.max(0, currentPending - amountKobo);
+            const newAvailable = currentAvailable + amountKobo;
 
-          const releaseId = `ESCROW-AUTO-${order.id}-${sId.slice(-4)}`;
-          await dbQuery(
-            `INSERT INTO shopit_ledger_entries (
-              id, wallet_id, type, amount, fee, balance_after, balance_type,
-              amount_kobo, fee_kobo, balance_after_kobo, description, reference, created_at
-            ) VALUES (
-              $1, $2, 'escrow_release', $3, 0, $4, 'available',
-              $5, 0, $6, $7, $8, NOW()
-            )`,
-            [
-              releaseId,
-              sId,
-              koboToNaira(amountKobo),
-              koboToNaira(newAvailable),
-              amountKobo,
-              newAvailable,
-              `5-Day Escrow auto-released for Order #${order.id}`,
-              order.payment_reference || order.id,
-            ]
-          );
+            const idempotencyKey = `escrow_release:${order.id}:${sId}`;
+            const ledgerIns = await client.query(
+              `INSERT INTO shopit_ledger_entries (
+                id, wallet_id, order_id, type, amount, fee, balance_after, balance_type, status,
+                amount_kobo, fee_kobo, balance_after_kobo, description, reference, idempotency_key, created_at
+              ) VALUES (
+                $1, $2, $3, 'escrow_release', $4, 0, $5, 'available', 'completed',
+                $6, 0, $7, $8, $9, $10, NOW()
+              )
+              ON CONFLICT (idempotency_key) DO NOTHING
+              RETURNING id`,
+              [
+                `ESCROW-AUTO-${order.id}-${sId.slice(-6)}`,
+                sId,
+                order.id,
+                koboToNaira(amountKobo),
+                koboToNaira(newAvailable),
+                amountKobo,
+                newAvailable,
+                `5-Day Escrow auto-released for Order #${order.id}`,
+                order.payment_reference || order.id,
+                idempotencyKey,
+              ]
+            );
+
+            if (ledgerIns.rows.length > 0) {
+              await client.query(
+                `UPDATE shopit_wallets
+                 SET pending_balance_kobo = $1,
+                     available_balance_kobo = $2,
+                     pending_balance = $3,
+                     available_balance = $4,
+                     updated_at = NOW()
+                 WHERE seller_id = $5`,
+                [newPending, newAvailable, koboToNaira(newPending), koboToNaira(newAvailable), sId]
+              );
+            }
+          }
         }
-      }
 
-      // Mark order delivered / completed and clear auto_release_at
-      await dbQuery(
-        `UPDATE shopit_orders
-         SET status = 'completed',
-             auto_release_at = NULL,
-             completed_at = NOW(),
-             updated_at = NOW()
-         WHERE id = $1`,
-        [order.id]
-      );
+        const prevStatus = order.status;
+        await client.query(
+          `UPDATE shopit_orders
+           SET status = 'completed',
+               auto_release_at = NULL,
+               completed_at = NOW(),
+               updated_at = NOW()
+           WHERE id = $1`,
+          [order.id]
+        );
 
-      const historyId = `osh_auto_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-      await dbQuery(
-        `INSERT INTO shopit_order_status_history (
-          id, order_id, previous_status, new_status, changed_by, notes, created_at
-        ) VALUES ($1, $2, 'paid', 'completed', 'escrow_auto_release_cron', 'Funds auto-released to seller after 5-day inspection period without dispute.', NOW())`,
-        [historyId, order.id]
-      );
+        await client.query(
+          `INSERT INTO shopit_order_status_history (
+            id, order_id, previous_status, new_status, changed_by, notes, created_at
+          ) VALUES ($1, $2, $3, 'completed', 'escrow_auto_release_cron', 'Funds auto-released to seller after inspection period without dispute.', NOW())`,
+          [`osh_auto_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`, order.id, prevStatus]
+        );
 
-      releasedIds.push(order.id);
+        return true;
+      });
+
+      if (released) releasedIds.push(candidate.id);
     }
 
     return { releasedCount: releasedIds.length, orderIds: releasedIds };
@@ -1075,8 +1115,8 @@ export async function processEscrowAutoRelease(): Promise<{ releasedCount: numbe
   }
 }
 
-// POST /api/escrow/auto-release - Trigger auto-release scan (Admin or internal cron)
-router.post('/escrow/auto-release', async (_req, res) => {
+// POST /api/escrow/auto-release - Strictly guarded by Cron Secret or Admin Session (C2 & C8)
+router.post('/escrow/auto-release', requireCronOrAdmin, async (_req, res) => {
   const result = await processEscrowAutoRelease();
   return res.json({
     status: true,
@@ -1089,21 +1129,12 @@ router.post('/escrow/auto-release', async (_req, res) => {
 // 5. WALLET & DOUBLE-ENTRY LEDGER API
 // ============================================================================
 
-// GET /api/wallet - Get seller wallet calculated strictly from append-only ledger
 router.get('/wallet', requirePaymentsEnabled, requireAuth, async (req: AuthenticatedRequest, res: Response) => {
-  if (process.env.PAYMENTS_ENABLED !== 'true') {
-    return res.status(503).json({
-      status: false,
-      error: 'PAYMENTS_DISABLED',
-      message: 'Online payments are coming soon. Arrange directly with the seller',
-    });
-  }
-
   try {
     const user = req.user!;
-    const sellerId = req.query.sellerId ? String(req.query.sellerId).trim() : user.userId;
+    const requestedSellerId = req.query.sellerId ? String(req.query.sellerId).trim() : (user.sellerId || user.userId);
 
-    if (sellerId !== user.userId && user.role !== 'admin') {
+    if (!isUserSellerOwner(user, requestedSellerId) && user.role !== 'admin') {
       return res.status(403).json({ status: false, message: 'Forbidden.' });
     }
 
@@ -1111,40 +1142,20 @@ router.get('/wallet', requirePaymentsEnabled, requireAuth, async (req: Authentic
       `INSERT INTO shopit_wallets (seller_id, pending_balance, available_balance, total_withdrawn, is_frozen, pending_balance_kobo, available_balance_kobo, total_withdrawn_kobo, created_at, updated_at)
        VALUES ($1, 0, 0, 0, false, 0, 0, 0, NOW(), NOW())
        ON CONFLICT (seller_id) DO NOTHING`,
-      [sellerId]
+      [requestedSellerId]
     );
 
-    const walletRes = await dbQuery('SELECT * FROM shopit_wallets WHERE seller_id = $1', [sellerId]);
+    const walletRes = await dbQuery('SELECT * FROM shopit_wallets WHERE seller_id = $1', [requestedSellerId]);
     const walletRow = walletRes.rows[0];
 
     const ledgerRes = await dbQuery(
       'SELECT * FROM shopit_ledger_entries WHERE wallet_id = $1 ORDER BY created_at DESC LIMIT 100',
-      [sellerId]
+      [requestedSellerId]
     );
 
-    let computedPendingKobo = 0;
-    let computedAvailableKobo = 0;
-    let computedWithdrawnKobo = 0;
-
-    for (const entry of ledgerRes.rows) {
-      const amtKobo = entry.amount_kobo ? parseInt(entry.amount_kobo, 10) : nairaToKobo(entry.amount);
-      if (entry.type === 'sale_pending') {
-        computedPendingKobo += amtKobo;
-      } else if (entry.type === 'escrow_release') {
-        computedPendingKobo -= amtKobo;
-        computedAvailableKobo += amtKobo;
-      } else if (entry.type === 'withdrawal') {
-        computedAvailableKobo -= amtKobo;
-        computedWithdrawnKobo += amtKobo;
-      } else if (entry.type === 'fee_deduction') {
-        computedAvailableKobo -= amtKobo;
-      } else if (entry.type === 'refund') {
-        computedPendingKobo -= amtKobo;
-      }
-    }
-
-    computedPendingKobo = Math.max(0, computedPendingKobo);
-    computedAvailableKobo = Math.max(0, computedAvailableKobo);
+    const pendingKobo = parseInt(walletRow.pending_balance_kobo || '0', 10);
+    const availableKobo = parseInt(walletRow.available_balance_kobo || '0', 10);
+    const withdrawnKobo = parseInt(walletRow.total_withdrawn_kobo || '0', 10);
 
     const ledgerEntries = ledgerRes.rows.map((row: any) => ({
       id: row.id,
@@ -1161,56 +1172,129 @@ router.get('/wallet', requirePaymentsEnabled, requireAuth, async (req: Authentic
       createdAt: row.created_at,
     }));
 
-    const wallet = {
-      sellerId: walletRow.seller_id,
-      pendingBalance: koboToNaira(computedPendingKobo),
-      availableBalance: koboToNaira(computedAvailableKobo),
-      totalWithdrawn: koboToNaira(computedWithdrawnKobo),
-      pendingBalanceKobo: computedPendingKobo,
-      availableBalanceKobo: computedAvailableKobo,
-      totalWithdrawnKobo: computedWithdrawnKobo,
-      isFrozen: Boolean(walletRow.is_frozen),
-      freezeReason: walletRow.freeze_reason,
-      payoutAccounts: Array.isArray(walletRow.payout_accounts) ? walletRow.payout_accounts : [],
-      activePayoutAccountId: walletRow.active_payout_account_id,
-      ledger: ledgerEntries,
-      transactions: ledgerEntries,
-    };
-
-    return res.json({ status: true, wallet });
+    return res.json({
+      status: true,
+      wallet: {
+        sellerId: walletRow.seller_id,
+        pendingBalance: koboToNaira(pendingKobo),
+        availableBalance: koboToNaira(availableKobo),
+        totalWithdrawn: koboToNaira(withdrawnKobo),
+        pendingBalanceKobo: pendingKobo,
+        availableBalanceKobo: availableKobo,
+        totalWithdrawnKobo: withdrawnKobo,
+        isFrozen: Boolean(walletRow.is_frozen),
+        freezeReason: walletRow.freeze_reason,
+        payoutAccounts: Array.isArray(walletRow.payout_accounts) ? walletRow.payout_accounts : [],
+        activePayoutAccountId: walletRow.active_payout_account_id,
+        ledger: ledgerEntries,
+        transactions: ledgerEntries,
+      },
+    });
   } catch (err: any) {
     return res.status(500).json({ status: false, message: err.message });
   }
 });
 
-// POST /api/wallet/payout-account - Add payout bank account
+// POST /api/wallet/payout-account - Add payout bank account with OTP verification, Flutterwave name resolve, and 24-hr cooling
 router.post('/wallet/payout-account', requirePaymentsEnabled, requireAuth, async (req: AuthenticatedRequest, res: Response) => {
-  if (process.env.PAYMENTS_ENABLED !== 'true') {
-    return res.status(503).json({
-      status: false,
-      error: 'PAYMENTS_DISABLED',
-      message: 'Online payments are coming soon. Arrange directly with the seller',
-    });
-  }
-
   try {
     const user = req.user!;
-    const { bankCode, bankName, accountNumber, accountName } = req.body;
+    const { bankCode, bankName, accountNumber, accountName, otpCode } = req.body;
 
-    if (!bankName || !accountNumber || !accountName) {
-      return res.status(400).json({ status: false, message: 'Bank name, account number, and account name are required.' });
+    if (!bankCode || !/^[A-Za-z0-9]{3,12}$/.test(String(bankCode).trim())) {
+      return res.status(400).json({ status: false, message: 'A valid Nigerian bank code is required.' });
+    }
+    if (!bankName || !accountNumber || !/^\d{10}$/.test(String(accountNumber).trim())) {
+      return res.status(400).json({ status: false, message: 'Valid bank name and 10-digit account number are required.' });
+    }
+    if (!otpCode) {
+      return res.status(400).json({ status: false, message: 'Email OTP authorization code is required to link a payout account.' });
     }
 
-    const sellerId = user.userId;
+    const flwSecret = (process.env.FLW_SECRET_KEY || '').trim().replace(/^["']|["']$/g, '');
+    if (!flwSecret) {
+      return res.status(503).json({
+        status: false,
+        error: 'PAYMENT_GATEWAY_NOT_CONFIGURED',
+        message: 'Bank account resolution is unavailable because FLW_SECRET_KEY is not configured.',
+      });
+    }
+
+    const otpCheck = await verifyAndConsumeOtp(user.email, 'payout_account', String(otpCode).trim());
+    if (!otpCheck.success) {
+      return res.status(403).json({ status: false, message: otpCheck.error || 'Invalid or expired authorization code.' });
+    }
+
+    const cleanBankCode = String(bankCode).trim();
+    const cleanAccountNumber = String(accountNumber).trim();
+
+    // Verify account details directly via Flutterwave /v3/accounts/resolve
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    let resolveRes: globalThis.Response;
+    let resolveData: any;
+    try {
+      resolveRes = await fetch('https://api.flutterwave.com/v3/accounts/resolve', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${flwSecret}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          account_number: cleanAccountNumber,
+          account_bank: cleanBankCode,
+        }),
+        signal: controller.signal,
+      });
+      resolveData = await resolveRes.json().catch(() => ({}));
+    } catch (err: any) {
+      return res.status(502).json({ status: false, message: `Bank account verification error: ${err.message}` });
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    if (!resolveRes.ok || resolveData?.status !== 'success' || !resolveData?.data?.account_name) {
+      return res.status(400).json({
+        status: false,
+        message: resolveData?.message || 'Could not resolve this bank account number with Flutterwave.',
+      });
+    }
+
+    const resolvedAccountName = String(resolveData.data.account_name).trim().toUpperCase();
+
+    const sellerId = user.sellerId || user.userId;
+    const sellerRes = await dbQuery(
+      'SELECT verification_status, verified_legal_name, guardian_name FROM shopit_sellers WHERE id = $1 OR user_id = $2',
+      [sellerId, user.userId]
+    );
+    const sellerRow = sellerRes.rows[0];
+    const verifiedLegalName = sellerRow?.verified_legal_name || sellerRow?.guardian_name || user.name;
+    const resolvedTokens = resolvedAccountName.toLowerCase().split(/\s+/).filter(Boolean);
+    const legalTokens = String(verifiedLegalName).trim().toLowerCase().split(/\s+/).filter(Boolean);
+    const overlap = resolvedTokens.filter(t => t.length >= 2 && legalTokens.includes(t)).length;
+    if (overlap === 0 && user.role !== 'admin') {
+      return res.status(403).json({
+        status: false,
+        message: `Resolved bank account name (${resolvedAccountName}) must match verified identity (${verifiedLegalName}).`,
+      });
+    }
+
+    await dbQuery(
+      `INSERT INTO shopit_wallets (seller_id, pending_balance, available_balance, total_withdrawn, is_frozen, pending_balance_kobo, available_balance_kobo, total_withdrawn_kobo, created_at, updated_at)
+       VALUES ($1, 0, 0, 0, false, 0, 0, 0, NOW(), NOW())
+       ON CONFLICT (seller_id) DO NOTHING`,
+      [sellerId]
+    );
+
     const wRes = await dbQuery('SELECT payout_accounts FROM shopit_wallets WHERE seller_id = $1', [sellerId]);
     const currentAccounts = wRes.rows.length > 0 && Array.isArray(wRes.rows[0].payout_accounts) ? wRes.rows[0].payout_accounts : [];
 
     const newAccount = {
       id: `acc_${Date.now()}`,
-      bankCode: bankCode || '044',
+      bankCode: cleanBankCode,
       bankName: String(bankName).trim(),
-      accountNumber: String(accountNumber).trim(),
-      accountName: String(accountName).trim(),
+      accountNumber: cleanAccountNumber,
+      accountName: resolvedAccountName || String(accountName || '').trim().toUpperCase(),
       isVerified: true,
       coolingPeriodEndsAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
       createdAt: new Date().toISOString(),
@@ -1227,26 +1311,38 @@ router.post('/wallet/payout-account', requirePaymentsEnabled, requireAuth, async
       [JSON.stringify(updatedAccounts), newAccount.id, sellerId]
     );
 
-    return res.json({ status: true, account: newAccount, message: 'Payout account added with 24-hour security cooling period.' });
+    await logAuditEvent({
+      action: 'PAYOUT_ACCOUNT_LINKED',
+      actor: { id: user.userId, email: user.email, role: user.role },
+      target: { type: 'wallet', id: sellerId },
+      details: { bankName: newAccount.bankName, bankCode: newAccount.bankCode, last4: newAccount.accountNumber.slice(-4) },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
+
+    return res.json({ status: true, account: newAccount, message: 'Payout account verified via Flutterwave and added with 24-hour cooling period.' });
   } catch (err: any) {
     return res.status(500).json({ status: false, message: err.message });
   }
 });
 
 // ============================================================================
-// 6. CHAT & CONVERSATIONS API
+// 6. CHAT & CONVERSATIONS API (Participant-Authorized)
 // ============================================================================
 
-// GET /api/chat/conversations
 router.get('/chat/conversations', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const user = req.user!;
-    const result = await dbQuery(
-      `SELECT * FROM shopit_chat_conversations
-       WHERE buyer_id = $1 OR seller_id = $1
-       ORDER BY last_message_at DESC NULLS LAST, created_at DESC`,
-      [user.userId]
-    );
+    const sellerLookup = user.sellerId || user.userId;
+    const result =
+      user.role === 'admin'
+        ? await dbQuery(`SELECT * FROM shopit_chat_conversations ORDER BY last_message_at DESC NULLS LAST, created_at DESC LIMIT 100`)
+        : await dbQuery(
+            `SELECT * FROM shopit_chat_conversations
+             WHERE buyer_id = $1 OR seller_id = $1 OR seller_id = $2
+             ORDER BY last_message_at DESC NULLS LAST, created_at DESC`,
+            [user.userId, sellerLookup]
+          );
 
     const conversations = result.rows.map((row: any) => ({
       id: row.id,
@@ -1271,7 +1367,6 @@ router.get('/chat/conversations', requireAuth, async (req: AuthenticatedRequest,
   }
 });
 
-// POST /api/chat/conversations - Create or find conversation
 router.post('/chat/conversations', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const user = req.user!;
@@ -1279,22 +1374,22 @@ router.post('/chat/conversations', requireAuth, async (req: AuthenticatedRequest
     if (!sellerId) {
       return res.status(400).json({ status: false, message: 'sellerId is required.' });
     }
+    if (isUserSellerOwner(user, String(sellerId))) {
+      return res.status(400).json({ status: false, message: 'You cannot open a chat conversation with your own shop.' });
+    }
 
     const existing = await dbQuery(
-      `SELECT * FROM shopit_chat_conversations
-       WHERE (buyer_id = $1 AND seller_id = $2)
-          OR (buyer_id = $2 AND seller_id = $1)`,
+      `SELECT * FROM shopit_chat_conversations WHERE buyer_id = $1 AND seller_id = $2`,
       [user.userId, sellerId]
     );
-
     if (existing.rows.length > 0) {
       return res.json({ status: true, conversation: existing.rows[0] });
     }
 
-    const sellerRes = await dbQuery('SELECT shop_name FROM shopit_sellers WHERE id = $1', [sellerId]);
+    const sellerRes = await dbQuery('SELECT shop_name FROM shopit_sellers WHERE id = $1 OR user_id = $1', [sellerId]);
     const shopName = sellerRes.rows[0]?.shop_name || 'Artisan';
 
-    const convId = `conv_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+    const convId = `conv_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
     const buyerMaskedId = `Buyer #${convId.slice(-4)}`;
 
     const insertRes = await dbQuery(
@@ -1313,58 +1408,77 @@ router.post('/chat/conversations', requireAuth, async (req: AuthenticatedRequest
   }
 });
 
-// GET /api/chat/conversations/:id/messages
 router.get('/chat/conversations/:id/messages', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const user = req.user!;
     const { id } = req.params;
+    const convRes = await dbQuery('SELECT * FROM shopit_chat_conversations WHERE id = $1', [id]);
+    if (convRes.rows.length === 0) {
+      return res.status(404).json({ status: false, message: 'Conversation not found.' });
+    }
+    const conv = convRes.rows[0];
+    if (conv.buyer_id !== user.userId && !isUserSellerOwner(user, conv.seller_id) && user.role !== 'admin') {
+      return res.status(403).json({ status: false, message: 'Access denied to this conversation.' });
+    }
+
     const result = await dbQuery(
-      'SELECT * FROM shopit_chat_messages WHERE conversation_id = $1 ORDER BY created_at ASC',
+      'SELECT * FROM shopit_chat_messages WHERE conversation_id = $1 ORDER BY created_at ASC LIMIT 200',
       [id]
     );
 
-    const messages = result.rows.map((row: any) => ({
-      id: row.id,
-      conversationId: row.conversation_id,
-      senderId: row.sender_id,
-      senderRole: row.sender_role,
-      senderMaskedName: row.sender_masked_name,
-      content: row.content,
-      isBlockedBypass: Boolean(row.is_blocked_bypass),
-      presetOffer: row.preset_offer,
-      createdAt: row.created_at,
-    }));
-
-    return res.json({ status: true, messages });
+    return res.json({
+      status: true,
+      messages: result.rows.map((row: any) => ({
+        id: row.id,
+        conversationId: row.conversation_id,
+        senderId: row.sender_id,
+        senderRole: row.sender_role,
+        senderMaskedName: row.sender_masked_name,
+        content: row.content,
+        isBlockedBypass: Boolean(row.is_blocked_bypass),
+        presetOffer: row.preset_offer,
+        createdAt: row.created_at,
+      })),
+    });
   } catch (err: any) {
     return res.status(500).json({ status: false, message: err.message });
   }
 });
 
-// POST /api/chat/conversations/:id/messages - Send message with Anti-Bypass Guard
 router.post('/chat/conversations/:id/messages', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const user = req.user!;
     const { id } = req.params;
     const { content, presetOffer } = req.body;
 
-    if (!content || !content.trim()) {
+    const convRes = await dbQuery('SELECT * FROM shopit_chat_conversations WHERE id = $1', [id]);
+    if (convRes.rows.length === 0) {
+      return res.status(404).json({ status: false, message: 'Conversation not found.' });
+    }
+    const conv = convRes.rows[0];
+    if (conv.buyer_id !== user.userId && !isUserSellerOwner(user, conv.seller_id) && user.role !== 'admin') {
+      return res.status(403).json({ status: false, message: 'Access denied to this conversation.' });
+    }
+    if (conv.is_chat_locked) {
+      return res.status(403).json({ status: false, message: 'This conversation has been locked by moderation.' });
+    }
+
+    if (!content || !String(content).trim()) {
       return res.status(400).json({ status: false, message: 'Message content is required.' });
     }
 
-    const cleanContent = content.trim();
-
+    const cleanContent = String(content).trim().slice(0, 1000);
     const phoneRegex = /(\+?234|0)[789][01]\d{8}/;
     const bankRegex = /\b\d{10}\b/;
     const whatsappRegex = /(wa\.me|whatsapp|dm me on ig|call me)/i;
 
     const isBypass = phoneRegex.test(cleanContent) || bankRegex.test(cleanContent) || whatsappRegex.test(cleanContent);
-
-    const msgId = `msg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-    const role = user.role === 'seller' ? 'seller' : 'buyer';
-    const senderMaskedName = role === 'seller' ? 'Artisan' : `Buyer #${user.userId.slice(-4)}`;
+    const msgId = `msg_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
+    const role = isUserSellerOwner(user, conv.seller_id) ? 'seller' : (user.role === 'admin' ? 'admin' : 'buyer');
+    const senderMaskedName = role === 'seller' ? 'Artisan' : (role === 'admin' ? 'Shop It Moderation' : `Buyer #${user.userId.slice(-4)}`);
 
     const savedContent = isBypass
-      ? '[Security Notice: Direct phone numbers, account numbers, and off-platform payments are prohibited to protect your Paystack escrow security.]'
+      ? '[Security Notice: Direct phone numbers, account numbers, and off-platform payments are prohibited to protect your escrow security.]'
       : cleanContent;
 
     await dbQuery(
@@ -1375,11 +1489,14 @@ router.post('/chat/conversations/:id/messages', requireAuth, async (req: Authent
       [msgId, id, user.userId, role, senderMaskedName, savedContent, isBypass, presetOffer ? JSON.stringify(presetOffer) : null]
     );
 
+    const nextViolations = (parseInt(conv.bypass_violations_count, 10) || 0) + (isBypass ? 1 : 0);
     await dbQuery(
       `UPDATE shopit_chat_conversations
-       SET last_message = $1, last_message_at = NOW()
-       WHERE id = $2`,
-      [savedContent, id]
+       SET last_message = $1, last_message_at = NOW(),
+           bypass_violations_count = $2,
+           is_chat_locked = CASE WHEN $2 >= 2 THEN true ELSE is_chat_locked END
+       WHERE id = $3`,
+      [savedContent, nextViolations, id]
     );
 
     return res.status(201).json({
@@ -1405,50 +1522,51 @@ router.post('/chat/conversations/:id/messages', requireAuth, async (req: Authent
 // 7. DISPUTES API (PostgreSQL: shopit_disputes)
 // ============================================================================
 
-// GET /api/disputes
 router.get('/disputes', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const user = req.user!;
-    let result;
-    if (user.role === 'admin') {
-      result = await dbQuery('SELECT * FROM shopit_disputes ORDER BY created_at DESC');
-    } else {
-      result = await dbQuery(
-        'SELECT * FROM shopit_disputes WHERE buyer_id = $1 OR seller_id = $1 ORDER BY created_at DESC',
-        [user.userId]
-      );
-    }
+    const sellerLookup = user.sellerId || user.userId;
+    const result =
+      user.role === 'admin'
+        ? await dbQuery('SELECT * FROM shopit_disputes ORDER BY created_at DESC')
+        : await dbQuery(
+            'SELECT * FROM shopit_disputes WHERE buyer_id = $1 OR seller_id = $1 OR seller_id = $2 ORDER BY created_at DESC',
+            [user.userId, sellerLookup]
+          );
 
-    const disputes = result.rows.map((row: any) => ({
-      id: row.id,
-      orderId: row.order_id,
-      sellerId: row.seller_id,
-      buyerId: row.buyer_id,
-      buyerMaskedId: row.buyer_masked_id,
-      sellerShopName: row.seller_shop_name,
-      reason: row.reason,
-      description: row.description,
-      amountHeldInEscrow: parseFloat(row.amount_held_in_escrow),
-      evidencePhotoUrl: row.evidence_photo_url,
-      sellerPackedPhotoUrl: row.seller_packed_photo_url,
-      status: row.status,
-      resolutionNotes: row.resolution_notes,
-      createdAt: row.created_at,
-    }));
-
-    return res.json({ status: true, disputes });
+    return res.json({
+      status: true,
+      disputes: result.rows.map((row: any) => ({
+        id: row.id,
+        orderId: row.order_id,
+        sellerId: row.seller_id,
+        buyerId: row.buyer_id,
+        buyerMaskedId: row.buyer_masked_id,
+        sellerShopName: row.seller_shop_name,
+        reason: row.reason,
+        description: row.description,
+        amountHeldInEscrow: parseFloat(row.amount_held_in_escrow),
+        evidencePhotoUrl: row.evidence_photo_url,
+        sellerPackedPhotoUrl: row.seller_packed_photo_url,
+        status: row.status,
+        resolutionNotes: row.resolution_notes,
+        createdAt: row.created_at,
+      })),
+    });
   } catch (err: any) {
     return res.status(500).json({ status: false, message: err.message });
   }
 });
 
-// POST /api/disputes - Open a dispute ticket
 router.post('/disputes', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const user = req.user!;
     const { orderId, reason, description, evidencePhotoUrl } = req.body;
     if (!orderId || !reason) {
       return res.status(400).json({ status: false, message: 'orderId and reason are required.' });
+    }
+    if (evidencePhotoUrl !== undefined && evidencePhotoUrl !== null && String(evidencePhotoUrl).trim() !== '' && !isValidImageSource(evidencePhotoUrl)) {
+      return res.status(400).json({ status: false, message: 'Invalid dispute evidence image format.' });
     }
 
     const oRes = await dbQuery('SELECT * FROM shopit_orders WHERE id = $1', [orderId]);
@@ -1457,40 +1575,50 @@ router.post('/disputes', requireAuth, async (req: AuthenticatedRequest, res: Res
     }
 
     const order = oRes.rows[0];
-    const items = Array.isArray(order.items) ? order.items : [];
+    const items: any[] = Array.isArray(order.items) ? order.items : [];
+    const isParticipant =
+      order.buyer_id === user.userId ||
+      items.some(i => isUserSellerOwner(user, i.sellerId)) ||
+      user.role === 'admin';
+
+    if (!isParticipant) {
+      return res.status(403).json({ status: false, message: 'Only participants of this order may open a dispute.' });
+    }
+
     const sellerId = items[0]?.sellerId || 'seller_system';
     const sellerShopName = items[0]?.sellerShopName || 'Artisan';
-
     const disputeId = `DISP-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
 
-    await dbQuery(
-      `INSERT INTO shopit_disputes (
-        id, order_id, seller_id, buyer_id, buyer_masked_id, seller_shop_name,
-        reason, description, amount_held_in_escrow, evidence_photo_url,
-        seller_packed_photo_url, status, created_at, updated_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'open', NOW(), NOW())`,
-      [
-        disputeId,
-        orderId,
-        sellerId,
-        user.userId,
-        `Buyer #${orderId.slice(-4)}`,
-        sellerShopName,
-        reason,
-        description || '',
-        parseFloat(order.grand_total),
-        evidencePhotoUrl || null,
-        order.packed_photo_url || null,
-      ]
-    );
+    await withTransaction(async client => {
+      await client.query(
+        `INSERT INTO shopit_disputes (
+          id, order_id, seller_id, buyer_id, buyer_masked_id, seller_shop_name,
+          reason, description, amount_held_in_escrow, evidence_photo_url,
+          seller_packed_photo_url, status, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'open', NOW(), NOW())`,
+        [
+          disputeId,
+          orderId,
+          sellerId,
+          order.buyer_id || user.userId,
+          order.buyer_masked_id || `Buyer #${orderId.slice(-4)}`,
+          sellerShopName,
+          String(reason).trim().slice(0, 200),
+          String(description || '').trim().slice(0, 1000),
+          parseFloat(order.grand_total),
+          evidencePhotoUrl || null,
+          order.packed_photo_url || null,
+        ]
+      );
 
-    await dbQuery('UPDATE shopit_orders SET status = \'disputed\', updated_at = NOW() WHERE id = $1', [orderId]);
+      await client.query('UPDATE shopit_orders SET status = \'disputed\', updated_at = NOW() WHERE id = $1', [orderId]);
 
-    await dbQuery(
-      `INSERT INTO shopit_order_status_history (id, order_id, previous_status, new_status, changed_by, notes, created_at)
-       VALUES ($1, $2, $3, 'disputed', $4, $5, NOW())`,
-      [`osh_${Date.now()}`, orderId, order.status, user.userId, `Dispute filed: ${reason}`]
-    );
+      await client.query(
+        `INSERT INTO shopit_order_status_history (id, order_id, previous_status, new_status, changed_by, notes, created_at)
+         VALUES ($1, $2, $3, 'disputed', $4, $5, NOW())`,
+        [`osh_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`, orderId, order.status, user.userId, `Dispute filed: ${String(reason).slice(0, 120)}`]
+      );
+    });
 
     return res.status(201).json({ status: true, disputeId, message: 'Dispute opened. Funds held securely in escrow.' });
   } catch (err: any) {
@@ -1502,7 +1630,6 @@ router.post('/disputes', requireAuth, async (req: AuthenticatedRequest, res: Res
 // 8. NOTIFICATIONS API (PostgreSQL: shopit_notifications)
 // ============================================================================
 
-// GET /api/notifications
 router.get('/notifications', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const user = req.user!;
@@ -1511,29 +1638,35 @@ router.get('/notifications', requireAuth, async (req: AuthenticatedRequest, res:
       [user.userId]
     );
 
-    const notifications = result.rows.map((row: any) => ({
-      id: row.id,
-      userId: row.user_id,
-      title: row.title,
-      message: row.message,
-      type: row.type,
-      isRead: Boolean(row.is_read),
-      link: row.link,
-      createdAt: row.created_at,
-    }));
-
-    return res.json({ status: true, notifications });
+    return res.json({
+      status: true,
+      notifications: result.rows.map((row: any) => ({
+        id: row.id,
+        userId: row.user_id,
+        title: row.title,
+        message: row.message,
+        type: row.type,
+        isRead: Boolean(row.is_read),
+        link: row.link,
+        createdAt: row.created_at,
+      })),
+    });
   } catch (err: any) {
     return res.status(500).json({ status: false, message: err.message });
   }
 });
 
-// PATCH /api/notifications/:id/read
 router.patch('/notifications/:id/read', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const user = req.user!;
     const { id } = req.params;
-    await dbQuery('UPDATE shopit_notifications SET is_read = true WHERE id = $1 AND user_id = $2', [id, user.userId]);
+    const upd = await dbQuery(
+      'UPDATE shopit_notifications SET is_read = true WHERE id = $1 AND user_id = $2 RETURNING id',
+      [id, user.userId]
+    );
+    if (upd.rows.length === 0) {
+      return res.status(404).json({ status: false, message: 'Notification not found.' });
+    }
     return res.json({ status: true, message: 'Notification marked as read.' });
   } catch (err: any) {
     return res.status(500).json({ status: false, message: err.message });
@@ -1544,40 +1677,43 @@ router.patch('/notifications/:id/read', requireAuth, async (req: AuthenticatedRe
 // 9. CUSTOM COMMISSIONS API (PostgreSQL: shopit_commissions)
 // ============================================================================
 
-// GET /api/commissions
 router.get('/commissions', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const user = req.user!;
-    const result = await dbQuery(
-      `SELECT * FROM shopit_commissions
-       WHERE buyer_id = $1 OR seller_id = $1
-       ORDER BY created_at DESC`,
-      [user.userId]
-    );
+    const sellerLookup = user.sellerId || user.userId;
+    const result =
+      user.role === 'admin'
+        ? await dbQuery('SELECT * FROM shopit_commissions ORDER BY created_at DESC LIMIT 100')
+        : await dbQuery(
+            `SELECT * FROM shopit_commissions
+             WHERE buyer_id = $1 OR seller_id = $1 OR seller_id = $2
+             ORDER BY created_at DESC`,
+            [user.userId, sellerLookup]
+          );
 
-    const commissions = result.rows.map((row: any) => ({
-      id: row.id,
-      buyerId: row.buyer_id,
-      buyerName: row.buyer_name,
-      sellerId: row.seller_id,
-      sellerShopName: row.seller_shop_name,
-      title: row.title,
-      description: row.description,
-      budget: parseFloat(row.budget_naira),
-      budgetKobo: parseInt(row.budget_kobo, 10),
-      status: row.status,
-      milestones: Array.isArray(row.milestones) ? row.milestones : [],
-      reference: row.reference,
-      createdAt: row.created_at,
-    }));
-
-    return res.json({ status: true, commissions });
+    return res.json({
+      status: true,
+      commissions: result.rows.map((row: any) => ({
+        id: row.id,
+        buyerId: row.buyer_id,
+        buyerName: row.buyer_name,
+        sellerId: row.seller_id,
+        sellerShopName: row.seller_shop_name,
+        title: row.title,
+        description: row.description,
+        budget: parseFloat(row.budget_naira),
+        budgetKobo: parseInt(row.budget_kobo, 10),
+        status: row.status,
+        milestones: Array.isArray(row.milestones) ? row.milestones : [],
+        reference: row.reference,
+        createdAt: row.created_at,
+      })),
+    });
   } catch (err: any) {
     return res.status(500).json({ status: false, message: err.message });
   }
 });
 
-// POST /api/commissions
 router.post('/commissions', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const user = req.user!;
@@ -1586,18 +1722,29 @@ router.post('/commissions', requireAuth, async (req: AuthenticatedRequest, res: 
       return res.status(400).json({ status: false, message: 'sellerId, title, and budget are required.' });
     }
 
-    const budgetKobo = nairaToKobo(budget);
-    const commId = `COMM-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
+    if (isUserSellerOwner(user, String(sellerId))) {
+      return res.status(400).json({ status: false, message: 'You cannot submit a custom commission to your own shop.' });
+    }
 
-    const sellerRes = await dbQuery('SELECT shop_name FROM shopit_sellers WHERE id = $1', [sellerId]);
+    const budgetKobo = nairaToKobo(budget);
+    if (budgetKobo < 10000) {
+      return res.status(400).json({ status: false, message: 'Minimum custom commission budget is ₦100.' });
+    }
+
+    const sellerRes = await dbQuery('SELECT shop_name FROM shopit_sellers WHERE id = $1 OR user_id = $1', [sellerId]);
+    if (sellerRes.rows.length === 0) {
+      return res.status(404).json({ status: false, message: 'Seller not found.' });
+    }
+
     const shopName = sellerRes.rows[0]?.shop_name || 'Artisan';
+    const commId = `COMM-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
 
     await dbQuery(
       `INSERT INTO shopit_commissions (
         id, buyer_id, buyer_name, seller_id, seller_shop_name,
         title, description, budget_kobo, budget_naira, status, created_at, updated_at
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', NOW(), NOW())`,
-      [commId, user.userId, user.name, sellerId, shopName, title.trim(), description || '', budgetKobo, koboToNaira(budgetKobo)]
+      [commId, user.userId, user.name, sellerId, shopName, String(title).trim().slice(0, 200), String(description || '').slice(0, 1500), budgetKobo, koboToNaira(budgetKobo)]
     );
 
     return res.status(201).json({ status: true, commissionId: commId, message: 'Commission request submitted.' });

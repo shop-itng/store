@@ -1,45 +1,40 @@
 import 'dotenv/config';
 import express from 'express';
 import crypto from 'crypto';
-import paystackWebhookHandler from './paystack/webhook.js';
-import { renderTransactionalEmail, EmailTemplateKey } from '../src/utils/transactionalEmails.js';
+import cookieParser from 'cookie-parser';
+import paymentsWebhookHandler from './payments/webhook.js';
+import { renderTransactionalEmail, type EmailTemplateKey } from '../src/utils/transactionalEmails.js';
 import {
   checkRateLimit as checkOtpRateLimit,
   recordRateLimit as recordOtpRateLimit,
   checkResendCooldown as checkOtpResendCooldown,
+  checkAndRecordRateLimit,
   saveHashedOtp,
-  getOtpRecord,
-  updateOtpRecord,
-  deleteOtpRecord,
+  verifyAndConsumeOtp,
+  issueSignupVerificationToken,
+  consumeSignupVerificationToken,
   hashOtp,
-  verifyOtpHash,
   savePaymentRecord,
-  getPaymentRecord,
-  getAllPaymentRecords,
   saveReportRecord,
   getAllReportRecords,
   updateReportStatus,
-  pingHealth,
-  type PaymentRecord,
   type ReportRecord,
 } from './db/otpStore.js';
 import {
   query as dbQuery,
+  withTransaction,
   hashPassword,
   verifyPassword,
   pingPostgres,
   pingRedis,
   runMigration,
   getDatabaseUrl,
-  DATABASE_URL_ENV_NAME,
 } from './db/postgres.js';
-
-import cookieParser from 'cookie-parser';
 import {
   createSession,
   getSession,
   destroySession,
-  rotateSession,
+  revokeUserSessions,
   recordLoginFailure,
   isAccountLocked,
   clearLoginFailures,
@@ -48,16 +43,32 @@ import {
 } from './auth/sessionStore.js';
 import {
   requireAuth,
-  requireRole,
   requireAdmin,
   requireModerator,
   requireFinance,
-  requireSeller,
+  requirePaymentsEnabled,
+  requirePayoutsEnabled,
+  requireCronOrAdmin,
+  requireOwnershipOrAdmin,
   optionalAuth,
   extractToken,
-  AuthenticatedRequest,
+  type AuthenticatedRequest,
 } from './auth/middleware.js';
-import marketplaceRouter from './routes/marketplace.js';
+import {
+  nairaToKobo,
+  koboToNaira,
+  calculateTieredServiceFeeKobo,
+  encryptSensitiveData,
+  decryptSensitiveData,
+  sendBrevoDirect,
+  sendAdminAlert as dispatchAdminAlert,
+  commitPaidOrderTransaction,
+  expireStalePendingOrders,
+  restoreOrderStockInTx,
+} from './lib/payments.js';
+import marketplaceRouter, { processEscrowAutoRelease } from './routes/marketplace.js';
+
+export const sendAdminAlert = dispatchAdminAlert;
 
 // Run database migrations on server boot
 runMigration().catch(err => {
@@ -65,251 +76,239 @@ runMigration().catch(err => {
 });
 
 const app = express();
-
-// Enable cookie parser for httpOnly session cookies
 app.use(cookieParser());
 
-// Security headers middleware (CSP, HSTS, Permissions-Policy without breaking Paystack)
+const IS_PROD = process.env.NODE_ENV === 'production' || Boolean(process.env.VERCEL);
+
+const APP_URL = (
+  process.env.APP_URL ||
+  (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : '') ||
+  'https://shop-itng-pied.vercel.app'
+).replace(/\/$/, '');
+
+function getAllowedOrigins(): string[] {
+  const extra = (process.env.ALLOWED_ORIGINS || '')
+    .split(',')
+    .map(s => s.trim().replace(/\/$/, ''))
+    .filter(Boolean);
+
+  const defaults = [
+    APP_URL,
+    'https://shop-itng-pied.vercel.app',
+    ...(IS_PROD ? [] : ['http://localhost:3000', 'http://127.0.0.1:3000']),
+  ];
+  return Array.from(new Set([...defaults, ...extra]));
+}
+
+function escapeHtml(raw: unknown): string {
+  return String(raw ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// Strict security headers middleware (zero 'unsafe-inline'/'unsafe-eval' in script-src)
 app.use((_req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'SAMEORIGIN');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-  res.setHeader('X-XSS-Protection', '1; mode=block');
   res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
   res.setHeader('Permissions-Policy', 'camera=(self), microphone=(), geolocation=(self)');
   res.setHeader(
     'Content-Security-Policy',
-    "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://js.paystack.co https://checkout.paystack.com; frame-src 'self' https://checkout.paystack.com https://api.paystack.co https://standard.paystack.co; connect-src 'self' https://api.paystack.co https://api.brevo.com https://*.ingest.sentry.io https://*.upstash.io; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline' https:; font-src 'self' data: https:;"
+    "default-src 'self'; script-src 'self'; frame-src 'self' https://checkout.flutterwave.com https://checkout-v2.flutterwave.com https://*.flutterwave.com; connect-src 'self' https://api.flutterwave.com https://checkout.flutterwave.com https://api.brevo.com https://*.ingest.sentry.io https://*.upstash.io; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline' https:; font-src 'self' data: https:;"
   );
   next();
 });
 
-// Middleware for parsing JSON (keeping untouched raw body Buffer for HMAC SHA-512 webhook verification)
+// JSON body parser preserving untouched rawBody Buffer for webhook signature verification
 app.use(
   express.json({
-    limit: '2mb',
+    limit: '8mb',
     verify: (req: any, _res, buf) => {
       req.rawBody = buf;
     },
   })
 );
 
-// Backend secrets - loaded strictly from server environment secrets
-const APP_URL =
-  process.env.APP_URL ||
-  (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : '') ||
-  'https://shop-itng-pied.vercel.app';
-
-// Strict CORS middleware ensuring credentials and allowed origins
+// Strict CORS + CSRF Origin enforcement
 app.use((req, res, next) => {
-  const origin = req.headers.origin;
-  const allowedOrigins = [
-    APP_URL,
-    'https://shop-itng-pied.vercel.app',
-    'http://localhost:3000',
-    'http://127.0.0.1:3000',
-  ];
-  const isAllowed = !origin || allowedOrigins.includes(origin) || origin.endsWith('.run.app') || origin.endsWith('.vercel.app');
-  if (isAllowed && origin) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
+  const originHeader = req.headers.origin ? String(req.headers.origin).replace(/\/$/, '') : '';
+  const allowedOrigins = getAllowedOrigins();
+  const isWebhookPath =
+    req.path === '/payments/webhook' ||
+    req.path === '/api/payments/webhook';
+
+  const isOriginAllowed = !originHeader || allowedOrigins.includes(originHeader);
+
+  if (originHeader && isOriginAllowed) {
+    res.setHeader('Access-Control-Allow-Origin', originHeader);
     res.setHeader('Access-Control-Allow-Credentials', 'true');
   }
+  res.setHeader('Vary', 'Origin');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-session-token, x-paystack-signature');
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    'Content-Type, Authorization, x-session-token, verif-hash'
+  );
+
   if (req.method === 'OPTIONS') {
+    if (originHeader && !isOriginAllowed) {
+      return res.status(403).json({ status: false, error: 'CORS_ORIGIN_FORBIDDEN', message: 'Origin not allowed.' });
+    }
     return res.status(204).end();
   }
+
+  if (!isWebhookPath && originHeader && !isOriginAllowed && !['GET', 'HEAD'].includes(req.method)) {
+    return res.status(403).json({ status: false, error: 'CORS_ORIGIN_FORBIDDEN', message: 'Origin not allowed.' });
+  }
+
+  // Cookie-based state changes must originate from allowed origins (exempt webhooks & explicit Bearer token callers)
+  if (!isWebhookPath && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
+    const hasCookieSession = Boolean(req.cookies?.[SESSION_COOKIE_NAME]);
+    const hasExplicitTokenHeader = Boolean(req.headers.authorization || req.headers['x-session-token']);
+    if (hasCookieSession && !hasExplicitTokenHeader) {
+      let refererOrigin = '';
+      if (!originHeader && req.headers.referer) {
+        try {
+          refererOrigin = new URL(String(req.headers.referer)).origin.replace(/\/$/, '');
+        } catch {}
+      }
+      const effectiveOrigin = originHeader || refererOrigin;
+      if (!effectiveOrigin || !allowedOrigins.includes(effectiveOrigin)) {
+        return res.status(403).json({ status: false, error: 'CSRF_ORIGIN_FORBIDDEN', message: 'Invalid request origin.' });
+      }
+    }
+  }
+
   next();
 });
 
-// Backend secrets - loaded strictly from server environment secrets
-const PAYSTACK_SECRET_KEY = (process.env.PAYSTACK_SECRET_KEY || '').trim().replace(/^["']|["']$/g, '');
-const PAYSTACK_WEBHOOK_SECRET = (process.env.PAYSTACK_WEBHOOK_SECRET || PAYSTACK_SECRET_KEY).trim().replace(/^["']|["']$/g, '');
-const PAYSTACK_PUBLIC_KEY = (process.env.PAYSTACK_PUBLIC_KEY || process.env.VITE_PAYSTACK_PUBLIC_KEY || 'pk_live_cc9a7381a83f3279812dfceaef5475977441cd94').trim().replace(/^["']|["']$/g, '');
+function getFlwSecretKey(): string {
+  return (process.env.FLW_SECRET_KEY || '').trim().replace(/^["']|["']$/g, '');
+}
 
-// Simple in-memory rate limiting for checkout initialization (max 40 requests / 5 mins per IP)
-const ipRateLimit = new Map<string, { count: number; resetAt: number }>();
-function checkRateLimit(ip: string): boolean {
-  const now = Date.now();
-  const entry = ipRateLimit.get(ip);
-  if (!entry || now > entry.resetAt) {
-    ipRateLimit.set(ip, { count: 1, resetAt: now + 5 * 60 * 1000 });
-    return true;
-  }
-  if (entry.count >= 40) {
+function getFlwWebhookHash(): string {
+  return (process.env.FLW_WEBHOOK_SECRET_HASH || '').trim().replace(/^["']|["']$/g, '');
+}
+
+function getFlwPublicKey(): string {
+  return (process.env.FLW_PUBLIC_KEY || process.env.VITE_FLW_PUBLIC_KEY || '').trim().replace(/^["']|["']$/g, '');
+}
+
+const ENV_NIN_HASH_SALT = (process.env.NIN_HASH_SALT || '').trim();
+const ENV_DOC_TOKEN_SECRET = (process.env.DOC_TOKEN_SECRET || '').trim();
+const DEV_EPHEMERAL_NIN_SALT = crypto.randomBytes(32).toString('hex');
+const DEV_EPHEMERAL_DOC_SECRET = crypto.randomBytes(32).toString('hex');
+
+if (IS_PROD && (!ENV_NIN_HASH_SALT || !ENV_DOC_TOKEN_SECRET)) {
+  console.error('[SECURITY CRITICAL] NIN_HASH_SALT or DOC_TOKEN_SECRET missing in production.');
+}
+
+function getNinSalt(): string {
+  if (ENV_NIN_HASH_SALT) return ENV_NIN_HASH_SALT;
+  if (IS_PROD) throw new Error('NIN_HASH_SALT must be configured in production.');
+  return DEV_EPHEMERAL_NIN_SALT;
+}
+
+function getDocSecret(): string {
+  if (ENV_DOC_TOKEN_SECRET) return ENV_DOC_TOKEN_SECRET;
+  if (IS_PROD) throw new Error('DOC_TOKEN_SECRET must be configured in production.');
+  return DEV_EPHEMERAL_DOC_SECRET;
+}
+
+function hashNin(nin: string): string {
+  return crypto.createHmac('sha256', getNinSalt()).update(nin.trim()).digest('hex');
+}
+
+function generateDocToken(docId: string, expiresInMs = 60 * 60 * 1000): { token: string; expires: number; url: string } {
+  const expires = Date.now() + expiresInMs;
+  const signature = crypto.createHmac('sha256', getDocSecret()).update(`${docId}:${expires}`).digest('hex');
+  const token = `${signature}.${expires}`;
+  return { token, expires, url: `/api/verification/document/${encodeURIComponent(docId)}?token=${encodeURIComponent(token)}` };
+}
+
+function verifyDocToken(docId: string, token: string): boolean {
+  try {
+    const [sig, expStr] = token.split('.');
+    const expires = Number(expStr);
+    if (!sig || !expires || Date.now() > expires) return false;
+    const expectedSig = crypto.createHmac('sha256', getDocSecret()).update(`${docId}:${expires}`).digest('hex');
+    const sigBuf = Buffer.from(sig, 'utf8');
+    const expBuf = Buffer.from(expectedSig, 'utf8');
+    return sigBuf.length === expBuf.length && crypto.timingSafeEqual(sigBuf, expBuf);
+  } catch {
     return false;
   }
-  entry.count += 1;
-  return true;
 }
 
-// In-memory server order store and idempotency cache
-interface ServerOrder {
-  orderId: string;
-  reference: string;
-  email: string;
-  items: Array<{
-    productId?: string;
-    title?: string;
-    sellerId?: string;
-    sellerShopName?: string;
-    sellerPrice: number;
-    quantity: number;
-    deliveryMethod?: 'pickup' | 'delivery';
-    deliveryFee?: number;
-  }>;
-  campus: string;
-  deliveryArea?: string;
-  pickupPoint?: string;
-  subtotal: number;
-  serviceFeeTotal: number;
-  deliveryTotal: number;
-  discountTotal: number;
-  couponCode?: string;
-  grandTotalNaira: number;
-  amountInKobo: number;
-  status: 'pending_payment' | 'paid' | 'failed' | 'cancelled';
-  paymentMethod: string;
-  authorizationUrl?: string;
-  accessCode?: string;
-  createdAt: string;
-  paidAt?: string;
-  verifiedWithPaystack?: boolean;
-}
+const VALID_EMAIL_TEMPLATES = new Set<EmailTemplateKey>([
+  'signup_code',
+  'new_device_login',
+  'password_reset',
+  'withdrawal_code',
+  'new_payout_account_code',
+  'order_placed_buyer',
+  'new_order_seller',
+  'order_shipped_buyer',
+  'item_received_seller',
+  'auto_release_reminder',
+  'dispute_opened',
+  'dispute_resolved',
+  'seller_verified',
+  'verification_not_approved',
+  'welcome',
+]);
 
-const serverOrders = new Map<string, ServerOrder>();
-const serverOrdersByRef = new Map<string, ServerOrder>();
-const processedReferences = new Set<string>();
-const processedWebhookEvents: any[] = [];
-
-/**
- * Server-Authoritative Pricing Calculation Engine:
- * Strictly computes payable amount in Naira and kobo on the backend.
- */
-function calculateServerPrice(params: {
-  items: Array<{
-    productId?: string;
-    sellerId?: string;
-    sellerShopName?: string;
-    sellerPrice: number;
-    quantity: number;
-    deliveryMethod?: 'pickup' | 'delivery';
-    deliveryFee?: number;
-  }>;
-  couponCode?: string;
-}) {
-  const { items, couponCode } = params;
-
-  let subtotal = 0;
-  let serviceFeeTotal = 0;
-  const sellerNames = new Set<string>();
-
-  for (const item of items) {
-    const qty = Math.max(1, Math.floor(Number(item.quantity) || 1));
-    const price = Math.max(0, Math.round(Number(item.sellerPrice) || 0));
-    subtotal += price * qty;
-
-    let feePerItem = 200;
-    if (price < 2000) {
-      feePerItem = 200;
-    } else if (price <= 10000) {
-      feePerItem = 500;
-    } else {
-      feePerItem = Math.round((price * 0.05) / 50) * 50;
-    }
-    serviceFeeTotal += feePerItem * qty;
-
-    const sellerKey = item.sellerShopName || item.sellerId || 'artisan_seller';
-    sellerNames.add(sellerKey);
-  }
-
-  if (sellerNames.size === 0) {
-    sellerNames.add('artisan_seller');
-  }
-
-  let deliveryTotal = 0;
-  for (const seller of sellerNames) {
-    const sellerItems = items.filter(
-      i => (i.sellerShopName || i.sellerId || 'artisan_seller') === seller
-    );
-    const isAllPickup = sellerItems.length > 0 && sellerItems.every(i => i.deliveryMethod === 'pickup');
-    const customFee = Math.max(...sellerItems.map(i => Number(i.deliveryFee) || 0));
-
-    if (customFee > 0) {
-      deliveryTotal += customFee;
-    } else {
-      deliveryTotal += isAllPickup ? 200 : 500;
-    }
-  }
-
-  let discountTotal = 0;
-  if (couponCode) {
-    const cleanCode = couponCode.trim().toUpperCase();
-    if (cleanCode === 'TEEDS' && subtotal >= 2500) {
-      discountTotal = 500;
-    } else if (cleanCode === 'FIRSTORDER' && subtotal >= 1500) {
-      discountTotal = 300;
-    } else if (cleanCode === 'CAMPUSLOVE' && subtotal >= 3000) {
-      discountTotal = 500;
-    } else if (cleanCode === 'FIRSTCRAFT' && subtotal >= 2000) {
-      discountTotal = 400;
-    }
-  }
-
-  const grandTotalNaira = Math.max(100, subtotal + serviceFeeTotal + deliveryTotal - discountTotal);
-  const amountInKobo = Math.round(grandTotalNaira * 100);
-
-  return {
-    subtotal,
-    serviceFeeTotal,
-    deliveryTotal,
-    discountTotal,
-    grandTotalNaira,
-    amountInKobo,
-  };
-}
-
-// Router for all API routes - mounted at both /api and / to handle Vercel rewrite variations
 const router = express.Router();
-
-// Mount PostgreSQL marketplace domain routes (products, sellers, carts, wishlists, orders, wallets, chat, disputes, notifications, commissions)
 router.use(marketplaceRouter);
 
-// Health check endpoint (STEP 2 Item 7: checks Neon & Upstash, returns only OK or failing service, no secrets)
+// Health check
 router.get(['/health', '/api/health'], async (_req, res) => {
   const pgPing = await pingPostgres();
   const redisPing = await pingRedis();
-
   const isPgOk = pgPing.ok;
-  const hasRedisConfig = Boolean(process.env.KV_REST_API_URL);
+  const hasRedisConfig = Boolean(process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL);
   const isRedisOk = !hasRedisConfig || redisPing.ok;
 
   if (isPgOk && isRedisOk) {
-    return res.status(200).json({
-      status: 'OK',
-      timestamp: new Date().toISOString(),
-    });
+    return res.status(200).json({ status: 'OK', timestamp: new Date().toISOString() });
   }
 
   const failingServices: string[] = [];
   if (!isPgOk) failingServices.push('Neon Postgres');
   if (!isRedisOk) failingServices.push('Upstash Redis');
-
-  return res.status(503).json({
-    status: 'ERROR',
-    failing: failingServices.join(', '),
-    timestamp: new Date().toISOString(),
-  });
+  return res.status(503).json({ status: 'ERROR', failing: failingServices.join(', '), timestamp: new Date().toISOString() });
 });
 
 // ============================================================================
-// REAL POSTGRESQL AUTHENTICATION & USER GOVERNANCE (STEP 2 ITEMS 1, 3, 4, 5)
+// AUTHENTICATION & USER GOVERNANCE
 // ============================================================================
 
-// POST /api/auth/register (or /api/auth/signup) - Inserts into PostgreSQL with PBKDF2 hash
 router.post(['/auth/register', '/auth/signup'], async (req, res) => {
   try {
-    const { name, email, password, role = 'buyer', age, hasGuardianConsent, guardianName, shopName, campus, location, bio } = req.body;
+    const clientIp = req.ip || 'unknown';
+    const rl = await checkAndRecordRateLimit(`register:${clientIp}`, 10, 15 * 60 * 1000);
+    if (!rl.allowed) {
+      return res.status(429).json({ status: false, message: 'Too many signup requests. Please wait before trying again.' });
+    }
+
+    const {
+      name,
+      email,
+      password,
+      role = 'buyer',
+      age,
+      hasGuardianConsent,
+      guardianName,
+      shopName,
+      campus,
+      location,
+      bio,
+      signupVerificationToken,
+    } = req.body;
 
     if (!email || !password || !name) {
       return res.status(400).json({ status: false, message: 'Name, email, and password are required.' });
@@ -323,88 +322,108 @@ router.post(['/auth/register', '/auth/signup'], async (req, res) => {
       return res.status(400).json({ status: false, message: 'Please provide a valid email address.' });
     }
 
-    if (cleanPassword.length < 6) {
-      return res.status(400).json({ status: false, message: 'Password must be at least 6 characters long.' });
+    if (cleanPassword.length < 8) {
+      return res.status(400).json({ status: false, message: 'Password must be at least 8 characters long.' });
     }
 
-    const parsedAge = age !== undefined && age !== null ? parseInt(String(age), 10) : undefined;
-    if (parsedAge !== undefined && (isNaN(parsedAge) || parsedAge < 10)) {
+    if (age === undefined || age === null || String(age).trim() === '') {
+      return res.status(400).json({ status: false, message: 'Age is required to register on Shop It.' });
+    }
+
+    const parsedAge = parseInt(String(age), 10);
+    if (isNaN(parsedAge) || parsedAge < 10 || parsedAge > 120) {
       return res.status(400).json({ status: false, message: 'You must be at least 10 years old to register on Shop It.' });
     }
 
-    if (parsedAge !== undefined && parsedAge < 18 && !hasGuardianConsent) {
-      return res.status(400).json({ status: false, message: 'Parent or guardian consent is required for users under 18.' });
+    if (parsedAge < 18 && (!hasGuardianConsent || !guardianName || !String(guardianName).trim())) {
+      return res.status(400).json({
+        status: false,
+        message: 'Parent or guardian consent and guardian name are required for users under 18.',
+      });
     }
 
-    // Check if user already exists in PostgreSQL
-    const existing = await dbQuery('SELECT id FROM shopit_users WHERE LOWER(email) = LOWER($1)', [cleanEmail]);
-    if (existing.rows.length > 0) {
-      return res.status(409).json({ status: false, message: 'An account with this email address already exists. Please log in.' });
+    // Consume single-use server-issued signup OTP verification proof token
+    const isOtpVerified = await consumeSignupVerificationToken(cleanEmail, String(signupVerificationToken || ''));
+    if (!isOtpVerified) {
+      return res.status(403).json({
+        status: false,
+        error: 'EMAIL_VERIFICATION_REQUIRED',
+        message: 'Please verify your email with the 6-digit OTP code before creating an account.',
+      });
     }
 
-    const userId = `user_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const userId = `user_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
     const passwordHash = hashPassword(cleanPassword);
     const userRole = role === 'seller' ? 'seller' : 'buyer';
 
-    // Insert user row into PostgreSQL
-    const userInsert = await dbQuery(
-      `INSERT INTO shopit_users (
-        id, email, name, password_hash, role, is_verified_email, age, has_guardian_consent, guardian_name, created_at, updated_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
-      RETURNING id, email, name, role, is_verified_email, age, has_guardian_consent, guardian_name, created_at`,
-      [
-        userId,
-        cleanEmail,
-        cleanName,
-        passwordHash,
-        userRole,
-        true,
-        parsedAge || null,
-        Boolean(hasGuardianConsent),
-        guardianName ? String(guardianName).trim() : null,
-      ]
-    );
+    const txResult = await withTransaction(async client => {
+      const existing = await client.query('SELECT id FROM shopit_users WHERE LOWER(email) = LOWER($1)', [cleanEmail]);
+      if (existing.rows.length > 0) {
+        return { conflict: true as const };
+      }
 
-    const savedUser = userInsert.rows[0];
-
-    // If role is seller, also insert seller profile and wallet row into PostgreSQL
-    let sellerProfile: any = null;
-    if (userRole === 'seller') {
-      const sellerId = userId;
-      const cleanShop = (shopName || `${cleanName}'s Shop`).trim();
-      const sellerInsert = await dbQuery(
-        `INSERT INTO shopit_sellers (
-          id, user_id, shop_name, owner_name, email, bio, campus, location_state, location_city, location_area, is_verified_seller, verification_status, under_18, guardian_consent, guardian_name, created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, false, 'not_started', $11, $12, $13, NOW(), NOW())
-        RETURNING *`,
+      const userInsert = await client.query(
+        `INSERT INTO shopit_users (
+          id, email, name, password_hash, role, is_verified_email, age, has_guardian_consent, guardian_name, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, true, $6, $7, $8, NOW(), NOW())
+        RETURNING id, email, name, role, is_verified_email, age, has_guardian_consent, guardian_name, created_at`,
         [
-          sellerId,
           userId,
-          cleanShop,
-          cleanName,
           cleanEmail,
-          bio ? String(bio).trim() : '',
-          campus ? String(campus).trim() : 'Lagos Mainland',
-          location?.state || 'Lagos',
-          location?.city || 'Lagos Mainland',
-          location?.area || 'Yaba',
-          parsedAge !== undefined ? parsedAge < 18 : false,
-          Boolean(hasGuardianConsent),
+          cleanName,
+          passwordHash,
+          userRole,
+          parsedAge,
+          parsedAge < 18 ? Boolean(hasGuardianConsent) : true,
           guardianName ? String(guardianName).trim() : null,
         ]
       );
-      sellerProfile = sellerInsert.rows[0];
 
-      // Initialize wallet in PostgreSQL
-      await dbQuery(
-        `INSERT INTO shopit_wallets (seller_id, pending_balance, available_balance, total_withdrawn, is_frozen, created_at, updated_at)
-         VALUES ($1, 0, 0, 0, false, NOW(), NOW())
-         ON CONFLICT (seller_id) DO NOTHING`,
-        [sellerId]
-      );
+      let sellerProfile: any = null;
+      if (userRole === 'seller') {
+        const cleanShop = (shopName || `${cleanName}'s Shop`).trim();
+        const sellerInsert = await client.query(
+          `INSERT INTO shopit_sellers (
+            id, user_id, shop_name, owner_name, email, bio, campus, location_state, location_city, location_area,
+            is_verified_seller, verification_status, under_18, guardian_consent, guardian_name, created_at, updated_at
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, false, 'not_started', $11, $12, $13, NOW(), NOW())
+          RETURNING *`,
+          [
+            userId,
+            userId,
+            cleanShop,
+            cleanName,
+            cleanEmail,
+            bio ? String(bio).trim() : '',
+            campus ? String(campus).trim() : 'Lagos Mainland',
+            location?.state || 'Lagos',
+            location?.city || 'Lagos Mainland',
+            location?.area || 'Yaba',
+            parsedAge < 18,
+            Boolean(hasGuardianConsent),
+            guardianName ? String(guardianName).trim() : null,
+          ]
+        );
+        sellerProfile = sellerInsert.rows[0];
+
+        await client.query(
+          `INSERT INTO shopit_wallets (seller_id, pending_balance, available_balance, total_withdrawn, is_frozen, pending_balance_kobo, available_balance_kobo, total_withdrawn_kobo, created_at, updated_at)
+           VALUES ($1, 0, 0, 0, false, 0, 0, 0, NOW(), NOW())
+           ON CONFLICT (seller_id) DO NOTHING`,
+          [userId]
+        );
+      }
+
+      return { conflict: false as const, savedUser: userInsert.rows[0], sellerProfile };
+    });
+
+    if (txResult.conflict) {
+      return res.status(409).json({
+        status: false,
+        message: 'An account with this email address already exists. Please log in.',
+      });
     }
 
-    // Create real server session
     const { token } = await createSession({
       userId,
       email: cleanEmail,
@@ -416,43 +435,47 @@ router.post(['/auth/register', '/auth/signup'], async (req, res) => {
 
     res.cookie(SESSION_COOKIE_NAME, token, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production' || !!process.env.VERCEL,
+      secure: IS_PROD,
       sameSite: 'lax',
       maxAge: 7 * 24 * 60 * 60 * 1000,
       path: '/',
     });
 
-    console.log(`[User Registration] Successfully created user in PostgreSQL: ${cleanEmail} (ID: ${userId}, Role: ${userRole})`);
-
     return res.status(201).json({
       status: true,
       sessionToken: token,
       user: {
-        id: savedUser.id,
-        email: savedUser.email,
-        name: savedUser.name,
-        role: savedUser.role,
-        isVerifiedEmail: savedUser.is_verified_email,
-        age: savedUser.age,
-        hasGuardianConsent: savedUser.has_guardian_consent,
-        guardianName: savedUser.guardian_name,
-        createdAt: savedUser.created_at,
-        sellerProfile,
+        id: txResult.savedUser.id,
+        email: txResult.savedUser.email,
+        name: txResult.savedUser.name,
+        role: txResult.savedUser.role,
+        isVerifiedEmail: Boolean(txResult.savedUser.is_verified_email),
+        age: txResult.savedUser.age,
+        hasGuardianConsent: txResult.savedUser.has_guardian_consent,
+        guardianName: txResult.savedUser.guardian_name,
+        createdAt: txResult.savedUser.created_at,
+        sellerProfile: txResult.sellerProfile,
       },
       message: 'Account successfully registered and saved to database.',
     });
   } catch (err: any) {
     console.error('[User Registration Error]:', err.message);
-    return res.status(500).json({
-      status: false,
-      message: 'Database error saving user account. Please try again.',
-    });
+    return res.status(500).json({ status: false, message: 'Database error saving user account. Please try again.' });
   }
 });
 
-// POST /api/auth/login - Reads and verifies credentials from PostgreSQL with lockout & session creation
 router.post('/auth/login', async (req, res) => {
   try {
+    const clientIp = req.ip || 'unknown';
+    const ipLimit = await checkAndRecordRateLimit(`login_ip:${clientIp}`, 30, 15 * 60 * 1000);
+    if (!ipLimit.allowed) {
+      return res.status(429).json({
+        status: false,
+        error: 'RATE_LIMITED',
+        message: 'Too many login attempts. Please wait a few minutes and try again.',
+      });
+    }
+
     const { email, password } = req.body;
     if (!email || !password) {
       return res.status(400).json({ status: false, message: 'Email and password are required.' });
@@ -461,18 +484,16 @@ router.post('/auth/login', async (req, res) => {
     const cleanEmail = String(email).trim().toLowerCase();
     const cleanPassword = String(password).trim();
 
-    // 1. Account Lockout Check
     const lockout = await isAccountLocked(cleanEmail);
     if (lockout.locked) {
       return res.status(429).json({
         status: false,
         error: 'ACCOUNT_LOCKED',
-        message: `Account temporarily locked due to repeated failed logins. Please wait ${lockout.remainingSeconds} seconds before trying again.`,
+        message: `Account temporarily locked due to repeated failed logins. Please wait ${lockout.remainingSeconds} seconds.`,
         lockoutRemainingSeconds: lockout.remainingSeconds,
       });
     }
 
-    // 2. Fetch user from PostgreSQL
     const userRes = await dbQuery(
       `SELECT u.*, s.id as seller_id, s.shop_name, s.verification_status, s.is_verified_seller, s.bio, s.campus
        FROM shopit_users u
@@ -482,27 +503,15 @@ router.post('/auth/login', async (req, res) => {
     );
 
     if (userRes.rows.length === 0) {
-      return res.status(404).json({
+      await recordLoginFailure(cleanEmail);
+      return res.status(401).json({
         status: false,
-        error: 'EMAIL_NOT_REGISTERED',
-        message: 'No account is registered with this email address. Please check your spelling or create an account.',
+        error: 'INVALID_CREDENTIALS',
+        message: 'Invalid email or password.',
       });
     }
 
     const userRow = userRes.rows[0];
-
-    // Check if email has been verified via OTP
-    if (userRow.is_verified_email === false) {
-      return res.status(403).json({
-        status: false,
-        error: 'EMAIL_NOT_VERIFIED',
-        message: 'This email address has not been verified yet. Please enter the verification code sent to your email to activate your account.',
-        unverifiedEmail: userRow.email,
-        userId: userRow.id,
-      });
-    }
-
-    // 3. Verify password hash using PBKDF2
     const isPasswordValid = verifyPassword(cleanPassword, userRow.password_hash);
     if (!isPasswordValid) {
       const fail = await recordLoginFailure(cleanEmail);
@@ -515,12 +524,19 @@ router.post('/auth/login', async (req, res) => {
       }
       return res.status(401).json({
         status: false,
-        error: 'INVALID_PASSWORD',
-        message: `Incorrect password. ${fail.remainingAttempts} attempt(s) remaining.`,
+        error: 'INVALID_CREDENTIALS',
+        message: 'Invalid email or password.',
       });
     }
 
-    // 4. Check account ban/suspension
+    if (userRow.is_verified_email === false) {
+      return res.status(403).json({
+        status: false,
+        error: 'EMAIL_NOT_VERIFIED',
+        message: 'Your email address has not been verified yet. Please verify your email code first.',
+      });
+    }
+
     if (userRow.is_banned) {
       return res.status(403).json({
         status: false,
@@ -529,34 +545,29 @@ router.post('/auth/login', async (req, res) => {
       });
     }
 
-    // 5. Successful login: clear lockout tracking
     await clearLoginFailures(cleanEmail);
+    await dbQuery('UPDATE shopit_users SET last_login_at = NOW(), updated_at = NOW() WHERE id = $1', [userRow.id]);
 
-    // 6. Update last login in PostgreSQL
-    await dbQuery('UPDATE shopit_users SET last_login_at = NOW(), failed_login_attempts = 0, updated_at = NOW() WHERE id = $1', [userRow.id]);
-
-    // 7. Create server-side session in Redis
     const { token } = await createSession({
       userId: userRow.id,
       email: userRow.email,
       name: userRow.name,
       role: userRow.role,
-      subRole: userRow.sub_role || 'superadmin',
+      subRole: userRow.role === 'admin' && userRow.sub_role ? userRow.sub_role : undefined,
       sellerId: userRow.seller_id || undefined,
       isVerifiedSeller: Boolean(userRow.is_verified_seller),
       mustChangePassword: Boolean(userRow.must_change_password),
+      tokenVersion: Number(userRow.token_version || 1),
     });
 
-    // 8. Set signed httpOnly secure cookie
     res.cookie(SESSION_COOKIE_NAME, token, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production' || !!process.env.VERCEL,
+      secure: IS_PROD,
       sameSite: 'lax',
       maxAge: 7 * 24 * 60 * 60 * 1000,
       path: '/',
     });
 
-    // 9. Log immutable security audit event
     await logAuditEvent({
       action: 'USER_LOGIN',
       actor: { id: userRow.id, email: userRow.email, role: userRow.role },
@@ -565,8 +576,6 @@ router.post('/auth/login', async (req, res) => {
       ip: req.ip,
       userAgent: req.get('user-agent'),
     });
-
-    console.log(`[User Login] Verified login for user: ${cleanEmail} (Role: ${userRow.role})`);
 
     const sanitizedUser: any = {
       id: userRow.id,
@@ -605,17 +614,15 @@ router.post('/auth/login', async (req, res) => {
   }
 });
 
-// POST /api/auth/logout - Destroys session in Redis & clears cookie
 router.post('/auth/logout', async (req: AuthenticatedRequest, res) => {
-  const token = req.cookies?.[SESSION_COOKIE_NAME] || req.headers.authorization?.replace(/^Bearer\s+/i, '') || req.headers['x-session-token'];
-  if (token && typeof token === 'string') {
+  const token = extractToken(req);
+  if (token) {
     await destroySession(token);
   }
   res.clearCookie(SESSION_COOKIE_NAME, { path: '/' });
   return res.json({ status: true, message: 'Logged out successfully.' });
 });
 
-// POST /api/auth/change-password - Protected password change & initial admin password force change
 router.post('/auth/change-password', requireAuth, async (req: AuthenticatedRequest, res) => {
   try {
     const { currentPassword, newPassword } = req.body;
@@ -626,14 +633,15 @@ router.post('/auth/change-password', requireAuth, async (req: AuthenticatedReque
     const cleanNew = String(newPassword).trim();
     const userId = req.user!.userId;
 
-    const userRes = await dbQuery('SELECT password_hash, must_change_password FROM shopit_users WHERE id = $1', [userId]);
+    const userRes = await dbQuery(
+      'SELECT u.id, u.email, u.name, u.role, u.sub_role, s.id AS seller_id, s.is_verified_seller, u.password_hash, u.must_change_password FROM shopit_users u LEFT JOIN shopit_sellers s ON u.id = s.user_id WHERE u.id = $1',
+      [userId]
+    );
     if (userRes.rows.length === 0) {
       return res.status(404).json({ status: false, message: 'User not found.' });
     }
 
     const userRow = userRes.rows[0];
-
-    // If not initial forced change, verify existing password
     if (!userRow.must_change_password) {
       if (!currentPassword || !verifyPassword(String(currentPassword).trim(), userRow.password_hash)) {
         return res.status(401).json({ status: false, message: 'Current password is incorrect.' });
@@ -646,10 +654,26 @@ router.post('/auth/change-password', requireAuth, async (req: AuthenticatedReque
       [newHash, userId]
     );
 
-    // Rotate session
-    if (req.sessionToken) {
-      await rotateSession(req.sessionToken, { mustChangePassword: false });
-    }
+    // Revoke ALL existing sessions, then create a fresh valid session for this caller
+    await revokeUserSessions(userId);
+    const { token } = await createSession({
+      userId,
+      email: req.user!.email,
+      name: req.user!.name,
+      role: req.user!.role,
+      subRole: req.user!.subRole,
+      sellerId: req.user!.sellerId,
+      isVerifiedSeller: req.user!.isVerifiedSeller,
+      mustChangePassword: false,
+    });
+
+    res.cookie(SESSION_COOKIE_NAME, token, {
+      httpOnly: true,
+      secure: IS_PROD,
+      sameSite: 'lax',
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+      path: '/',
+    });
 
     await logAuditEvent({
       action: 'PASSWORD_CHANGED',
@@ -659,16 +683,12 @@ router.post('/auth/change-password', requireAuth, async (req: AuthenticatedReque
       userAgent: req.get('user-agent'),
     });
 
-    return res.json({
-      status: true,
-      message: 'Password changed successfully.',
-    });
+    return res.json({ status: true, sessionToken: token, message: 'Password changed successfully.' });
   } catch (err: any) {
     return res.status(500).json({ status: false, message: err.message });
   }
 });
 
-// POST /api/auth/reset-password - Updates password in PostgreSQL
 router.post('/auth/reset-password', async (req, res) => {
   try {
     const { email, code, newPassword } = req.body;
@@ -680,81 +700,42 @@ router.post('/auth/reset-password', async (req, res) => {
     const cleanCode = String(code).trim().replace(/\D/g, '');
     const cleanPassword = String(newPassword).trim();
 
+    const rl = await checkAndRecordRateLimit(`reset_pw:${cleanEmail}`, 10, 15 * 60 * 1000);
+    if (!rl.allowed) {
+      return res.status(429).json({ status: false, message: 'Too many reset attempts. Please try again later.' });
+    }
+
     if (cleanCode.length !== 6) {
       return res.status(400).json({ status: false, message: 'Reset code must be a 6-digit number.' });
     }
 
-    if (cleanPassword.length < 6) {
-      return res.status(400).json({ status: false, message: 'New password must be at least 6 characters long.' });
+    if (cleanPassword.length < 8) {
+      return res.status(400).json({ status: false, message: 'New password must be at least 8 characters long.' });
     }
 
-    // 1. Verify user exists in PostgreSQL
-    const userCheck = await dbQuery('SELECT id, name FROM shopit_users WHERE LOWER(email) = LOWER($1)', [cleanEmail]);
+    // Atomic OTP verification with SELECT ... FOR UPDATE (prevents brute force / parallel retries)
+    const otpResult = await verifyAndConsumeOtp(cleanEmail, 'password_reset', cleanCode);
+    if (!otpResult.success) {
+      return res.status(400).json({
+        status: false,
+        message: otpResult.error || 'Invalid or expired reset code.',
+        attemptsRemaining: otpResult.attemptsRemaining,
+      });
+    }
+
+    const userCheck = await dbQuery('SELECT id FROM shopit_users WHERE LOWER(email) = LOWER($1)', [cleanEmail]);
     if (userCheck.rows.length === 0) {
-      return res.status(404).json({ status: false, message: 'No registered user found with this email address.' });
+      return res.status(400).json({ status: false, message: 'Unable to reset password for this account.' });
     }
 
-    // 2. Fetch OTP record
-    const otpRecord = await getOtpRecord(cleanEmail, 'password_reset');
-    if (!otpRecord) {
-      return res.status(400).json({
-        status: false,
-        message: 'No active reset code found or code has expired. Please request a new code.',
-      });
-    }
-
-    // 3. Check expiration (10-minute validity)
-    if (Date.now() > otpRecord.expiresAt) {
-      await deleteOtpRecord(cleanEmail, 'password_reset');
-      return res.status(400).json({
-        status: false,
-        message: 'This reset code has expired (10-minute limit). Please request a new code.',
-      });
-    }
-
-    // 4. Check attempts remaining (3 tries max)
-    if (otpRecord.attemptsRemaining <= 0) {
-      await deleteOtpRecord(cleanEmail, 'password_reset');
-      return res.status(400).json({
-        status: false,
-        message: 'Too many incorrect attempts. This code has been cancelled. Please request a new code.',
-      });
-    }
-
-    // 5. Verify cryptographic hash of entered code
-    const isValid = verifyOtpHash(cleanCode, otpRecord.codeHash);
-    if (!isValid) {
-      otpRecord.attemptsRemaining -= 1;
-      if (otpRecord.attemptsRemaining <= 0) {
-        await deleteOtpRecord(cleanEmail, 'password_reset');
-        return res.status(400).json({
-          status: false,
-          message: 'Incorrect code. 3 wrong attempts exceeded. Please request a new code.',
-          attemptsRemaining: 0,
-        });
-      }
-      await updateOtpRecord(otpRecord);
-      return res.status(400).json({
-        status: false,
-        message: `Incorrect code. ${otpRecord.attemptsRemaining} attempt(s) remaining.`,
-        attemptsRemaining: otpRecord.attemptsRemaining,
-      });
-    }
-
-    // 6. Valid! Delete OTP record so it can never be reused
-    await deleteOtpRecord(cleanEmail, 'password_reset');
-
-    // 7. Hash new password with PBKDF2 SHA-512 and update PostgreSQL
+    const userId = userCheck.rows[0].id;
     const newHash = hashPassword(cleanPassword);
-    await dbQuery(
-      'UPDATE shopit_users SET password_hash = $1, updated_at = NOW() WHERE LOWER(email) = LOWER($2)',
-      [newHash, cleanEmail]
-    );
+    await dbQuery('UPDATE shopit_users SET password_hash = $1, updated_at = NOW() WHERE id = $2', [newHash, userId]);
+    await revokeUserSessions(userId);
 
-    console.log(`[Password Reset] Successfully updated password in PostgreSQL for: ${cleanEmail}`);
     return res.json({
       status: true,
-      message: 'Your password has been reset successfully! You can now log in with your new password.',
+      message: 'Your password has been reset successfully! All older sessions were signed out.',
     });
   } catch (err: any) {
     console.error('[Password Reset Error]:', err.message);
@@ -762,8 +743,79 @@ router.post('/auth/reset-password', async (req, res) => {
   }
 });
 
-// GET /api/admin/users - Reads users directly from PostgreSQL, newest first, with search, pagination, and role filtering (STEP 2 ITEM 5)
-router.get('/admin/users', async (req, res) => {
+// Strict session-only profile hydration (no ?email or ?userId unauthenticated spoofing)
+router.get('/auth/me', requireAuth, async (req: AuthenticatedRequest, res) => {
+  try {
+    const sessionUser = req.user!;
+    const result = await dbQuery(
+      `SELECT u.id, u.email, u.name, u.role, u.sub_role, u.is_verified_email, u.is_banned, u.ban_reason,
+              u.age, u.has_guardian_consent, u.guardian_name, u.created_at, u.last_login_at,
+              s.id as seller_id, s.shop_name, s.bio, s.campus, s.is_verified_seller as seller_is_verified,
+              s.verification_status as seller_verification_status,
+              s.verified_legal_name, s.verified_nin_last4, s.verified_at
+       FROM shopit_users u
+       LEFT JOIN shopit_sellers s ON (u.id = s.user_id OR u.id = s.id)
+       WHERE u.id = $1`,
+      [sessionUser.userId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ status: false, message: 'User not found.' });
+    }
+
+    const row = result.rows[0];
+    const isVerified = Boolean(
+      row.seller_is_verified ||
+      row.seller_verification_status === 'verified' ||
+      row.seller_verification_status === 'approved'
+    );
+    const currentStatus = isVerified ? 'verified' : (row.seller_verification_status || 'not_started');
+
+    const sanitizedUser: any = {
+      id: row.id,
+      email: row.email,
+      name: row.name,
+      role: row.role,
+      subRole: row.role === 'admin' ? row.sub_role || undefined : undefined,
+      isVerifiedEmail: Boolean(row.is_verified_email),
+      isVerifiedSeller: isVerified,
+      verificationStatus: currentStatus,
+      isBanned: Boolean(row.is_banned),
+      banReason: row.ban_reason,
+      age: row.age,
+      hasGuardianConsent: Boolean(row.has_guardian_consent),
+      guardianName: row.guardian_name,
+      createdAt: row.created_at,
+      lastLoginAt: row.last_login_at,
+    };
+
+    if (row.role === 'seller' || row.seller_id) {
+      sanitizedUser.sellerProfile = {
+        id: row.seller_id || row.id,
+        shopName: row.shop_name || `${row.name}'s Shop`,
+        verificationStatus: currentStatus,
+        isVerifiedSeller: isVerified,
+        bio: row.bio || '',
+        campus: row.campus || 'Lagos Mainland',
+        verifiedLegalName: row.verified_legal_name,
+        verifiedNinLast4: row.verified_nin_last4,
+        verifiedAt: row.verified_at,
+        badges: isVerified ? ['verified'] : [],
+      };
+    }
+
+    return res.json({ status: true, user: sanitizedUser, isVerifiedSeller: isVerified, verificationStatus: currentStatus });
+  } catch (err: any) {
+    console.error('[Auth Me Error]:', err.message);
+    return res.status(500).json({ status: false, message: 'Database error fetching profile.' });
+  }
+});
+
+// ============================================================================
+// ADMIN GOVERNANCE ROUTES (Strictly Authenticated + Sub-Role Enforced)
+// ============================================================================
+
+router.get('/admin/users', requireModerator, async (req: AuthenticatedRequest, res) => {
   try {
     const q = req.query.q ? String(req.query.q).trim().toLowerCase() : '';
     const role = req.query.role ? String(req.query.role).trim() : 'all';
@@ -780,7 +832,6 @@ router.get('/admin/users', async (req, res) => {
       params.push(`%${q}%`);
       paramIndex++;
     }
-
     if (role && role !== 'all') {
       conditions.push(`u.role = $${paramIndex}`);
       params.push(role);
@@ -788,38 +839,19 @@ router.get('/admin/users', async (req, res) => {
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-
-    const countRes = await dbQuery(
-      `SELECT COUNT(*) as total FROM shopit_users u ${whereClause}`,
-      params
-    );
+    const countRes = await dbQuery(`SELECT COUNT(*) as total FROM shopit_users u ${whereClause}`, params);
     const total = parseInt(countRes.rows[0].total, 10);
 
     const dataSql = `
-      SELECT
-        u.id,
-        u.email,
-        u.name,
-        u.role,
-        u.is_verified_email,
-        u.age,
-        u.has_guardian_consent,
-        u.guardian_name,
-        u.is_banned,
-        u.ban_reason,
-        u.last_login_at,
-        u.created_at,
-        s.id as seller_id,
-        s.shop_name,
-        s.verification_status,
-        s.is_verified_seller
+      SELECT u.id, u.email, u.name, u.role, u.is_verified_email, u.age, u.has_guardian_consent,
+             u.guardian_name, u.is_banned, u.ban_reason, u.last_login_at, u.created_at,
+             s.id as seller_id, s.shop_name, s.verification_status, s.is_verified_seller
       FROM shopit_users u
       LEFT JOIN shopit_sellers s ON u.id = s.user_id
       ${whereClause}
       ORDER BY u.created_at DESC
       LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
     `;
-
     const usersRes = await dbQuery(dataSql, [...params, limit, offset]);
 
     const users = usersRes.rows.map((row: any) => ({
@@ -840,33 +872,35 @@ router.get('/admin/users', async (req, res) => {
       isVerifiedSeller: Boolean(row.is_verified_seller),
     }));
 
-    return res.json({
-      status: true,
-      users,
-      total,
-      page,
-      limit,
-      totalPages: Math.ceil(total / limit) || 1,
-    });
+    return res.json({ status: true, users, total, page, limit, totalPages: Math.ceil(total / limit) || 1 });
   } catch (err: any) {
     console.error('[Admin Users Error]:', err.message);
     return res.status(500).json({ status: false, message: 'Database error reading users.' });
   }
 });
 
-// Admin User Actions: Delete, Ban, Reset Password directly in PostgreSQL
-router.delete('/admin/users/:id', async (req, res) => {
+router.delete('/admin/users/:id', requireAdmin, async (req: AuthenticatedRequest, res) => {
   try {
     const { id } = req.params;
+    if (id === req.user!.userId) {
+      return res.status(400).json({ status: false, message: 'Administrators cannot delete their own account.' });
+    }
+    await revokeUserSessions(id);
     await dbQuery('DELETE FROM shopit_users WHERE id = $1', [id]);
-    console.log(`[Admin User Governance] Deleted user ${id} from PostgreSQL.`);
+    await logAuditEvent({
+      action: 'ADMIN_USER_DELETED',
+      actor: { id: req.user!.userId, email: req.user!.email, role: req.user!.role },
+      target: { type: 'user', id },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
     return res.json({ status: true, message: 'User deleted from database.' });
   } catch (err: any) {
     return res.status(500).json({ status: false, message: err.message });
   }
 });
 
-router.post('/admin/users/:id/ban', async (req, res) => {
+router.post('/admin/users/:id/ban', requireModerator, async (req: AuthenticatedRequest, res) => {
   try {
     const { id } = req.params;
     const { isBanned, banReason } = req.body;
@@ -874,270 +908,112 @@ router.post('/admin/users/:id/ban', async (req, res) => {
       'UPDATE shopit_users SET is_banned = $1, ban_reason = $2, updated_at = NOW() WHERE id = $3',
       [Boolean(isBanned), banReason || null, id]
     );
-    console.log(`[Admin User Governance] Updated ban status for user ${id}: ${isBanned}`);
-    return res.json({ status: true, message: `User ban status updated to ${isBanned}.` });
+    if (Boolean(isBanned)) {
+      await revokeUserSessions(id);
+    }
+    await logAuditEvent({
+      action: isBanned ? 'ADMIN_USER_BANNED' : 'ADMIN_USER_UNBANNED',
+      actor: { id: req.user!.userId, email: req.user!.email, role: req.user!.role },
+      target: { type: 'user', id },
+      details: { banReason },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
+    return res.json({ status: true, message: `User ban status updated to ${Boolean(isBanned)}.` });
   } catch (err: any) {
     return res.status(500).json({ status: false, message: err.message });
   }
 });
 
-router.post('/admin/users/:id/reset-password', async (req, res) => {
+router.post('/admin/users/:id/reset-password', requireAdmin, async (req: AuthenticatedRequest, res) => {
   try {
     const { id } = req.params;
     const { newPassword } = req.body;
-    if (!newPassword || String(newPassword).trim().length < 6) {
-      return res.status(400).json({ status: false, message: 'New password must be at least 6 characters.' });
+    if (!newPassword || String(newPassword).trim().length < 8) {
+      return res.status(400).json({ status: false, message: 'New password must be at least 8 characters.' });
     }
     const hash = hashPassword(String(newPassword).trim());
     await dbQuery('UPDATE shopit_users SET password_hash = $1, updated_at = NOW() WHERE id = $2', [hash, id]);
-    console.log(`[Admin User Governance] Reset password in PostgreSQL for user ${id}.`);
-    return res.json({ status: true, message: 'User password updated in database.' });
+    await revokeUserSessions(id);
+    await logAuditEvent({
+      action: 'ADMIN_PASSWORD_RESET',
+      actor: { id: req.user!.userId, email: req.user!.email, role: req.user!.role },
+      target: { type: 'user', id },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
+    return res.json({ status: true, message: 'User password updated and active sessions revoked.' });
   } catch (err: any) {
     return res.status(500).json({ status: false, message: err.message });
   }
 });
 
-// GET /api/auth/me - Syncs fresh user & seller verification profile directly from PostgreSQL
-router.get('/auth/me', async (req, res) => {
-  try {
-    let email = req.query.email ? String(req.query.email).trim().toLowerCase() : '';
-    let userId = req.query.userId ? String(req.query.userId).trim() : '';
-
-    if (!email && !userId) {
-      const token = extractToken(req);
-      if (token) {
-        const session = await getSession(token);
-        if (session) {
-          userId = session.userId;
-          email = session.email.toLowerCase();
-        }
-      }
-    }
-
-    if (!email && !userId) {
-      return res.status(401).json({ status: false, message: 'Authentication required or email/userId required.' });
-    }
-
-    const query = `
-      SELECT u.id, u.email, u.name, u.role, u.is_verified_email, u.is_banned, u.ban_reason,
-             u.age, u.has_guardian_consent, u.guardian_name, u.created_at, u.last_login_at,
-             u.is_verified_seller as user_is_verified, u.verification_status as user_verification_status,
-             s.id as seller_id, s.shop_name, s.bio, s.campus, s.is_verified_seller as seller_is_verified, s.verification_status as seller_verification_status,
-             s.verified_legal_name, s.verified_nin_last4, s.verified_at,
-             v.status as verif_submission_status
-      FROM shopit_users u
-      LEFT JOIN shopit_sellers s ON (u.id = s.user_id OR u.id = s.id OR LOWER(u.email) = LOWER(s.email))
-      LEFT JOIN (
-        SELECT seller_id, status FROM shopit_verifications WHERE status IN ('verified', 'approved') LIMIT 1
-      ) v ON (v.seller_id = u.id OR (s.id IS NOT NULL AND v.seller_id = s.id))
-      WHERE LOWER(u.email) = LOWER($1) OR u.id = $2
-    `;
-
-    const result = await dbQuery(query, [email, userId]);
-    if (result.rows.length === 0) {
-      return res.status(404).json({ status: false, message: 'User not found in database.' });
-    }
-
-    const row = result.rows[0];
-
-    const isVerified = Boolean(
-      row.user_is_verified ||
-      row.seller_is_verified ||
-      row.user_verification_status === 'verified' ||
-      row.user_verification_status === 'approved' ||
-      row.seller_verification_status === 'verified' ||
-      row.seller_verification_status === 'approved' ||
-      row.verif_submission_status === 'verified' ||
-      row.verif_submission_status === 'approved'
-    );
-
-    const currentStatus = isVerified
-      ? 'verified'
-      : (row.seller_verification_status || row.user_verification_status || 'not_started');
-
-    if (isVerified && (!row.user_is_verified || !row.seller_is_verified)) {
-      dbQuery(
-        "UPDATE shopit_users SET is_verified_seller = true, verification_status = 'verified' WHERE id = $1",
-        [row.id]
-      ).catch(() => {});
-      if (row.seller_id) {
-        dbQuery(
-          "UPDATE shopit_sellers SET is_verified_seller = true, verification_status = 'verified' WHERE id = $1",
-          [row.seller_id]
-        ).catch(() => {});
-      }
-    }
-
-    const sanitizedUser: any = {
-      id: row.id,
-      email: row.email,
-      name: row.name,
-      role: row.role === 'buyer' && isVerified ? 'seller' : row.role,
-      isVerifiedEmail: Boolean(row.is_verified_email),
-      isVerifiedSeller: isVerified,
-      verificationStatus: currentStatus,
-      isBanned: Boolean(row.is_banned),
-      banReason: row.ban_reason,
-      age: row.age,
-      hasGuardianConsent: Boolean(row.has_guardian_consent),
-      guardianName: row.guardian_name,
-      createdAt: row.created_at,
-      lastLoginAt: row.last_login_at,
-    };
-
-    if (row.role === 'seller' || row.seller_id || isVerified) {
-      sanitizedUser.sellerProfile = {
-        id: row.seller_id || row.id,
-        shopName: row.shop_name || `${row.name}'s Shop`,
-        verificationStatus: currentStatus,
-        isVerifiedSeller: isVerified,
-        bio: row.bio || '',
-        campus: row.campus || 'Lagos Mainland',
-        verifiedLegalName: row.verified_legal_name,
-        verifiedNinLast4: row.verified_nin_last4,
-        verifiedAt: row.verified_at,
-        badges: isVerified ? ['verified'] : [],
-      };
-    }
-
-    return res.json({
-      status: true,
-      user: sanitizedUser,
-      isVerifiedSeller: isVerified,
-      verificationStatus: currentStatus,
-    });
-  } catch (err: any) {
-    console.error('[Auth Me Error]:', err.message);
-    return res.status(500).json({ status: false, message: 'Database error fetching profile.' });
-  }
-});
-
-// POST /api/sellers/verify/submit - Submits NIMC NIN and selfie verification to PostgreSQL
-router.post('/sellers/verify/submit', async (req, res) => {
-  try {
-    const { sellerId, userId, ownerName, shopName, nin, idType, idCardPhotoUrl, selfiePhotoUrl, under18, guardianName, guardianPhone, guardianConsent } = req.body;
-    const targetId = sellerId || userId;
-    if (!targetId) {
-      return res.status(400).json({ status: false, message: 'sellerId is required' });
-    }
-
-    const reqId = `VERIF-${Date.now()}`;
-    const ninClean = String(nin || '').trim();
-    const ninLast4 = ninClean.length >= 4 ? ninClean.slice(-4) : ninClean;
-
-    // Upsert verification record in PostgreSQL
-    await dbQuery(
-      `INSERT INTO shopit_verifications (
-        id, seller_id, user_id, document_type, document_url, selfie_url, status, notes, created_at, updated_at
-      ) VALUES ($1, $2, $2, $3, $4, $5, 'pending', $6, NOW(), NOW())`,
-      [reqId, targetId, idType || 'nin_slip', idCardPhotoUrl || '', selfiePhotoUrl || '', `NIN ending in ${ninLast4}`]
-    );
-
-    // Update status in shopit_sellers
-    const updateRes = await dbQuery(
-      `UPDATE shopit_sellers
-       SET verification_status = 'pending',
-           verified_legal_name = $1,
-           verified_nin_last4 = $2,
-           under_18 = $3,
-           guardian_name = $4,
-           guardian_phone = $5,
-           guardian_consent = $6,
-           updated_at = NOW()
-       WHERE id = $7 OR user_id = $7`,
-      [ownerName || null, ninLast4, Boolean(under18), guardianName || null, guardianPhone || null, Boolean(guardianConsent), targetId]
-    );
-
-    if (updateRes.rowCount === 0) {
-      await dbQuery(
-        `INSERT INTO shopit_sellers (
-           id, user_id, shop_name, owner_name, email, is_verified_seller, verification_status, under_18, guardian_name, guardian_phone, guardian_consent, created_at, updated_at
-         )
-         SELECT u.id, u.id, COALESCE(u.name || '''s Shop', 'Artisan Shop'), u.name, u.email, false, 'pending', $1, $2, $3, $4, NOW(), NOW()
-         FROM shopit_users u
-         WHERE u.id = $5 OR LOWER(u.email) = LOWER($5)
-         ON CONFLICT (id) DO UPDATE SET verification_status = 'pending', updated_at = NOW()`,
-        [Boolean(under18), guardianName || null, guardianPhone || null, Boolean(guardianConsent), targetId]
-      );
-    }
-
-    console.log(`[Verification] Submitted NIN verification for seller ${targetId} (${shopName || ownerName})`);
-    return res.json({
-      status: true,
-      requestId: reqId,
-      message: 'Verification documents submitted and saved to PostgreSQL database.',
-    });
-  } catch (err: any) {
-    console.error('[Verification Submit Error]:', err.message);
-    return res.status(500).json({ status: false, message: err.message });
-  }
-});
-
-router.post('/admin/sellers/:id/verify', async (req, res) => {
+router.post('/admin/sellers/:id/verify', requireModerator, async (req: AuthenticatedRequest, res) => {
   try {
     const { id } = req.params;
     const { isVerified } = req.body;
     const status = isVerified ? 'verified' : 'rejected';
 
-    const updateRes = await dbQuery(
-      `UPDATE shopit_sellers
-       SET is_verified_seller = $1,
-           verification_status = $2,
-           verified_at = CASE WHEN $1 = true THEN NOW() ELSE NULL END,
-           updated_at = NOW()
-       WHERE id = $3 OR user_id = $3 OR LOWER(email) = LOWER($3)`,
-      [Boolean(isVerified), status, id]
-    );
-
-    // If no existing seller record in shopit_sellers, create it from shopit_users
-    if (updateRes.rowCount === 0) {
-      await dbQuery(
-        `INSERT INTO shopit_sellers (
-           id, user_id, shop_name, owner_name, email, is_verified_seller, verification_status, verified_at, created_at, updated_at
-         )
-         SELECT u.id, u.id, COALESCE(u.name || '''s Shop', 'Artisan Shop'), u.name, u.email, $1, $2, CASE WHEN $1 = true THEN NOW() ELSE NULL END, NOW(), NOW()
-         FROM shopit_users u
-         WHERE u.id = $3 OR LOWER(u.email) = LOWER($3)
-         ON CONFLICT (id) DO UPDATE SET is_verified_seller = $1, verification_status = $2, updated_at = NOW()`,
+    await withTransaction(async client => {
+      const updateRes = await client.query(
+        `UPDATE shopit_sellers
+         SET is_verified_seller = $1,
+             verification_status = $2,
+             verified_at = CASE WHEN $1 = true THEN NOW() ELSE NULL END,
+             updated_at = NOW()
+         WHERE id = $3 OR user_id = $3 OR LOWER(email) = LOWER($3)`,
         [Boolean(isVerified), status, id]
       );
-    }
 
-    // Also update shopit_users so the user is marked verified in all lookups
-    await dbQuery(
-      `UPDATE shopit_users
-       SET is_verified_seller = $1,
-           verification_status = $2,
-           role = CASE WHEN $1 = true AND role = 'buyer' THEN 'seller' ELSE role END,
-           updated_at = NOW()
-       WHERE id = $3 OR LOWER(email) = LOWER($3)
-          OR id IN (SELECT user_id FROM shopit_sellers WHERE id = $3)`,
-      [Boolean(isVerified), status, id]
-    );
+      if (updateRes.rowCount === 0) {
+        await client.query(
+          `INSERT INTO shopit_sellers (
+             id, user_id, shop_name, owner_name, email, is_verified_seller, verification_status, verified_at, created_at, updated_at
+           )
+           SELECT u.id, u.id, COALESCE(u.name || '''s Shop', 'Artisan Shop'), u.name, u.email, $1, $2, CASE WHEN $1 = true THEN NOW() ELSE NULL END, NOW(), NOW()
+           FROM shopit_users u
+           WHERE u.id = $3 OR LOWER(u.email) = LOWER($3)
+           ON CONFLICT (id) DO UPDATE SET is_verified_seller = $1, verification_status = $2, updated_at = NOW()`,
+          [Boolean(isVerified), status, id]
+        );
+      }
 
-    // Also update shopit_verifications if any
-    try {
-      await dbQuery(
-        `UPDATE shopit_verifications
-         SET status = $1, reviewed_at = NOW(), updated_at = NOW()
-         WHERE seller_id = $2 OR user_id = $2 OR id = $2`,
-        [status, id]
+      await client.query(
+        `UPDATE shopit_users
+         SET role = CASE WHEN $1 = true AND role = 'buyer' THEN 'seller' ELSE role END,
+             updated_at = NOW()
+         WHERE id = $2 OR LOWER(email) = LOWER($2) OR id IN (SELECT user_id FROM shopit_sellers WHERE id = $2)`,
+        [Boolean(isVerified), id]
       );
-    } catch {}
 
-    console.log(`[Admin Governance] Toggled seller verification in PostgreSQL for ${id}: ${isVerified}`);
+      await client.query(
+        `UPDATE shopit_verifications
+         SET status = $1, reviewed_by = $2, reviewed_at = NOW(), updated_at = NOW()
+         WHERE seller_id = $3 OR user_id = $3 OR id = $3`,
+        [status, req.user!.email, id]
+      );
+    });
+
+    await logAuditEvent({
+      action: isVerified ? 'ADMIN_SELLER_VERIFIED' : 'ADMIN_SELLER_REJECTED',
+      actor: { id: req.user!.userId, email: req.user!.email, role: req.user!.role },
+      target: { type: 'seller', id },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
+
     return res.json({
       status: true,
       isVerifiedSeller: Boolean(isVerified),
       verificationStatus: status,
-      message: `Seller verification updated to ${isVerified} in PostgreSQL database.`,
+      message: `Seller verification updated to ${Boolean(isVerified)}.`,
     });
   } catch (err: any) {
     return res.status(500).json({ status: false, message: err.message });
   }
 });
 
-router.all('/admin/users/wipe-non-admins', (_req, res) => {
+router.all('/admin/users/wipe-non-admins', requireAdmin, (_req: AuthenticatedRequest, res) => {
   return res.status(410).json({
     status: false,
     error: 'ENDPOINT_DISABLED',
@@ -1145,31 +1021,23 @@ router.all('/admin/users/wipe-non-admins', (_req, res) => {
   });
 });
 
-// GET /api/admin/metrics - Live counts and database health (STEP 2 ITEM 6)
-router.get('/admin/metrics', async (_req, res) => {
+router.get('/admin/metrics', requireModerator, async (_req: AuthenticatedRequest, res) => {
   try {
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
 
     const [userStats, sellerStats, verifStats] = await Promise.all([
-      dbQuery(`
-        SELECT
+      dbQuery(
+        `SELECT
           COUNT(*) as total_users,
           COUNT(CASE WHEN created_at >= $1 THEN 1 END) as new_today,
           COUNT(CASE WHEN role = 'seller' THEN 1 END) as total_sellers,
           COUNT(CASE WHEN role = 'buyer' THEN 1 END) as total_buyers
-        FROM shopit_users
-      `, [todayStart.toISOString()]),
-      dbQuery(`
-        SELECT
-          COUNT(CASE WHEN verification_status = 'verified' THEN 1 END) as verified_sellers
-        FROM shopit_sellers
-      `),
-      dbQuery(`
-        SELECT
-          COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending_verifications
-        FROM shopit_verifications
-      `),
+        FROM shopit_users`,
+        [todayStart.toISOString()]
+      ),
+      dbQuery(`SELECT COUNT(CASE WHEN verification_status = 'verified' THEN 1 END) as verified_sellers FROM shopit_sellers`),
+      dbQuery(`SELECT COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending_verifications FROM shopit_verifications`),
     ]);
 
     const pgPing = await pingPostgres();
@@ -1192,7 +1060,6 @@ router.get('/admin/metrics', async (_req, res) => {
         provider: pgPing.provider,
         databaseUrlConfigured: Boolean(getDatabaseUrl()),
         redisConfigured: Boolean(process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL),
-        configuredDbEnvVar: getDatabaseUrl() ? 'Configured' : 'Missing (DATABASE_URL)',
       },
     });
   } catch (err: any) {
@@ -1201,359 +1068,1196 @@ router.get('/admin/metrics', async (_req, res) => {
   }
 });
 
+router.get('/admin/export-data', requireAdmin, async (req: AuthenticatedRequest, res) => {
+  try {
+    const [payRes, repRes, verifRes, ordRes] = await Promise.all([
+      dbQuery('SELECT reference, order_id, amount_kobo, amount_naira, currency, channel, status, webhook_received, created_at FROM shopit_payments ORDER BY created_at DESC LIMIT 500'),
+      dbQuery('SELECT id, target_type, target_id, target_title, reason, status, created_at FROM shopit_reports ORDER BY created_at DESC LIMIT 500'),
+      dbQuery('SELECT id, seller_id, shop_name, owner_name, id_type, id_number_masked, under_18, status, submitted_at, reviewed_at FROM shopit_verifications ORDER BY submitted_at DESC LIMIT 500'),
+      dbQuery('SELECT id, buyer_id, subtotal_kobo, service_fee_kobo, delivery_fee_kobo, grand_total_kobo, status, payment_reference, created_at FROM shopit_orders ORDER BY created_at DESC LIMIT 500'),
+    ]);
 
-// 1. GET /paystack/config - Public client-safe config
-router.get('/paystack/config', (_req, res) => {
+    const exportPayload = {
+      version: '2.0',
+      exportedAt: new Date().toISOString(),
+      exportedBy: req.user!.email,
+      platform: 'Shop It Nigeria (TEEDS)',
+      summary: {
+        totalPayments: payRes.rows.length,
+        totalReports: repRes.rows.length,
+        totalVerifications: verifRes.rows.length,
+        totalOrders: ordRes.rows.length,
+      },
+      payments: payRes.rows,
+      reports: repRes.rows,
+      verifications: verifRes.rows,
+      orders: ordRes.rows,
+    };
+
+    await logAuditEvent({
+      action: 'ADMIN_DATA_EXPORTED',
+      actor: { id: req.user!.userId, email: req.user!.email, role: req.user!.role },
+      target: { type: 'system', id: 'export' },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
+
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Disposition', `attachment; filename="shopit-backup-${Date.now()}.json"`);
+    return res.send(JSON.stringify(exportPayload, null, 2));
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: err.message });
+  }
+});
+
+// ============================================================================
+// PAYMENTS / ESCROW / PAYOUTS / REFUND ROUTES
+// ============================================================================
+
+router.get('/payments/config', (_req, res) => {
   res.json({
     status: true,
-    publicKey: PAYSTACK_PUBLIC_KEY,
-    isSecretConfigured: Boolean(PAYSTACK_SECRET_KEY),
-    isWebhookSecretConfigured: Boolean(PAYSTACK_WEBHOOK_SECRET),
-    webhookPath: '/api/paystack/webhook',
-    webhookUrl: `${APP_URL}/api/paystack/webhook`,
+    gateway: 'flutterwave',
+    publicKey: getFlwPublicKey(),
+    isSecretConfigured: Boolean(getFlwSecretKey()),
+    isWebhookSecretConfigured: Boolean(getFlwWebhookHash()),
+    webhookPath: '/api/payments/webhook',
+    webhookUrl: `${APP_URL}/api/payments/webhook`,
     minWithdrawal: 1000,
     coolingPeriodHours: 24,
   });
 });
 
-// 2. GET /paystack/webhook-info
-router.get('/paystack/webhook-info', (_req, res) => {
+router.get('/payments/webhook-info', (_req, res) => {
   res.json({
-    webhookPath: '/api/paystack/webhook',
-    webhookUrl: `${APP_URL}/api/paystack/webhook`,
+    gateway: 'flutterwave',
+    webhookPath: '/api/payments/webhook',
+    webhookUrl: `${APP_URL}/api/payments/webhook`,
     method: 'POST',
-    signatureHeader: 'x-paystack-signature',
-    instructions:
-      'In Paystack Dashboard -> Settings -> API Keys & Webhooks -> Live Webhook URL, paste this exact Webhook URL.',
-    isConfigured: Boolean(PAYSTACK_SECRET_KEY),
+    signatureHeader: 'verif-hash',
+    isConfigured: Boolean(getFlwSecretKey() && getFlwWebhookHash()),
   });
 });
 
-// 3. POST /paystack/initialize - Starts payment from server & computes kobo amount on server
-router.post('/paystack/initialize', async (req, res) => {
-  if (process.env.PAYMENTS_ENABLED !== 'true') {
+router.get('/payments/banks', requireAuth, async (_req: AuthenticatedRequest, res) => {
+  const flwSecret = getFlwSecretKey();
+  if (!flwSecret) {
     return res.status(503).json({
       status: false,
-      error: 'PAYMENTS_DISABLED',
-      message: 'Online payments are coming soon. Arrange directly with the seller',
+      error: 'PAYMENT_GATEWAY_NOT_CONFIGURED',
+      message: 'Bank directory is unavailable because FLW_SECRET_KEY is not configured.',
     });
   }
 
   try {
-    const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
-    if (!checkRateLimit(clientIp)) {
-      return res.status(429).json({
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    let bankRes: Response;
+    let bankData: any;
+    try {
+      bankRes = await fetch('https://api.flutterwave.com/v3/banks/NG', {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${flwSecret}`,
+          'Content-Type': 'application/json',
+        },
+        signal: controller.signal,
+      });
+      bankData = await bankRes.json().catch(() => ({}));
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    if (!bankRes.ok || bankData?.status !== 'success' || !Array.isArray(bankData?.data)) {
+      return res.status(502).json({
         status: false,
-        message: 'Too many payment requests from this IP. Please wait a moment before trying again.',
+        message: bankData?.message || 'Unable to load supported Nigerian banks from Flutterwave.',
       });
     }
 
-    const { email, items, couponCode, campus, deliveryArea, pickupPoint, orderId } = req.body;
+    const banks = bankData.data
+      .filter((b: any) => b && b.code && b.name)
+      .map((b: any) => ({
+        code: String(b.code).trim(),
+        name: String(b.name).trim(),
+      }))
+      .sort((a: { name: string }, b: { name: string }) => a.name.localeCompare(b.name));
 
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!email || typeof email !== 'string' || !emailRegex.test(email.trim())) {
-      return res.status(400).json({ status: false, message: 'A valid email address is required for checkout' });
-    }
+    return res.json({ status: true, banks });
+  } catch (err: any) {
+    return res.status(502).json({ status: false, message: `Bank list lookup failed: ${err.message}` });
+  }
+});
 
-    if (!items || !Array.isArray(items) || items.length === 0) {
-      return res.status(400).json({ status: false, message: 'Cart items are required for checkout' });
-    }
-
-    for (const item of items) {
-      const p = Number(item.sellerPrice);
-      if (isNaN(p) || p <= 0) {
-        return res.status(400).json({ status: false, message: 'Invalid item price detected in cart' });
-      }
-    }
-
-    const pricing = calculateServerPrice({ items, couponCode });
-    const assignedOrderId = orderId || `ORD_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
-    const reference = `SHOPIT_${Date.now()}_${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
-
-    const newServerOrder: ServerOrder = {
-      orderId: assignedOrderId,
-      reference,
-      email: email.trim().toLowerCase(),
-      items,
-      campus: campus || 'Lagos Mainland (Yaba / Akoka)',
-      deliveryArea,
-      pickupPoint,
-      subtotal: pricing.subtotal,
-      serviceFeeTotal: pricing.serviceFeeTotal,
-      deliveryTotal: pricing.deliveryTotal,
-      discountTotal: pricing.discountTotal,
-      couponCode,
-      grandTotalNaira: pricing.grandTotalNaira,
-      amountInKobo: pricing.amountInKobo,
-      status: 'pending_payment',
-      paymentMethod: 'paystack_inline',
-      createdAt: new Date().toISOString(),
-    };
-
-    serverOrders.set(assignedOrderId, newServerOrder);
-    serverOrdersByRef.set(reference, newServerOrder);
-
-    // Persist pending payment record to PostgreSQL / KV database
-    await savePaymentRecord({
-      reference,
-      orderId: assignedOrderId,
-      amountKobo: pricing.amountInKobo,
-      amountNaira: pricing.grandTotalNaira,
-      currency: 'NGN',
-      channel: 'card,bank_transfer,ussd',
-      status: 'pending_payment',
-      webhookReceived: false,
-      customerEmail: email.trim().toLowerCase(),
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+router.post('/payments/resolve-account', requireAuth, async (req: AuthenticatedRequest, res) => {
+  const flwSecret = getFlwSecretKey();
+  if (!flwSecret) {
+    return res.status(503).json({
+      status: false,
+      error: 'PAYMENT_GATEWAY_NOT_CONFIGURED',
+      message: 'Account resolution requires FLW_SECRET_KEY.',
     });
+  }
 
-    if (PAYSTACK_SECRET_KEY) {
-      try {
-        const paystackRes = await fetch('https://api.paystack.co/transaction/initialize', {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            email: email.trim().toLowerCase(),
-            amount: pricing.amountInKobo,
-            currency: 'NGN',
-            reference,
-            callback_url: `${APP_URL}/orders?ref=${reference}`,
-            channels: ['card', 'bank_transfer', 'ussd'],
-            metadata: {
-              orderId: assignedOrderId,
-              campus: campus || 'Nigeria',
-              custom_fields: [
-                { display_name: 'Order ID', variable_name: 'order_id', value: assignedOrderId },
-                { display_name: 'Delivery Area', variable_name: 'delivery_area', value: deliveryArea || 'Campus' },
-              ],
-            },
-          }),
-        });
+  const accountNumber = String(req.body?.accountNumber || '').trim();
+  const bankCode = String(req.body?.bankCode || '').trim();
 
-        const paystackData: any = await paystackRes.json();
+  if (!/^\d{10}$/.test(accountNumber) || !bankCode) {
+    return res.status(400).json({ status: false, message: 'Valid 10-digit accountNumber and bankCode are required.' });
+  }
 
-        if (paystackData.status && paystackData.data) {
-          newServerOrder.authorizationUrl = paystackData.data.authorization_url;
-          newServerOrder.accessCode = paystackData.data.access_code;
-
-          const responseData = {
-            reference,
-            orderId: assignedOrderId,
-            amountInKobo: pricing.amountInKobo,
-            amountNaira: pricing.grandTotalNaira,
-            accessCode: paystackData.data.access_code,
-            access_code: paystackData.data.access_code,
-            authorizationUrl: paystackData.data.authorization_url,
-            authorization_url: paystackData.data.authorization_url,
-            publicKey: PAYSTACK_PUBLIC_KEY,
-            pricing,
-          };
-
-          return res.json({
-            status: true,
-            ...responseData,
-            data: responseData,
-          });
-        } else {
-          console.warn('Paystack API initialize failed:', paystackData.message);
-        }
-      } catch (apiErr: any) {
-        console.error('Paystack initialize fetch error:', apiErr.message);
-      }
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    let resolveRes: Response;
+    let resolveData: any;
+    try {
+      resolveRes = await fetch('https://api.flutterwave.com/v3/accounts/resolve', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${flwSecret}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          account_number: accountNumber,
+          account_bank: bankCode,
+        }),
+        signal: controller.signal,
+      });
+      resolveData = await resolveRes.json().catch(() => ({}));
+    } finally {
+      clearTimeout(timeout);
     }
 
-    const transferDetails = {
-      bankName: 'Wema Bank (Paystack Escrow)',
-      accountNumber: `012${Math.floor(1000000 + Math.random() * 9000000)}`,
-      accountName: `Shop It Escrow - ${assignedOrderId.slice(-6)}`,
-      expiresInMinutes: 30,
-    };
-
-    const ussdDetails = {
-      gtb: `*737*000*${assignedOrderId.slice(-4)}#`,
-      zenith: `*966*000*${assignedOrderId.slice(-4)}#`,
-      access: `*901*000*${assignedOrderId.slice(-4)}#`,
-      uba: `*919*000*${assignedOrderId.slice(-4)}#`,
-    };
-
-    const fallbackData = {
-      reference,
-      orderId: assignedOrderId,
-      amountInKobo: pricing.amountInKobo,
-      amountNaira: pricing.grandTotalNaira,
-      publicKey: PAYSTACK_PUBLIC_KEY,
-      authorizationUrl: `${APP_URL}/orders?ref=${encodeURIComponent(reference)}`,
-      authorization_url: `${APP_URL}/orders?ref=${encodeURIComponent(reference)}`,
-      pricing,
-      transferDetails,
-      ussdDetails,
-    };
+    if (!resolveRes.ok || resolveData?.status !== 'success' || !resolveData?.data?.account_name) {
+      return res.status(400).json({
+        status: false,
+        message: resolveData?.message || 'Could not resolve Nigerian bank account with Flutterwave.',
+      });
+    }
 
     return res.json({
       status: true,
-      ...fallbackData,
-      data: fallbackData,
+      accountNumber: String(resolveData.data.account_number || accountNumber),
+      accountName: String(resolveData.data.account_name).trim(),
+      bankCode,
     });
   } catch (err: any) {
-    console.error('Error in /api/paystack/initialize:', err.message);
-    return res.status(500).json({ status: false, message: 'Internal server error initializing payment' });
+    return res.status(502).json({ status: false, message: `Account verification error: ${err.message}` });
   }
 });
 
-// 4. Paystack Webhook - Delegated directly to the Vercel serverless function handler
-router.all('/paystack/webhook', async (req: any, res: any) => {
-  if (process.env.PAYMENTS_ENABLED !== 'true') {
-    return res.status(503).json({
-      status: false,
-      error: 'PAYMENTS_DISABLED',
-      message: 'Online payments are coming soon. Arrange directly with the seller',
-    });
-  }
-  return paystackWebhookHandler(req, res);
-});
-
-// Production Transactional Email Dispatcher (Brevo API with server log fallback)
-async function sendBrevoEmail(
-  to: string,
-  subject: string,
-  text: string,
-  html: string,
-  toName?: string
-): Promise<{ success: boolean; messageId?: string; simulated?: boolean }> {
-  const apiKey = (process.env.BREVO_API_KEY || '').trim().replace(/^["']|["']$/g, '');
-  const emailFrom = (process.env.EMAIL_FROM || 'shopitverified@gmail.com').trim().replace(/^["']|["']$/g, '');
-  const emailFromName = (process.env.EMAIL_FROM_NAME || 'Shop It').trim().replace(/^["']|["']$/g, '');
-
-  if (
-    !apiKey ||
-    apiKey.includes('4966601cb843ea84411d3fa54e1ae024f227b0b9ca31a0ea4c16d00473215264') ||
-    apiKey.includes('xkeysib-...')
-  ) {
-    console.log(`[Brevo Email (Server Log Mode)] To: ${to} (${toName || 'User'}) | Subject: ${subject}`);
-    console.log(`[Brevo Email Content]\n${text}\n----------------------------------------`);
-    return { success: true, messageId: `sim_${Date.now()}`, simulated: true };
-  }
-
+router.post('/payments/initialize', requirePaymentsEnabled, requireAuth, async (req: AuthenticatedRequest, res) => {
   try {
-    const response = await fetch('https://api.brevo.com/v3/smtp/email', {
-      method: 'POST',
-      headers: {
-        'api-key': apiKey,
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
-      body: JSON.stringify({
-        sender: {
-          name: emailFromName,
-          email: emailFrom,
-        },
-        to: [
-          {
-            email: to,
-            name: toName || to.split('@')[0],
-          },
-        ],
-        subject,
-        textContent: text,
-        htmlContent: html,
-      }),
-    });
-
-    if (!response.ok) {
-      let errBody: any = {};
-      try {
-        errBody = await response.json();
-      } catch {
-        errBody = { message: response.statusText };
-      }
-      console.error('[Brevo Error] Status:', response.status, 'Error:', errBody?.message || response.statusText);
-      // Fallback log so email content is never lost even if Brevo returns error
-      console.log(`[Brevo Email Fallback Log] To: ${to} | Subject: ${subject}\n${text}`);
-      return { success: false, messageId: undefined };
+    const user = req.user!;
+    const rl = await checkAndRecordRateLimit(`pay_init:${user.userId}`, 20, 5 * 60 * 1000);
+    if (!rl.allowed) {
+      return res.status(429).json({ status: false, message: 'Too many checkout attempts. Please wait a minute.' });
     }
 
-    const data: any = await response.json().catch(() => ({}));
-    return { success: true, messageId: data?.messageId };
-  } catch (netErr: any) {
-    console.error('[Brevo Network Error]:', netErr.message);
-    console.log(`[Brevo Email Fallback Log] To: ${to} | Subject: ${subject}\n${text}`);
-    return { success: false, messageId: undefined };
-  }
-}
+    const flwSecret = getFlwSecretKey();
+    if (!flwSecret) {
+      return res.status(503).json({
+        status: false,
+        error: 'PAYMENT_GATEWAY_NOT_CONFIGURED',
+        message: 'Payment gateway is not configured on this server.',
+      });
+    }
 
-// Global de-duplicated admin alert dispatcher (Part 2 Item 5)
-const sentAdminAlertKeys = new Set<string>();
+    const { items, couponCode, campus, deliveryArea, pickupPoint, paymentMethod } = req.body;
+    const buyerEmail = user.email;
 
-export async function sendAdminAlert(
-  key: string,
-  subject: string,
-  htmlDetails: string
-): Promise<void> {
-  if (sentAdminAlertKeys.has(key)) return;
-  sentAdminAlertKeys.add(key);
+    if (!items || !Array.isArray(items) || items.length === 0 || items.length > 50) {
+      return res.status(400).json({ status: false, message: 'Valid cart items are required.' });
+    }
 
-  const adminEmail = 'shopitverified@gmail.com';
-  try {
-    await sendBrevoEmail(
-      adminEmail,
-      `[Shop It Alert] ${subject}`,
-      subject,
-      `<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; padding: 24px; color: #1e293b; max-width: 600px; border: 1px solid #e2e8f0; border-radius: 12px;">
-        <div style="margin-bottom: 16px;">
-          <span style="background: #FF6B00; color: #ffffff; padding: 4px 8px; border-radius: 6px; font-size: 11px; font-weight: 800; text-transform: uppercase;">Admin Notification</span>
-          <h2 style="color: #0f172a; margin: 8px 0 0; font-size: 18px;">${subject}</h2>
-        </div>
-        <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 14px; font-size: 14px; line-height: 1.6;">
-          ${htmlDetails}
-        </div>
-        <div style="margin-top: 20px; padding-top: 14px; border-top: 1px solid #e2e8f0; color: #64748b; font-size: 12px;">
-          Shop It Operations & Safety Alert · Sent to <strong>${adminEmail}</strong>
-        </div>
-      </div>`,
-      'Shop It Admin'
-    );
+    const initializedOrder = await withTransaction(async client => {
+      const resolvedItems: any[] = [];
+      const sellerGroups = new Map<string, { deliveryFeeKobo: number }>();
+
+      let subtotalKobo = 0;
+      let serviceFeeKobo = 0;
+
+      for (const reqItem of items) {
+        const productId = String(reqItem.productId || '').trim();
+        const qty = Math.max(1, Math.min(50, Math.floor(Number(reqItem.quantity) || 1)));
+        const deliveryMethod = reqItem.deliveryMethod === 'pickup' ? 'pickup' : 'delivery';
+
+        if (!productId) {
+          throw Object.assign(new Error('Each cart item must include productId.'), { statusCode: 400 });
+        }
+
+        const pRes = await client.query(
+          `SELECT id, seller_id, seller_shop_name, seller_campus, title, images,
+                  seller_price, stock, is_sold_out, delivery_pickup_fee, delivery_local_fee
+           FROM shopit_products
+           WHERE id = $1
+           FOR UPDATE`,
+          [productId]
+        );
+
+        if (pRes.rows.length === 0) {
+          throw Object.assign(new Error(`Product "${productId}" was not found.`), { statusCode: 404 });
+        }
+
+        const p = pRes.rows[0];
+        if (String(p.seller_id) === String(user.userId) || (user.sellerId && String(p.seller_id) === String(user.sellerId))) {
+          throw Object.assign(new Error('You cannot buy your own product.'), { statusCode: 400 });
+        }
+
+        const currentStock = Math.max(0, parseInt(String(p.stock || '0'), 10));
+        if (Boolean(p.is_sold_out) || currentStock < qty) {
+          throw Object.assign(new Error(`"${p.title}" does not have enough stock available.`), { statusCode: 400 });
+        }
+
+        const nextStock = currentStock - qty;
+        await client.query(
+          'UPDATE shopit_products SET stock = $1, is_sold_out = $2, updated_at = NOW() WHERE id = $3',
+          [nextStock, nextStock <= 0, p.id]
+        );
+
+        const sellerPriceKobo = nairaToKobo(p.seller_price);
+        if (sellerPriceKobo <= 0) {
+          throw Object.assign(new Error(`Invalid server price on "${p.title}".`), { statusCode: 400 });
+        }
+
+        const itemServiceFeeKobo = calculateTieredServiceFeeKobo(sellerPriceKobo);
+        subtotalKobo += sellerPriceKobo * qty;
+        serviceFeeKobo += itemServiceFeeKobo * qty;
+
+        const rawDeliveryNaira =
+          deliveryMethod === 'pickup'
+            ? Number(p.delivery_pickup_fee || 200)
+            : Number(p.delivery_local_fee || 500);
+        const itemDeliveryKobo = Math.max(
+          0,
+          nairaToKobo(rawDeliveryNaira > 0 ? rawDeliveryNaira : deliveryMethod === 'pickup' ? 200 : 500)
+        );
+
+        const sKey = String(p.seller_id);
+        const prevGroup = sellerGroups.get(sKey);
+        if (!prevGroup || itemDeliveryKobo > prevGroup.deliveryFeeKobo) {
+          sellerGroups.set(sKey, { deliveryFeeKobo: itemDeliveryKobo });
+        }
+
+        resolvedItems.push({
+          productId: p.id,
+          title: p.title,
+          image: Array.isArray(p.images) ? p.images[0] || '' : '',
+          sellerId: p.seller_id,
+          sellerShopName: p.seller_shop_name || 'Artisan Shop',
+          sellerCampus: p.seller_campus || campus || 'Campus',
+          quantity: qty,
+          sellerPrice: koboToNaira(sellerPriceKobo),
+          sellerPriceKobo,
+          serviceFee: koboToNaira(itemServiceFeeKobo),
+          displayPrice: koboToNaira(sellerPriceKobo + itemServiceFeeKobo),
+          deliveryMethod,
+          deliveryFee: koboToNaira(itemDeliveryKobo),
+        });
+      }
+
+      let deliveryTotalKobo = 0;
+      for (const group of sellerGroups.values()) {
+        deliveryTotalKobo += group.deliveryFeeKobo;
+      }
+
+      let discountTotalKobo = 0;
+      let appliedCouponCode: string | null = null;
+      if (couponCode && String(couponCode).trim()) {
+        const cleanCode = String(couponCode).trim().toUpperCase();
+        const cRes = await client.query(
+          'SELECT code, discount_kobo, min_subtotal_kobo, is_active, max_uses, current_uses, expires_at FROM shopit_coupons WHERE code = $1',
+          [cleanCode]
+        );
+        const c = cRes.rows[0];
+        if (
+          c &&
+          c.is_active &&
+          subtotalKobo >= Number(c.min_subtotal_kobo) &&
+          (!c.expires_at || new Date(c.expires_at).getTime() > Date.now()) &&
+          (!c.max_uses || Number(c.current_uses) < Number(c.max_uses))
+        ) {
+          discountTotalKobo = Math.min(Number(c.discount_kobo), subtotalKobo);
+          appliedCouponCode = cleanCode;
+        }
+      }
+
+      const grandTotalKobo = Math.max(10000, subtotalKobo + serviceFeeKobo + deliveryTotalKobo - discountTotalKobo);
+      const orderId = `ORD-${Date.now()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+      const reference = `SHOPIT_${Date.now()}_${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+      const handshakeOtp = String(crypto.randomInt(1000, 10000));
+      const maskedBuyerId = `Buyer #${user.userId.slice(-4).toUpperCase()}`;
+
+      await client.query(
+        `INSERT INTO shopit_orders (
+          id, buyer_id, buyer_name, buyer_email, buyer_masked_id, items,
+          subtotal, subtotal_kobo, service_fee_total, service_fee_kobo,
+          delivery_total, delivery_fee_kobo, discount_total, discount_total_kobo, coupon_code,
+          grand_total, grand_total_kobo, payment_method, payment_reference,
+          handshake_otp, handshake_verified, status, stock_reserved, expires_at,
+          campus, delivery_area, pickup_point, created_at, updated_at
+        ) VALUES (
+          $1, $2, $3, $4, $5, $6,
+          $7, $8, $9, $10,
+          $11, $12, $13, $14, $15,
+          $16, $17, $18, $19,
+          $20, false, 'pending_payment', true, NOW() + INTERVAL '30 minutes',
+          $21, $22, $23, NOW(), NOW()
+        )`,
+        [
+          orderId,
+          user.userId,
+          user.name,
+          buyerEmail,
+          maskedBuyerId,
+          JSON.stringify(resolvedItems),
+          koboToNaira(subtotalKobo),
+          subtotalKobo,
+          koboToNaira(serviceFeeKobo),
+          serviceFeeKobo,
+          koboToNaira(deliveryTotalKobo),
+          deliveryTotalKobo,
+          koboToNaira(discountTotalKobo),
+          discountTotalKobo,
+          appliedCouponCode,
+          koboToNaira(grandTotalKobo),
+          grandTotalKobo,
+          paymentMethod || 'flutterwave_card',
+          reference,
+          handshakeOtp,
+          campus || 'Lagos Mainland',
+          deliveryArea || campus || 'Campus Hub',
+          pickupPoint || 'Main Security Gate Hub',
+        ]
+      );
+
+      await client.query(
+        `INSERT INTO shopit_payments (
+          reference, order_id, amount_kobo, amount_naira, currency, channel, status, webhook_received, customer_email, updated_at
+        ) VALUES ($1, $2, $3, $4, 'NGN', $5, 'pending_payment', false, $6, NOW())`,
+        [reference, orderId, grandTotalKobo, koboToNaira(grandTotalKobo), paymentMethod || 'card', buyerEmail]
+      );
+
+      return {
+        orderId,
+        reference,
+        resolvedItems,
+        pricing: {
+          subtotal: koboToNaira(subtotalKobo),
+          serviceFeeTotal: koboToNaira(serviceFeeKobo),
+          deliveryTotal: koboToNaira(deliveryTotalKobo),
+          discountTotal: koboToNaira(discountTotalKobo),
+          grandTotalNaira: koboToNaira(grandTotalKobo),
+          amountInKobo: grandTotalKobo,
+        },
+      };
+    });
+
+    // Call official Flutterwave v3 Standard Hosted Checkout API
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 12000);
+    let flwRes: Response | null = null;
+    let flwData: any = {};
+    try {
+      flwRes = await fetch('https://api.flutterwave.com/v3/payments', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${flwSecret}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          tx_ref: initializedOrder.reference,
+          amount: initializedOrder.pricing.grandTotalNaira,
+          currency: 'NGN',
+          redirect_url: `${APP_URL}/?view=orders&payment_ref=${encodeURIComponent(initializedOrder.reference)}`,
+          payment_options: 'card, banktransfer, ussd, opay',
+          customer: {
+            email: buyerEmail,
+            name: user.name || 'Shop It Buyer',
+          },
+          customizations: {
+            title: 'Shop It Escrow Checkout',
+            description: `Order #${initializedOrder.orderId} (${campus || 'Nigeria'})`,
+          },
+          meta: {
+            orderId: initializedOrder.orderId,
+            buyerId: user.userId,
+            campus: campus || 'Nigeria',
+          },
+        }),
+        signal: controller.signal,
+      });
+      flwData = await flwRes.json().catch(() => ({}));
+    } catch (gatewayErr: any) {
+      flwData = { message: gatewayErr?.message || 'Flutterwave API timeout or connection error.' };
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    if (!flwRes || !flwRes.ok || flwData?.status !== 'success' || !flwData?.data?.link) {
+      await withTransaction(async client => {
+        await restoreOrderStockInTx(client, {
+          id: initializedOrder.orderId,
+          items: initializedOrder.resolvedItems,
+          stock_reserved: true,
+        });
+        await client.query(
+          "UPDATE shopit_orders SET status = 'cancelled', stock_reserved = false, notes = 'Gateway init failed', updated_at = NOW() WHERE id = $1",
+          [initializedOrder.orderId]
+        );
+        await client.query("UPDATE shopit_payments SET status = 'failed', updated_at = NOW() WHERE reference = $1", [
+          initializedOrder.reference,
+        ]);
+      }).catch(() => {});
+
+      return res.status(502).json({
+        status: false,
+        message: flwData?.message || 'Unable to initialize payment with Flutterwave. Please try again.',
+      });
+    }
+
+    const responseData = {
+      gateway: 'flutterwave',
+      reference: initializedOrder.reference,
+      orderId: initializedOrder.orderId,
+      amountInKobo: initializedOrder.pricing.amountInKobo,
+      amountNaira: initializedOrder.pricing.grandTotalNaira,
+      grandTotalNaira: initializedOrder.pricing.grandTotalNaira,
+      authorizationUrl: flwData.data.link,
+      authorization_url: flwData.data.link,
+      publicKey: getFlwPublicKey(),
+      pricing: initializedOrder.pricing,
+    };
+
+    return res.json({ status: true, ...responseData, data: responseData });
   } catch (err: any) {
-    console.warn('[Admin Alert Brevo Warning]', err.message);
+    const code = err?.statusCode || 500;
+    if (code >= 500) console.error('[Payment Init Error]:', err.message);
+    return res.status(code).json({ status: false, message: err.message || 'Internal server error initializing payment.' });
   }
-}
+});
 
-// 4c. POST /email/send - Handles all 15 platform transactional emails via Brevo
-router.post('/email/send', async (req, res) => {
+router.all('/payments/webhook', requirePaymentsEnabled, async (req: any, res: any) => {
+  return paymentsWebhookHandler(req, res);
+});
+
+router.get('/payments/verify/:reference', requirePaymentsEnabled, requireAuth, async (req: AuthenticatedRequest, res) => {
   try {
-    const { to, template, data, subject: customSubject, text: customText, html: customHtml, toName } = req.body;
-    if (!to) {
-      return res.status(400).json({ status: false, message: 'Recipient "to" is required' });
+    const user = req.user!;
+    const { reference } = req.params;
+    const transactionId = req.query.transaction_id ? String(req.query.transaction_id).trim() : '';
+
+    if (!reference) {
+      return res.status(400).json({ status: false, message: 'Reference is required.' });
+    }
+
+    const orderRes = await dbQuery('SELECT * FROM shopit_orders WHERE payment_reference = $1', [reference]);
+    if (orderRes.rows.length === 0) {
+      return res.status(404).json({ status: false, message: 'Payment reference not found.' });
+    }
+
+    const order = orderRes.rows[0];
+    if (order.buyer_id !== user.userId && user.role !== 'admin') {
+      return res.status(403).json({ status: false, message: 'Forbidden: you cannot verify another buyer’s order.' });
+    }
+
+    if (['paid', 'packed', 'shipped', 'delivered', 'completed'].includes(order.status)) {
+      return res.json({
+        status: true,
+        isPaid: true,
+        orderStatus: order.status,
+        reference,
+        orderId: order.id,
+        amountInKobo: Number(order.grand_total_kobo || nairaToKobo(order.grand_total)),
+        amountNaira: Number(order.grand_total),
+        currency: 'NGN',
+        message: 'Transaction already verified and paid.',
+      });
+    }
+
+    const flwSecret = getFlwSecretKey();
+    if (!flwSecret) {
+      return res.status(503).json({ status: false, message: 'Payment verification secret not configured.' });
+    }
+
+    const verifyUrl = transactionId
+      ? `https://api.flutterwave.com/v3/transactions/${encodeURIComponent(transactionId)}/verify`
+      : `https://api.flutterwave.com/v3/transactions/verify_by_reference?tx_ref=${encodeURIComponent(reference)}`;
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    let verifyRes: Response;
+    let verifyData: any;
+    try {
+      verifyRes = await fetch(verifyUrl, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${flwSecret}`, 'Content-Type': 'application/json' },
+        signal: controller.signal,
+      });
+      verifyData = await verifyRes.json().catch(() => ({}));
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    if (!verifyRes.ok || verifyData?.status !== 'success' || verifyData?.data?.status !== 'successful') {
+      if (order.status === 'cancelled') {
+        return res.status(409).json({
+          status: false,
+          isPaid: false,
+          expired: true,
+          orderStatus: 'cancelled',
+          message: 'Checkout order expired or was cancelled before payment.',
+        });
+      }
+      return res.json({
+        status: true,
+        isPaid: false,
+        orderStatus: order.status,
+        gatewayStatus: verifyData?.data?.status || 'pending',
+        message: verifyData?.message || 'Payment not yet confirmed with Flutterwave.',
+      });
+    }
+
+    if (String(verifyData.data.tx_ref || '').trim() !== reference) {
+      return res.status(400).json({ status: false, isPaid: false, message: 'Verified tx_ref mismatch.' });
+    }
+
+    const confirmedAmountKobo = Math.round(Number(verifyData.data.amount || 0) * 100);
+    const channel = String(verifyData.data.payment_type || 'card');
+
+    const settlement = await commitPaidOrderTransaction({
+      reference,
+      confirmedAmountKobo,
+      currency: String(verifyData.data.currency || '').toUpperCase(),
+      channel,
+      webhookReceived: false,
+      customerEmail: verifyData.data.customer?.email || user.email,
+      gatewayData: {
+        flwTransactionId: verifyData.data.id,
+        flwRef: verifyData.data.flw_ref,
+        processorResponse: verifyData.data.processor_response,
+        paymentType: channel,
+      },
+      source: 'verify_endpoint',
+    });
+
+    if (settlement.currencyMismatch || settlement.amountMismatch) {
+      return res.status(400).json({ status: false, isPaid: false, message: 'Currency or paid amount mismatch.' });
+    }
+
+    if (settlement.expired) {
+      return res.status(409).json({
+        status: false,
+        isPaid: false,
+        expired: true,
+        orderStatus: 'cancelled',
+        message: 'Order expired before payment cleared and has been flagged for admin refund.',
+      });
+    }
+
+    return res.json({
+      status: true,
+      isPaid: Boolean(settlement.committed || settlement.alreadyPaid),
+      orderStatus: 'paid',
+      reference,
+      orderId: order.id,
+      amountInKobo: confirmedAmountKobo,
+      amountNaira: koboToNaira(confirmedAmountKobo),
+      currency: 'NGN',
+      channel,
+      message: 'Payment verified with Flutterwave and committed to escrow.',
+    });
+  } catch (err: any) {
+    console.error('[Payment Verify Error]:', err.message);
+    return res.status(502).json({ status: false, message: 'Could not verify payment with Flutterwave.' });
+  }
+});
+
+router.post('/payments/refund', requirePaymentsEnabled, requireAdmin, async (req: AuthenticatedRequest, res) => {
+  const user = req.user!;
+  const { reference, orderId, amountKobo, reason } = req.body;
+
+  if (!reference && !orderId) {
+    return res.status(400).json({ status: false, message: 'Payment reference or orderId is required for refund.' });
+  }
+
+  try {
+    const flwSecret = getFlwSecretKey();
+    if (!flwSecret) {
+      return res.status(503).json({ status: false, message: 'Payment gateway secret is not configured.' });
+    }
+
+    const orderLookup = await dbQuery('SELECT * FROM shopit_orders WHERE payment_reference = $1 OR id = $2', [
+      reference || '',
+      orderId || '',
+    ]);
+    const targetOrder = orderLookup.rows[0] || null;
+    const effectiveRef = reference || targetOrder?.payment_reference || '';
+
+    const payLookup = await dbQuery('SELECT * FROM shopit_payments WHERE reference = $1 OR order_id = $2', [
+      effectiveRef,
+      targetOrder?.id || orderId || '',
+    ]);
+    const paymentRow = payLookup.rows[0] || null;
+
+    if (paymentRow?.status === 'refunded' && targetOrder && ['refunded', 'cancelled'].includes(targetOrder.status)) {
+      return res.json({
+        status: true,
+        alreadyRefunded: true,
+        message: 'Refund already processed for this order.',
+      });
+    }
+
+    let flwTxId = paymentRow?.data?.flwTransactionId || paymentRow?.data?.gatewayId || '';
+    if (!flwTxId && effectiveRef) {
+      const lookController = new AbortController();
+      const lookTimeout = setTimeout(() => lookController.abort(), 8000);
+      try {
+        const lookRes = await fetch(
+          `https://api.flutterwave.com/v3/transactions/verify_by_reference?tx_ref=${encodeURIComponent(effectiveRef)}`,
+          {
+            method: 'GET',
+            headers: { Authorization: `Bearer ${flwSecret}`, 'Content-Type': 'application/json' },
+            signal: lookController.signal,
+          }
+        );
+        const lookData: any = await lookRes.json().catch(() => ({}));
+        if (lookRes.ok && lookData?.status === 'success' && lookData?.data?.id) {
+          flwTxId = String(lookData.data.id);
+        }
+      } catch {
+      } finally {
+        clearTimeout(lookTimeout);
+      }
+    }
+
+    if (!flwTxId) {
+      return res.status(400).json({
+        status: false,
+        message: 'Cannot execute Flutterwave refund: missing verified Flutterwave transaction ID for this reference.',
+      });
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    let refundRes: Response;
+    let refundData: any;
+    try {
+      refundRes = await fetch(`https://api.flutterwave.com/v3/transactions/${encodeURIComponent(String(flwTxId))}/refund`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${flwSecret}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...(amountKobo ? { amount: koboToNaira(Number(amountKobo)) } : {}),
+          comments: reason || 'Customer refund approved by Shop It Admin',
+        }),
+        signal: controller.signal,
+      });
+      refundData = await refundRes.json().catch(() => ({}));
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    if (!refundRes.ok || refundData?.status !== 'success') {
+      return res.status(502).json({ status: false, message: refundData?.message || 'Flutterwave refund call failed.' });
+    }
+
+    await withTransaction(async client => {
+      const orderRes = await client.query(
+        'SELECT * FROM shopit_orders WHERE payment_reference = $1 OR id = $2 FOR UPDATE',
+        [effectiveRef, targetOrder?.id || orderId || '']
+      );
+
+      if (orderRes.rows.length > 0) {
+        const order = orderRes.rows[0];
+        if (order.status !== 'refunded') {
+          const prevStatus = order.status;
+          await restoreOrderStockInTx(client, order);
+
+          await client.query(
+            `UPDATE shopit_orders
+             SET status = 'refunded', stock_reserved = false, auto_release_at = NULL,
+                 notes = COALESCE(notes || ' | ', '') || $1, updated_at = NOW()
+             WHERE id = $2`,
+            [`Refunded: ${reason || 'Approved by Admin'}`, order.id]
+          );
+
+          await client.query(
+            `INSERT INTO shopit_order_status_history (id, order_id, previous_status, new_status, changed_by, notes, created_at)
+             VALUES ($1, $2, $3, 'refunded', $4, $5, NOW())`,
+            [
+              `osh_ref_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
+              order.id,
+              prevStatus,
+              user.email,
+              `Refund processed via Flutterwave: ${reason || 'Admin approval'}`,
+            ]
+          );
+
+          const items = Array.isArray(order.items) ? order.items : [];
+          const sellerTotalsKobo: Record<string, number> = {};
+          for (const item of items) {
+            if (item.sellerId) {
+              const qty = Math.max(1, Math.floor(Number(item.quantity) || 1));
+              const sellerUnitKobo = Number(item.sellerPriceKobo) || nairaToKobo(item.sellerPrice);
+              sellerTotalsKobo[item.sellerId] = (sellerTotalsKobo[item.sellerId] || 0) + sellerUnitKobo * qty;
+            }
+          }
+
+          for (const [sId, sellerRefundKobo] of Object.entries(sellerTotalsKobo)) {
+            const wRes = await client.query(
+              'SELECT pending_balance_kobo FROM shopit_wallets WHERE seller_id = $1 FOR UPDATE',
+              [sId]
+            );
+            if (wRes.rows.length > 0) {
+              const currentPending = parseInt(wRes.rows[0].pending_balance_kobo || '0', 10);
+              const newPending = Math.max(0, currentPending - sellerRefundKobo);
+              const idempotencyKey = `refund:${order.id}:${sId}`;
+
+              const ledgerIns = await client.query(
+                `INSERT INTO shopit_ledger_entries (
+                  id, wallet_id, order_id, type, amount, fee, balance_after, balance_type, status,
+                  amount_kobo, fee_kobo, balance_after_kobo, description, reference, idempotency_key, created_at
+                ) VALUES ($1, $2, $3, 'refund', $4, 0, $5, 'pending', 'completed', $6, 0, $7, $8, $9, $10, NOW())
+                ON CONFLICT (idempotency_key) DO NOTHING
+                RETURNING id`,
+                [
+                  `LEDGER-REF-${order.id}-${sId.slice(-6)}`,
+                  sId,
+                  order.id,
+                  koboToNaira(sellerRefundKobo),
+                  koboToNaira(newPending),
+                  sellerRefundKobo,
+                  newPending,
+                  `Refund deducted from pending escrow for Order #${order.id}`,
+                  effectiveRef || order.id,
+                  idempotencyKey,
+                ]
+              );
+
+              if (ledgerIns.rows.length > 0) {
+                await client.query(
+                  'UPDATE shopit_wallets SET pending_balance_kobo = $1, pending_balance = $2, updated_at = NOW() WHERE seller_id = $3',
+                  [newPending, koboToNaira(newPending), sId]
+                );
+              }
+            }
+          }
+        }
+      }
+
+      if (effectiveRef) {
+        let existingPayData: Record<string, any> = {};
+        if (paymentRow?.data) {
+          existingPayData =
+            typeof paymentRow.data === 'string'
+              ? (() => {
+                  try {
+                    return JSON.parse(paymentRow.data);
+                  } catch {
+                    return {};
+                  }
+                })()
+              : typeof paymentRow.data === 'object'
+                ? paymentRow.data
+                : {};
+        }
+        const mergedPayData = {
+          ...existingPayData,
+          refundId: refundData?.data?.id,
+          flwTransactionId: flwTxId,
+        };
+        await client.query(
+          `UPDATE shopit_payments
+           SET status = 'refunded',
+               data = $1,
+               updated_at = NOW()
+           WHERE reference = $2`,
+          [JSON.stringify(mergedPayData), effectiveRef]
+        );
+      }
+    });
+
+    await logAuditEvent({
+      action: 'PAYMENT_REFUND_EXECUTED',
+      actor: { id: user.userId, email: user.email, role: user.role },
+      target: { type: 'payment', id: effectiveRef || orderId },
+      details: { amountKobo, reason, orderId: targetOrder?.id || orderId, flwTxId },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
+
+    return res.json({ status: true, message: 'Refund processed atomically and escrow debited.', data: refundData.data });
+  } catch (err: any) {
+    console.error('[Refund Error]:', err.message);
+    return res.status(500).json({ status: false, message: `Refund processing failed: ${err.message}` });
+  }
+});
+
+router.get('/payments/payments', requirePaymentsEnabled, requireFinance, async (_req: AuthenticatedRequest, res) => {
+  try {
+    const payRes = await dbQuery('SELECT * FROM shopit_payments ORDER BY created_at DESC LIMIT 200');
+    return res.json({ status: true, payments: payRes.rows });
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: err.message });
+  }
+});
+
+router.get('/payments/events', requirePaymentsEnabled, requireAdmin, async (_req: AuthenticatedRequest, res) => {
+  try {
+    const payRes = await dbQuery(
+      "SELECT reference, order_id, amount_naira, channel, status, webhook_received, updated_at FROM shopit_payments WHERE webhook_received = true OR status = 'paid' ORDER BY updated_at DESC LIMIT 200"
+    );
+    return res.json({ status: true, events: payRes.rows, processedCount: payRes.rows.length });
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: err.message });
+  }
+});
+
+// Seller withdrawal via Flutterwave Transfers API with ownership, FOR UPDATE debit, cooled saved account, daily cap, compensating rollback
+router.post('/payments/transfer', requirePayoutsEnabled, requireAuth, async (req: AuthenticatedRequest, res) => {
+  const user = req.user!;
+  const { amount, payoutAccountId, otpCode, sellerId } = req.body;
+  const targetSellerId = sellerId ? String(sellerId).trim() : user.sellerId || user.userId;
+
+  const ownsSeller = targetSellerId === user.userId || (user.sellerId && targetSellerId === user.sellerId);
+  if (!ownsSeller && user.role !== 'admin') {
+    return res.status(403).json({ status: false, message: 'Forbidden: you can only withdraw from your own wallet.' });
+  }
+
+  const flwSecret = getFlwSecretKey();
+  if (!flwSecret) {
+    return res.status(503).json({ status: false, message: 'Payout gateway secret is not configured.' });
+  }
+
+  const amountNum = Math.floor(Number(amount) || 0);
+  if (amountNum < 1000 || amountNum > 300000) {
+    return res.status(400).json({ status: false, message: 'Withdrawal amount must be between ₦1,000 and ₦300,000.' });
+  }
+
+  if (!payoutAccountId) {
+    return res.status(400).json({ status: false, message: 'A saved payoutAccountId is required.' });
+  }
+
+  if (!otpCode) {
+    return res.status(400).json({ status: false, message: 'Withdrawal authorization OTP is required.' });
+  }
+
+  try {
+    // 1. Verify OTP atomically via SELECT ... FOR UPDATE (zero test code backdoors)
+    const otpCheck = await verifyAndConsumeOtp(user.email, 'withdrawal', String(otpCode).trim());
+    if (!otpCheck.success) {
+      return res.status(400).json({ status: false, message: otpCheck.error || 'Invalid or expired withdrawal OTP.' });
+    }
+
+    // Option 1: Shop It covers Flutterwave transfer fees (₦0 seller withdrawal fee)
+    const fee = 0;
+    const amountKobo = amountNum * 100;
+    const feeKobo = 0;
+    const totalDeductionKobo = amountKobo;
+    const transferCode = `TRF_${Date.now()}_${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+
+    // 2. Atomic check + debit inside Postgres transaction BEFORE external payout API call
+    const debitState = await withTransaction(async client => {
+      const sellerRes = await client.query('SELECT * FROM shopit_sellers WHERE id = $1 OR user_id = $1', [
+        targetSellerId,
+      ]);
+      if (sellerRes.rows.length === 0) {
+        throw Object.assign(new Error('Registered artisan profile not found.'), { statusCode: 403 });
+      }
+      const seller = sellerRes.rows[0];
+      if (seller.verification_status !== 'verified' && seller.verification_status !== 'approved') {
+        throw Object.assign(new Error('NIN identity verification is required before withdrawing earnings.'), {
+          statusCode: 403,
+        });
+      }
+
+      const wRes = await client.query('SELECT * FROM shopit_wallets WHERE seller_id = $1 FOR UPDATE', [seller.id]);
+      if (wRes.rows.length === 0) {
+        throw Object.assign(new Error('Seller wallet not found.'), { statusCode: 404 });
+      }
+      const wallet = wRes.rows[0];
+      if (wallet.is_frozen) {
+        throw Object.assign(new Error(`Wallet is frozen: ${wallet.freeze_reason || 'Security review'}`), {
+          statusCode: 403,
+        });
+      }
+
+      const payoutAccounts: any[] = Array.isArray(wallet.payout_accounts) ? wallet.payout_accounts : [];
+      const account = payoutAccounts.find((a: any) => a.id === payoutAccountId);
+      if (!account || !account.bankCode || !account.accountNumber) {
+        throw Object.assign(new Error('Valid saved payout account with bank code not found.'), { statusCode: 400 });
+      }
+
+      if (account.coolingPeriodEndsAt && Date.now() < new Date(account.coolingPeriodEndsAt).getTime()) {
+        const hoursRemaining = Math.max(
+          1,
+          Math.ceil((new Date(account.coolingPeriodEndsAt).getTime() - Date.now()) / (1000 * 60 * 60))
+        );
+        throw Object.assign(
+          new Error(`Payout account is in 24h security cooling period (${hoursRemaining}h remaining).`),
+          { statusCode: 403 }
+        );
+      }
+
+      // Daily withdrawal cap check (max ₦300,000 / 24h across pending/processing/completed payouts)
+      const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      const dailyRes = await client.query(
+        `SELECT COALESCE(SUM(amount_kobo), 0) AS daily_kobo
+         FROM shopit_payouts
+         WHERE seller_id = $1 AND status IN ('pending', 'processing', 'success') AND created_at >= $2`,
+        [seller.id, dayAgo]
+      );
+      const dailyUsedKobo = parseInt(String(dailyRes.rows[0]?.daily_kobo || '0'), 10);
+      if (dailyUsedKobo + amountKobo > 30000000) {
+        throw Object.assign(new Error('Daily withdrawal limit of ₦300,000 exceeded.'), { statusCode: 400 });
+      }
+
+      const availableKobo = parseInt(String(wallet.available_balance_kobo || '0'), 10);
+      if (availableKobo < totalDeductionKobo) {
+        throw Object.assign(new Error('Insufficient Available balance for withdrawal and fee.'), { statusCode: 400 });
+      }
+
+      const newAvailableKobo = availableKobo - totalDeductionKobo;
+      const newWithdrawnKobo = parseInt(String(wallet.total_withdrawn_kobo || '0'), 10) + amountKobo;
+
+      await client.query(
+        `UPDATE shopit_wallets
+         SET available_balance_kobo = $1, available_balance = $2,
+             total_withdrawn_kobo = $3, total_withdrawn = $4, updated_at = NOW()
+         WHERE seller_id = $5`,
+        [newAvailableKobo, koboToNaira(newAvailableKobo), newWithdrawnKobo, koboToNaira(newWithdrawnKobo), seller.id]
+      );
+
+      const ledgerId = `LEDGER-WTD-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+      await client.query(
+        `INSERT INTO shopit_ledger_entries (
+          id, wallet_id, type, amount, fee, balance_after, balance_type, status,
+          amount_kobo, fee_kobo, balance_after_kobo, description, reference, idempotency_key, created_at
+        ) VALUES ($1, $2, 'withdrawal', $3, $4, $5, 'available', 'pending', $6, $7, $8, $9, $10, $11, NOW())`,
+        [
+          ledgerId,
+          seller.id,
+          amountNum,
+          fee,
+          koboToNaira(newAvailableKobo),
+          amountKobo,
+          feeKobo,
+          newAvailableKobo,
+          `Payout · ${account.bankName} (${account.accountNumber})`,
+          transferCode,
+          `withdrawal:${transferCode}`,
+        ]
+      );
+
+      await client.query(
+        `INSERT INTO shopit_payouts (
+          id, seller_id, amount_kobo, fee_kobo, total_deduction_kobo,
+          bank_code, bank_name, account_number, account_name, transfer_code, reference, status, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pending', NOW(), NOW())`,
+        [
+          transferCode,
+          seller.id,
+          amountKobo,
+          feeKobo,
+          totalDeductionKobo,
+          String(account.bankCode),
+          account.bankName,
+          account.accountNumber,
+          account.accountName || seller.shop_name,
+          transferCode,
+          transferCode,
+        ]
+      );
+
+      return { seller, account, newAvailableKobo };
+    });
+
+    // 3. Call Flutterwave Transfers API v3; compensate atomically if gateway call fails or times out
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 12000);
+      let transRes: Response;
+      let transData: any;
+      try {
+        transRes = await fetch('https://api.flutterwave.com/v3/transfers', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${flwSecret}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            account_bank: String(debitState.account.bankCode),
+            account_number: debitState.account.accountNumber,
+            amount: amountNum,
+            currency: 'NGN',
+            narration: `Shop It Withdrawal - ${debitState.seller.shop_name}`,
+            reference: transferCode,
+            debit_currency: 'NGN',
+          }),
+          signal: controller.signal,
+        });
+        transData = await transRes.json().catch(() => ({}));
+      } finally {
+        clearTimeout(timeout);
+      }
+
+      if (!transRes.ok || transData?.status !== 'success') {
+        throw new Error(transData?.message || 'Flutterwave transfer rejected.');
+      }
+
+      await dbQuery(
+        "UPDATE shopit_payouts SET status = 'processing', transfer_code = $1, flw_transfer_id = $2, provider_response = $3, updated_at = NOW() WHERE id = $4",
+        [
+          transData.data?.reference || transferCode,
+          transData.data?.id ? String(transData.data.id) : null,
+          JSON.stringify(transData.data || {}),
+          transferCode,
+        ]
+      );
+    } catch (gatewayErr: any) {
+      // Compensating atomic rollback in Postgres so user funds are never lost on gateway failure
+      await withTransaction(async client => {
+        const wRes = await client.query(
+          'SELECT available_balance_kobo, total_withdrawn_kobo FROM shopit_wallets WHERE seller_id = $1 FOR UPDATE',
+          [debitState.seller.id]
+        );
+        if (wRes.rows.length > 0) {
+          const curAvail = parseInt(String(wRes.rows[0].available_balance_kobo || '0'), 10);
+          const curWtd = parseInt(String(wRes.rows[0].total_withdrawn_kobo || '0'), 10);
+          const restoredAvail = curAvail + totalDeductionKobo;
+          const restoredWtd = Math.max(0, curWtd - amountKobo);
+          await client.query(
+            `UPDATE shopit_wallets
+             SET available_balance_kobo = $1, available_balance = $2,
+                 total_withdrawn_kobo = $3, total_withdrawn = $4, updated_at = NOW()
+             WHERE seller_id = $5`,
+            [restoredAvail, koboToNaira(restoredAvail), restoredWtd, koboToNaira(restoredWtd), debitState.seller.id]
+          );
+          await client.query(
+            `INSERT INTO shopit_ledger_entries (
+              id, wallet_id, type, amount, fee, balance_after, balance_type, status,
+              amount_kobo, fee_kobo, balance_after_kobo, description, reference, idempotency_key, created_at
+            ) VALUES ($1, $2, 'refund', $3, 0, $4, 'available', 'completed', $5, 0, $6, $7, $8, $9, NOW())
+            ON CONFLICT (idempotency_key) DO NOTHING`,
+            [
+              `LEDGER-WTD-REV-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+              debitState.seller.id,
+              koboToNaira(totalDeductionKobo),
+              koboToNaira(restoredAvail),
+              totalDeductionKobo,
+              restoredAvail,
+              `Failed payout reversal · ${transferCode}`,
+              transferCode,
+              `withdrawal_reversal:${transferCode}`,
+            ]
+          );
+        }
+        await client.query("UPDATE shopit_payouts SET status = 'failed', updated_at = NOW() WHERE id = $1", [transferCode]);
+      });
+
+      return res.status(502).json({ status: false, message: `Payout failed and balance restored: ${gatewayErr.message}` });
+    }
+
+    if (amountNum >= 50000) {
+      await sendAdminAlert(
+        `withdrawal_alert_${transferCode}`,
+        `High-Value Withdrawal Request (₦${amountNum.toLocaleString()})`,
+        `Artisan <strong>"${escapeHtml(debitState.seller.shop_name)}"</strong> withdrew <strong>₦${amountNum.toLocaleString()}</strong> to ${escapeHtml(debitState.account.bankName)} ending ${escapeHtml(String(debitState.account.accountNumber).slice(-4))}.`
+      );
+    }
+
+    await logAuditEvent({
+      action: 'SELLER_WITHDRAWAL_DISPATCHED',
+      actor: { id: user.userId, email: user.email, role: user.role },
+      target: { type: 'wallet', id: debitState.seller.id },
+      details: { amount: amountNum, fee, transferCode, bankName: debitState.account.bankName },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
+
+    return res.json({
+      status: true,
+      transferCode,
+      amount: amountNum,
+      fee,
+      bankName: debitState.account.bankName,
+      accountNumber: debitState.account.accountNumber,
+      message: `Transfer of ₦${amountNum.toLocaleString()} initiated to ${debitState.account.bankName}. Ref: ${transferCode}`,
+    });
+  } catch (err: any) {
+    const code = err?.statusCode || 500;
+    if (code >= 500) console.error('[Withdrawal Error]:', err.message);
+    return res.status(code).json({ status: false, message: err.message || 'Withdrawal failed.' });
+  }
+});
+
+// ============================================================================
+// EMAIL DISPATCH, SUPPORT CONTACT & OTP AUTHENTICATION
+// ============================================================================
+
+// Strictly admin-only templated email trigger (no arbitrary HTML relay)
+router.post('/email/send', requireAdmin, async (req: AuthenticatedRequest, res) => {
+  try {
+    const { to, template, data, toName } = req.body;
+    if (!to || !template) {
+      return res.status(400).json({ status: false, message: 'Recipient "to" and allowed "template" key are required.' });
+    }
+    if (!VALID_EMAIL_TEMPLATES.has(template as EmailTemplateKey)) {
+      return res.status(400).json({ status: false, message: 'Unsupported email template.' });
     }
 
     const cleanEmail = String(to).trim().toLowerCase();
-    const rendered = template
-      ? renderTransactionalEmail(template as EmailTemplateKey, data || {})
-      : { subject: customSubject || 'Shop It Notification', text: customText || '', html: customHtml || '' };
-
-    try {
-      const result = await sendBrevoEmail(cleanEmail, rendered.subject, rendered.text, rendered.html, toName || data?.name);
-      return res.json({
-        status: true,
-        messageId: result.messageId,
-        subject: rendered.subject,
-      });
-    } catch (brevoErr: any) {
-      return res.status(502).json({
-        status: false,
-        message: `Failed to deliver email via Brevo: ${brevoErr.message}`,
-      });
-    }
+    const rendered = renderTransactionalEmail(template as EmailTemplateKey, data || {});
+    const sent = await sendBrevoDirect(cleanEmail, rendered.subject, rendered.text, rendered.html, toName || data?.name);
+    return res.json({ status: true, dispatched: sent, subject: rendered.subject });
   } catch (err: any) {
-    console.error('[Server Error in /api/email/send]', err.message);
-    return res.status(500).json({ status: false, message: 'Internal server error dispatching email' });
+    return res.status(500).json({ status: false, message: 'Internal server error dispatching email.' });
   }
 });
 
-// 4d. POST /auth/send-otp - Server-generated 6-digit OTP, stored hashed in DB, 10-min expiry, 3 tries
+// Rate-limited public Contact Us endpoint (delivers ONLY to shopitverified@gmail.com)
+router.post('/support/contact', async (req, res) => {
+  try {
+    const rl = await checkAndRecordRateLimit(`support:${req.ip || 'unknown'}`, 5, 15 * 60 * 1000);
+    if (!rl.allowed) {
+      return res.status(429).json({ status: false, message: 'Too many support messages. Please try again later.' });
+    }
+
+    const { name, email, category, message } = req.body;
+    if (!name || !email || !message) {
+      return res.status(400).json({ status: false, message: 'Name, email, and message are required.' });
+    }
+
+    const cleanEmail = String(email).trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      return res.status(400).json({ status: false, message: 'Please enter a valid email address.' });
+    }
+
+    const cleanName = String(name).trim().slice(0, 120);
+    const cleanCat = String(category || 'General Question').trim().slice(0, 80);
+    const cleanMsg = String(message).trim().slice(0, 3000);
+
+    const htmlBody = `<div style="font-family:sans-serif;padding:20px;">
+      <h2>New Support Request</h2>
+      <p><strong>From:</strong> ${escapeHtml(cleanName)} (${escapeHtml(cleanEmail)})</p>
+      <p><strong>Category:</strong> ${escapeHtml(cleanCat)}</p>
+      <div style="background:#f1f5f9;padding:16px;border-radius:8px;margin-top:12px;">
+        ${escapeHtml(cleanMsg).replace(/\n/g, '<br/>')}
+      </div>
+    </div>`;
+
+    await sendBrevoDirect(
+      'shopitverified@gmail.com',
+      `[Shop It Help] ${cleanCat} from ${cleanName}`,
+      `Support request from ${cleanName} (${cleanEmail})\nCategory: ${cleanCat}\n\n${cleanMsg}`,
+      htmlBody,
+      'Shop It Support'
+    );
+
+    return res.json({ status: true, message: 'Support inquiry sent.' });
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: 'Failed to submit contact request.' });
+  }
+});
+
 router.post('/auth/send-otp', async (req, res) => {
   try {
     const { email, purpose, deviceId, metadata } = req.body;
@@ -1564,7 +2268,23 @@ router.post('/auth/send-otp', async (req, res) => {
     const cleanEmail = String(email).trim().toLowerCase();
     const cleanPurpose = String(purpose).trim();
 
-    // 1. Check 60-second resend cooldown in database
+    // Sensitive withdrawal / payout account OTPs require active session matching email
+    if (cleanPurpose === 'withdrawal' || cleanPurpose === 'payout_account') {
+      const token = extractToken(req);
+      const session = token ? await getSession(token) : null;
+      if (!session) {
+        return res.status(401).json({ status: false, message: 'Authentication required to request payout verification code.' });
+      }
+      if (session.email.toLowerCase() !== cleanEmail && session.role !== 'admin') {
+        return res.status(403).json({ status: false, message: 'You can only request payout OTPs for your own email.' });
+      }
+    }
+
+    const ipRl = await checkAndRecordRateLimit(`otp_ip:${req.ip || 'unknown'}`, 25, 15 * 60 * 1000);
+    if (!ipRl.allowed) {
+      return res.status(429).json({ status: false, message: 'Too many verification code requests. Please try again later.' });
+    }
+
     const cooldownCheck = await checkOtpResendCooldown(cleanEmail, cleanPurpose);
     if (!cooldownCheck.allowed) {
       return res.status(429).json({
@@ -1574,43 +2294,30 @@ router.post('/auth/send-otp', async (req, res) => {
       });
     }
 
-    // 2. Check rate limit in database: 5 requests per email, 10 per device per 15 minutes
     const rateCheck = await checkOtpRateLimit(cleanEmail, deviceId);
     if (!rateCheck.allowed) {
-      return res.status(429).json({
-        status: false,
-        message: rateCheck.reason,
-      });
+      return res.status(429).json({ status: false, message: rateCheck.reason });
     }
 
-    // 3. If password reset, check that account actually exists in database first
+    // Never reveal registered vs unregistered email on password_reset (uniform response)
     if (cleanPurpose === 'password_reset') {
-      const userCheck = await dbQuery('SELECT id, name, is_verified_email FROM shopit_users WHERE LOWER(email) = LOWER($1)', [cleanEmail]);
-      if (userCheck.rows.length === 0) {
-        return res.status(404).json({
-          status: false,
-          error: 'EMAIL_NOT_REGISTERED',
-          message: 'No Shop It account was found with this email address. Please check your spelling or sign up.',
-        });
-      }
-      if (userCheck.rows[0].is_verified_email === false) {
-        return res.status(403).json({
-          status: false,
-          error: 'EMAIL_NOT_VERIFIED',
-          message: 'This email address is not verified yet. Please verify your email first before resetting your password.',
+      const userCheck = await dbQuery('SELECT id, is_verified_email FROM shopit_users WHERE LOWER(email) = LOWER($1)', [
+        cleanEmail,
+      ]);
+      if (userCheck.rows.length === 0 || userCheck.rows[0].is_verified_email === false) {
+        await recordOtpRateLimit(cleanEmail, deviceId);
+        return res.json({
+          status: true,
+          message: 'If an account with this email exists, a 6-digit verification code has been sent.',
         });
       }
     }
 
-    // 4. Codes are 6 digits, generated on the server
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const code = String(crypto.randomInt(100000, 1000000));
     const codeHash = hashOtp(code);
-
-    // 5. Save hashed OTP to database with 10-minute expiry and 3 attempts
     await saveHashedOtp(cleanEmail, cleanPurpose, codeHash, metadata);
     await recordOtpRateLimit(cleanEmail, deviceId);
 
-    // 6. Render email with 6-digit code
     const templateMap: Record<string, EmailTemplateKey> = {
       signup: 'signup_code',
       new_device_login: 'new_device_login',
@@ -1618,7 +2325,6 @@ router.post('/auth/send-otp', async (req, res) => {
       withdrawal: 'withdrawal_code',
       payout_account: 'new_payout_account_code',
     };
-
     const templateKey: EmailTemplateKey = templateMap[cleanPurpose] || 'signup_code';
 
     const rendered = renderTransactionalEmail(templateKey, {
@@ -1630,54 +2336,21 @@ router.post('/auth/send-otp', async (req, res) => {
       ...metadata,
     });
 
-    // 7. Send email using the Brevo API
-    try {
-      await sendBrevoEmail(cleanEmail, rendered.subject, rendered.text, rendered.html, metadata?.name);
-    } catch (brevoErr: any) {
-      console.error('[Brevo Dispatch Error]:', brevoErr.message);
-      // In development / preview or when Brevo API key is not yet configured on host, log code and permit test flow:
-      const isDevOrMissingKey = process.env.NODE_ENV !== 'production' ||
-        !process.env.BREVO_API_KEY ||
-        process.env.BREVO_API_KEY.includes('4966601cb843ea84411d3fa54e1ae024f227b0b9ca31a0ea4c16d00473215264') ||
-        process.env.BREVO_API_KEY.includes('xkeysib-...');
-
-      if (isDevOrMissingKey) {
-        console.log(`[Shop It Auth] 🔑 Verification Code for ${cleanEmail} (${cleanPurpose}): ${code}`);
-        return res.json({
-          status: true,
-          message: `Verification code generated: ${code}. Valid for 10 minutes.`,
-          devCode: code,
-        });
-      }
-
-      // Brevo failed in production: show user a clear message, write error without secrets to log, never pretend it sent
-      await deleteOtpRecord(cleanEmail, cleanPurpose);
-      return res.status(502).json({
-        status: false,
-        message: `Failed to deliver verification email: ${brevoErr.message}`,
-      });
-    }
-
-    if (process.env.NODE_ENV !== 'production') {
-      console.log(`[Shop It Auth] 🔑 Verification Code for ${cleanEmail} (${cleanPurpose}): ${code}`);
-      return res.json({
-        status: true,
-        message: 'A 6-digit verification code has been sent to your email.',
-        devCode: code,
-      });
-    }
+    await sendBrevoDirect(cleanEmail, rendered.subject, rendered.text, rendered.html, metadata?.name);
 
     return res.json({
       status: true,
-      message: 'A 6-digit verification code has been sent to your email.',
+      message:
+        cleanPurpose === 'password_reset'
+          ? 'If an account with this email exists, a 6-digit verification code has been sent.'
+          : 'A 6-digit verification code has been sent to your email.',
     });
   } catch (err: any) {
     console.error('[Server Error in /api/auth/send-otp]', err.message);
-    return res.status(500).json({ status: false, message: 'Internal server error dispatching OTP' });
+    return res.status(500).json({ status: false, message: 'Internal server error dispatching OTP.' });
   }
 });
 
-// 4e. POST /auth/verify-otp - Verifies entered 6-digit code against database-hashed OTP
 router.post('/auth/verify-otp', async (req, res) => {
   try {
     const { email, purpose, code } = req.body;
@@ -1689,821 +2362,71 @@ router.post('/auth/verify-otp', async (req, res) => {
     const cleanPurpose = String(purpose).trim();
     const inputCode = String(code).trim();
 
-    const record = await getOtpRecord(cleanEmail, cleanPurpose);
-    if (!record) {
+    const rl = await checkAndRecordRateLimit(`verify_otp:${req.ip || cleanEmail}`, 30, 15 * 60 * 1000);
+    if (!rl.allowed) {
+      return res.status(429).json({ status: false, message: 'Too many attempts. Please try again later.' });
+    }
+
+    const result = await verifyAndConsumeOtp(cleanEmail, cleanPurpose, inputCode);
+    if (!result.success) {
       return res.status(400).json({
         status: false,
-        message: 'No active verification code found or it has expired. Please request a new code.',
+        message: result.error,
+        attemptsRemaining: result.attemptsRemaining,
       });
     }
 
-    const now = Date.now();
-    if (now > record.expiresAt) {
-      await deleteOtpRecord(cleanEmail, cleanPurpose);
-      return res.status(400).json({
-        status: false,
-        message: 'This code has expired (10-minute limit). Please request a new code.',
-      });
-    }
-
-    if (record.attemptsRemaining <= 0) {
-      await deleteOtpRecord(cleanEmail, cleanPurpose);
-      return res.status(400).json({
-        status: false,
-        message: 'This code has been cancelled due to 3 wrong tries. Please request a new code.',
-      });
-    }
-
-    // Verify hash securely
-    const isValid = verifyOtpHash(inputCode, record.codeHash);
-    if (!isValid) {
-      record.attemptsRemaining -= 1;
-      if (record.attemptsRemaining <= 0) {
-        await deleteOtpRecord(cleanEmail, cleanPurpose);
-        return res.status(400).json({
-          status: false,
-          message: 'Incorrect code. 3 wrong tries exceeded. Code has been cancelled.',
-          attemptsRemaining: 0,
-        });
-      }
-      await updateOtpRecord(record);
-      return res.status(400).json({
-        status: false,
-        message: `Incorrect code. ${record.attemptsRemaining} try(ies) remaining.`,
-        attemptsRemaining: record.attemptsRemaining,
-      });
-    }
-
-    // Verified! Delete record so it cannot be used again
-    await deleteOtpRecord(cleanEmail, cleanPurpose);
-
-    // If signup or email verification, update PostgreSQL user record
+    let signupVerificationToken: string | undefined;
     if (cleanPurpose === 'signup' || cleanPurpose === 'email_verification') {
-      try {
-        await dbQuery('UPDATE shopit_users SET is_verified_email = true, updated_at = NOW() WHERE LOWER(email) = LOWER($1)', [cleanEmail]);
-        console.log(`[Email Verified] Marked email as verified in database: ${cleanEmail}`);
-      } catch (dbErr: any) {
-        console.warn('[Email Verify DB Update Warning]:', dbErr.message);
-      }
+      signupVerificationToken = await issueSignupVerificationToken(cleanEmail);
+      await dbQuery('UPDATE shopit_users SET is_verified_email = true, updated_at = NOW() WHERE LOWER(email) = LOWER($1)', [
+        cleanEmail,
+      ]).catch(() => {});
     }
 
     return res.json({
       status: true,
+      signupVerificationToken,
       message: 'Verification successful.',
     });
   } catch (err: any) {
     console.error('[Server Error in /api/auth/verify-otp]', err.message);
-    return res.status(500).json({ status: false, message: 'Internal server error verifying OTP' });
+    return res.status(500).json({ status: false, message: 'Internal server error verifying OTP.' });
   }
 });
 
-// 5. GET /paystack/verify/:reference - Strict verification with database persistence & idempotency
-router.get('/paystack/verify/:reference', async (req, res) => {
-  if (process.env.PAYMENTS_ENABLED !== 'true') {
-    return res.status(503).json({
-      status: false,
-      error: 'PAYMENTS_DISABLED',
-      message: 'Online payments are coming soon. Arrange directly with the seller',
-    });
-  }
+// ============================================================================
+// SAFETY REPORTS (PostgreSQL + Moderator Auth)
+// ============================================================================
 
-  const { reference } = req.params;
-
-  if (!reference) {
-    return res.status(400).json({ status: false, message: 'Reference is required' });
-  }
-
-  // 1. Check persistent database payment record first (Rule 5: Idempotency)
-  const existingRecord = await getPaymentRecord(reference);
-  if (existingRecord && existingRecord.status === 'paid') {
-    return res.json({
-      status: true,
-      isPaid: true,
-      reference,
-      orderId: existingRecord.orderId,
-      amountInKobo: existingRecord.amountKobo,
-      amountNaira: existingRecord.amountNaira,
-      currency: existingRecord.currency,
-      channel: existingRecord.channel,
-      message: 'Transaction already verified and confirmed Paid',
-    });
-  }
-
-  const order = serverOrdersByRef.get(reference);
-  if (order && order.status === 'paid') {
-    return res.json({
-      status: true,
-      isPaid: true,
-      reference,
-      orderId: order.orderId,
-      order,
-      message: 'Transaction already verified and order marked Paid',
-    });
-  }
-
-  if (PAYSTACK_SECRET_KEY) {
-    try {
-      const verifyRes = await fetch(
-        `https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`,
-        {
-          method: 'GET',
-          headers: {
-            Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
-            'Content-Type': 'application/json',
-          },
-        }
-      );
-
-      const verifyData: any = await verifyRes.json();
-      
-      // Rule 4 & 6: Strict checks - status must be 'success', currency must be 'NGN', amount must match
-      if (verifyData.status && verifyData.data?.status === 'success') {
-        const receivedCurrency = verifyData.data.currency || 'NGN';
-        if (receivedCurrency !== 'NGN') {
-          return res.status(400).json({
-            status: false,
-            isPaid: false,
-            message: `Invalid currency ${receivedCurrency}. Only NGN payments are accepted.`,
-          });
-        }
-
-        const receivedKobo = Number(verifyData.data.amount);
-        const expectedKobo = existingRecord?.amountKobo || order?.amountInKobo;
-        if (expectedKobo && receivedKobo < expectedKobo) {
-          return res.status(400).json({
-            status: false,
-            isPaid: false,
-            message: `Amount mismatch: received ₦${receivedKobo / 100}, expected ₦${expectedKobo / 100}`,
-          });
-        }
-
-        if (order) {
-          order.status = 'paid';
-          order.paidAt = new Date().toISOString();
-          order.verifiedWithPaystack = true;
-        }
-        processedReferences.add(reference);
-
-        // Update persistent payment record to 'paid'
-        await savePaymentRecord({
-          reference,
-          orderId: existingRecord?.orderId || order?.orderId || reference,
-          amountKobo: receivedKobo,
-          amountNaira: receivedKobo / 100,
-          currency: 'NGN',
-          channel: verifyData.data.channel || 'card',
-          status: 'paid',
-          webhookReceived: existingRecord?.webhookReceived || false,
-          customerEmail: verifyData.data.customer?.email,
-          data: {
-            paystackId: verifyData.data.id,
-            gatewayResponse: verifyData.data.gateway_response,
-          },
-          createdAt: existingRecord?.createdAt || new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        });
-
-        // Part 2 Item 5: Brevo alert for high-value orders (>= ₦50,000)
-        if (receivedKobo >= 5000000) {
-          await sendAdminAlert(
-            `high_order_${reference}`,
-            `High-Value Order Confirmed (₦${(receivedKobo / 100).toLocaleString()})`,
-            `An order above ₦50,000 has been verified and committed to Escrow.<br/>
-             Order ID: <strong>#${existingRecord?.orderId || order?.orderId || reference}</strong><br/>
-             Amount: <strong>₦${(receivedKobo / 100).toLocaleString()}</strong><br/>
-             Payment Channel: <strong>${verifyData.data.channel || 'card'}</strong><br/>
-             Customer: <strong>${verifyData.data.customer?.email || 'Student Buyer'}</strong>`
-          );
-        }
-
-        return res.json({
-          status: true,
-          isPaid: true,
-          reference,
-          amountInKobo: receivedKobo,
-          amountNaira: receivedKobo / 100,
-          currency: 'NGN',
-          channel: verifyData.data.channel,
-          orderId: order?.orderId || existingRecord?.orderId,
-          order,
-          message: 'Transaction confirmed with Paystack API and order marked Paid',
-        });
-      } else {
-        // Unpaid or pending bank transfer
-        return res.json({
-          status: true,
-          isPaid: false,
-          paystackStatus: verifyData.data?.status || 'abandoned',
-          message: verifyData.message || 'Payment not yet confirmed by Paystack',
-        });
-      }
-    } catch (err: any) {
-      console.error('Error calling Paystack verify endpoint:', err.message);
-      return res.status(502).json({
-        status: false,
-        message: 'Could not contact Paystack verification API',
-      });
-    }
-  }
-
-  // If simulate=true or in local development environment without live secret key, allow immediate escrow confirmation
-  if (req.query.simulate === 'true' || !PAYSTACK_SECRET_KEY) {
-    const ordId = order?.orderId || existingRecord?.orderId || reference;
-    const amountKobo = order?.amountInKobo || existingRecord?.amountKobo || 100000;
-    const sellerId = order?.items?.[0]?.sellerId || 'seller-amaka-beads';
-
-    await savePaymentRecord({
-      reference,
-      orderId: ordId,
-      amountKobo,
-      amountNaira: amountKobo / 100,
-      currency: 'NGN',
-      channel: (req.query.channel as string) || 'paystack_inline',
-      status: 'paid',
-      webhookReceived: true,
-      customerEmail: order?.email || existingRecord?.customerEmail || 'shopper@campus.ng',
-      createdAt: existingRecord?.createdAt || new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    });
-
-    if (order) {
-      order.status = 'paid';
-    }
-
-    try {
-      // 1. Move order to 'paid' with 5-day auto-release timer
-      await dbQuery(
-        `UPDATE shopit_orders
-         SET status = 'paid', auto_release_at = NOW() + INTERVAL '5 days', updated_at = NOW()
-         WHERE payment_reference = $1 OR id = $2`,
-        [reference, ordId]
-      );
-
-      // 2. Credit seller pending escrow balance in shopit_wallets
-      await dbQuery(
-        `INSERT INTO shopit_wallets (seller_id, pending_balance_kobo, available_balance_kobo, total_withdrawn_kobo, updated_at)
-         VALUES ($1, $2, 0, 0, NOW())
-         ON CONFLICT (seller_id) DO UPDATE
-         SET pending_balance_kobo = shopit_wallets.pending_balance_kobo + $2,
-             updated_at = NOW()`,
-        [sellerId, amountKobo]
-      );
-
-      // 3. Append to immutable double-entry ledger
-      const ledgerId = `LEDGER_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-      await dbQuery(
-        `INSERT INTO shopit_ledger_entries (
-           id, wallet_id, order_id, type, amount_kobo, amount, balance_type, description, reference, status, created_at
-         ) VALUES (
-           $1, $2, $3, 'sale_pending', $4, $5, 'pending', 'Order payment held in Paystack Escrow', $6, 'held', NOW()
-         )
-         ON CONFLICT (id) DO NOTHING`,
-        [ledgerId, sellerId, ordId, amountKobo, amountKobo / 100, reference]
-      );
-    } catch (e: any) {
-      console.warn('[Verify Simulation DB Warning]:', e.message);
-    }
-
-    return res.json({
-      status: true,
-      isPaid: true,
-      reference,
-      orderId: ordId,
-      amountInKobo: amountKobo,
-      amountNaira: amountKobo / 100,
-      currency: 'NGN',
-      channel: 'paystack_inline',
-      order,
-      message: 'Transaction successfully verified and confirmed Paid in Escrow',
-    });
-  }
-
-  return res.json({
-    status: true,
-    isPaid: order?.status === 'paid',
-    reference,
-    orderId: order?.orderId || existingRecord?.orderId,
-    order,
-  });
-});
-
-// 5a. POST /paystack/confirm-test-payment - Direct test confirmation for instant testing
-router.post('/paystack/confirm-test-payment', async (req, res) => {
+router.post('/reports', optionalAuth, async (req: AuthenticatedRequest, res) => {
   try {
-    const { reference, orderId, amountInKobo, channel = 'bank_transfer' } = req.body;
-    if (!reference) {
-      return res.status(400).json({ status: false, message: 'Reference is required' });
+    const rl = await checkAndRecordRateLimit(`reports:${req.ip || 'unknown'}`, 10, 15 * 60 * 1000);
+    if (!rl.allowed) {
+      return res.status(429).json({ status: false, message: 'Too many report submissions. Please wait a bit.' });
     }
 
-    const order = serverOrdersByRef.get(reference);
-    const existingRecord = await getPaymentRecord(reference);
-    const ordId = orderId || order?.orderId || existingRecord?.orderId || reference;
-    const kobo = Number(amountInKobo) || order?.amountInKobo || existingRecord?.amountKobo || 100000;
-    const sellerId = order?.items?.[0]?.sellerId || 'seller-amaka-beads';
-
-    await savePaymentRecord({
-      reference,
-      orderId: ordId,
-      amountKobo: kobo,
-      amountNaira: kobo / 100,
-      currency: 'NGN',
-      channel,
-      status: 'paid',
-      webhookReceived: true,
-      customerEmail: order?.email || 'shopper@campus.ng',
-      createdAt: existingRecord?.createdAt || new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    });
-
-    if (order) order.status = 'paid';
-
-    try {
-      await dbQuery(
-        `UPDATE shopit_orders
-         SET status = 'paid', auto_release_at = NOW() + INTERVAL '5 days', updated_at = NOW()
-         WHERE payment_reference = $1 OR id = $2`,
-        [reference, ordId]
-      );
-
-      await dbQuery(
-        `INSERT INTO shopit_wallets (seller_id, pending_balance_kobo, available_balance_kobo, total_withdrawn_kobo, updated_at)
-         VALUES ($1, $2, 0, 0, NOW())
-         ON CONFLICT (seller_id) DO UPDATE
-         SET pending_balance_kobo = shopit_wallets.pending_balance_kobo + $2,
-             updated_at = NOW()`,
-        [sellerId, kobo]
-      );
-
-      const ledgerId = `LEDGER_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-      await dbQuery(
-        `INSERT INTO shopit_ledger_entries (
-           id, wallet_id, order_id, type, amount_kobo, amount, balance_type, description, reference, status, created_at
-         ) VALUES (
-           $1, $2, $3, 'sale_pending', $4, $5, 'pending', 'Order payment held in Paystack Escrow', $6, 'held', NOW()
-         )
-         ON CONFLICT (id) DO NOTHING`,
-        [ledgerId, sellerId, ordId, kobo, kobo / 100, reference]
-      );
-    } catch (dbErr: any) {
-      console.warn('[Confirm Test Payment DB Warning]:', dbErr.message);
-    }
-
-    return res.json({
-      status: true,
-      isPaid: true,
-      reference,
-      orderId: ordId,
-      amountInKobo: kobo,
-      amountNaira: kobo / 100,
-      currency: 'NGN',
-      message: 'Payment successfully committed to Paystack Escrow (5-day protection active)',
-    });
-  } catch (err: any) {
-    console.error('Error confirming test payment:', err.message);
-    return res.status(500).json({ status: false, message: 'Server error confirming test payment' });
-  }
-});
-
-// 5b. POST /paystack/refund - Refund API calling Paystack and updating escrow/wallet
-router.post('/paystack/refund', requireAdmin, async (req: AuthenticatedRequest, res: any) => {
-  const user = req.user!;
-  const { reference, orderId, amountKobo, reason } = req.body;
-
-  if (!reference && !orderId) {
-    return res.status(400).json({ status: false, message: 'Payment reference or orderId is required for refund' });
-  }
-
-  try {
-    // 1. Call Paystack Refund API if configured
-    let refundData: any = null;
-    if (PAYSTACK_SECRET_KEY && reference) {
-      try {
-        const refundRes = await fetch('https://api.paystack.co/refund', {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            transaction: reference,
-            amount: amountKobo ? Number(amountKobo) : undefined,
-            merchant_note: reason || 'Customer refund approved by Shop It Admin',
-          }),
-        });
-        refundData = await refundRes.json();
-      } catch (paystackErr: any) {
-        console.error('[Paystack Refund API Warning]:', paystackErr.message);
-      }
-    }
-
-    // 2. Locate order in database
-    const orderRes = await dbQuery(
-      'SELECT * FROM shopit_orders WHERE payment_reference = $1 OR id = $2',
-      [reference || '', orderId || '']
-    );
-
-    if (orderRes.rows.length > 0) {
-      const order = orderRes.rows[0];
-
-      // Update order status to cancelled
-      await dbQuery(
-        `UPDATE shopit_orders
-         SET status = 'cancelled',
-             auto_release_at = NULL,
-             notes = COALESCE(notes || ' | ', '') || $1,
-             updated_at = NOW()
-         WHERE id = $2`,
-        [`Refunded: ${reason || 'Approved by Admin'}`, order.id]
-      );
-
-      // Record order status history
-      const oshId = `osh_ref_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-      await dbQuery(
-        `INSERT INTO shopit_order_status_history (
-          id, order_id, previous_status, new_status, changed_by, notes, created_at
-        ) VALUES ($1, $2, $3, 'cancelled', $4, $5, NOW())`,
-        [oshId, order.id, order.status, user.email, `Refund processed: ${reason || 'Admin approval'}`]
-      );
-
-      // Debit seller escrow balances in double-entry ledger
-      const items = Array.isArray(order.items) ? order.items : [];
-      const sellerTotals: Record<string, number> = {};
-
-      for (const item of items) {
-        if (item.sellerId) {
-          const itemKobo = Math.round(Number(item.sellerPrice || 0) * 100 * Number(item.quantity || 1));
-          sellerTotals[item.sellerId] = (sellerTotals[item.sellerId] || 0) + itemKobo;
-        }
-      }
-
-      for (const [sId, sellerRefundKobo] of Object.entries(sellerTotals)) {
-        const wRes = await dbQuery('SELECT pending_balance_kobo FROM shopit_wallets WHERE seller_id = $1', [sId]);
-        if (wRes.rows.length > 0) {
-          const currentPending = parseInt(wRes.rows[0].pending_balance_kobo || '0', 10);
-          const newPending = Math.max(0, currentPending - sellerRefundKobo);
-
-          await dbQuery(
-            `UPDATE shopit_wallets
-             SET pending_balance_kobo = $1,
-                 pending_balance = $2,
-                 updated_at = NOW()
-             WHERE seller_id = $3`,
-            [newPending, newPending / 100, sId]
-          );
-
-          const ledgerId = `LEDGER-REF-${order.id}-${sId.slice(-4)}`;
-          await dbQuery(
-            `INSERT INTO shopit_ledger_entries (
-              id, wallet_id, type, amount, fee, balance_after, balance_type,
-              amount_kobo, fee_kobo, balance_after_kobo, description, reference, created_at
-            ) VALUES (
-              $1, $2, 'refund', $3, 0, $4, 'pending',
-              $5, 0, $6, $7, $8, NOW()
-            )`,
-            [
-              ledgerId,
-              sId,
-              sellerRefundKobo / 100,
-              newPending / 100,
-              sellerRefundKobo,
-              newPending,
-              `Refund deducted from pending escrow for Order #${order.id}`,
-              reference || order.id,
-            ]
-          );
-        }
-      }
-    }
-
-    // 3. Update payment record
-    if (reference) {
-      await dbQuery(
-        `UPDATE shopit_payments
-         SET status = 'refunded',
-             updated_at = NOW()
-         WHERE reference = $1`,
-        [reference]
-      );
-    }
-
-    // 4. Audit Log
-    logAuditEvent({
-      action: 'PAYSTACK_REFUND_EXECUTED',
-      actor: { id: user.userId, email: user.email, role: user.role },
-      target: { type: 'payment', id: reference || orderId },
-      details: { amountKobo, reason, orderId, refundData },
-      ip: req.ip,
-      userAgent: req.headers['user-agent'] as string,
-    });
-
-    return res.json({
-      status: true,
-      message: 'Refund successfully executed, escrow returned to buyer, and ledger debited.',
-      data: refundData?.data,
-    });
-  } catch (err: any) {
-    console.error('[Refund Error]:', err.message);
-    return res.status(500).json({ status: false, message: `Refund processing failed: ${err.message}` });
-  }
-});
-
-// 5c. GET /paystack/payments - Full payment list for Admin Payments Page (requires Admin/Finance)
-router.get('/paystack/payments', requireFinance, async (_req: AuthenticatedRequest, res: any) => {
-  try {
-    const payRes = await dbQuery('SELECT * FROM shopit_payments ORDER BY created_at DESC LIMIT 200');
-    return res.json({ status: true, payments: payRes.rows });
-  } catch (err: any) {
-    return res.status(500).json({ status: false, message: err.message });
-  }
-});
-
-// 6. GET /paystack/events (requires Admin)
-router.get('/paystack/events', requireAdmin, (_req: AuthenticatedRequest, res: any) => {
-  res.json({
-    status: true,
-    events: processedWebhookEvents,
-    processedCount: processedReferences.size,
-  });
-});
-
-// Safety switch middleware: returns 503 when PAYOUTS_ENABLED is not 'true'
-const requirePayoutsEnabled = (_req: any, res: any, next: any) => {
-  if (process.env.PAYOUTS_ENABLED !== 'true') {
-    return res.status(503).json({
-      status: false,
-      error: 'PAYOUTS_DISABLED',
-      message: 'Payouts are currently disabled by system safety switch. No withdrawal can be requested or debited.',
-    });
-  }
-  next();
-};
-
-// 7. POST /paystack/transfer - Seller withdrawal dispatcher with cooling period, OTP, & ledger debit
-router.post('/paystack/transfer', requirePayoutsEnabled, requireAuth, async (req: AuthenticatedRequest, res: any) => {
-  if (process.env.PAYOUTS_ENABLED !== 'true') {
-    return res.status(503).json({
-      status: false,
-      error: 'PAYOUTS_DISABLED',
-      message: 'Payouts are currently disabled by system safety switch. No withdrawal can be requested or debited.',
-    });
-  }
-
-  const user = req.user!;
-  const { amount, payoutAccountId, otpCode, bankName, accountNumber, sellerId } = req.body;
-
-  const targetSellerId = sellerId || user.userId;
-
-  // 1. Minimum withdrawal ₦1,000
-  const amountNum = Math.floor(Number(amount) || 0);
-  if (amountNum < 1000) {
-    return res.status(400).json({ status: false, message: 'Minimum withdrawal is ₦1,000' });
-  }
-
-  try {
-    // 2. Fetch seller details & check verification
-    const sellerRes = await dbQuery(
-      'SELECT * FROM shopit_sellers WHERE id = $1 OR user_id = $1',
-      [targetSellerId]
-    );
-
-    if (sellerRes.rows.length === 0 && user.role !== 'admin') {
-      return res.status(403).json({ status: false, message: 'Only registered artisans can initiate withdrawals.' });
-    }
-
-    const seller = sellerRes.rows[0];
-    if (seller && seller.verification_status !== 'verified' && seller.verification_status !== 'approved') {
-      return res.status(403).json({
-        status: false,
-        message: 'NIN and biometric verification required before withdrawing earnings.',
-      });
-    }
-
-    // 3. Fetch wallet
-    const actualSellerId = seller ? seller.id : targetSellerId;
-    const walletRes = await dbQuery('SELECT * FROM shopit_wallets WHERE seller_id = $1', [actualSellerId]);
-
-    if (walletRes.rows.length === 0) {
-      return res.status(404).json({ status: false, message: 'Seller wallet not found.' });
-    }
-
-    const wallet = walletRes.rows[0];
-    if (wallet.is_frozen) {
-      return res.status(403).json({
-        status: false,
-        message: `Wallet is currently frozen: ${wallet.freeze_reason || 'Administrative review'}. Withdrawals are paused.`,
-      });
-    }
-
-    // 4. Validate Payout Account & 24-hour cooling period
-    const payoutAccounts: any[] = Array.isArray(wallet.payout_accounts) ? wallet.payout_accounts : [];
-    const account = payoutAccounts.find((a: any) => a.id === payoutAccountId) || payoutAccounts[0] || {
-      bankName: bankName || 'Bank Account',
-      accountNumber: accountNumber || '0000000000',
-    };
-
-    if (account.coolingPeriodEndsAt) {
-      const coolingEnd = new Date(account.coolingPeriodEndsAt).getTime();
-      if (Date.now() < coolingEnd) {
-        const hoursRemaining = Math.max(1, Math.ceil((coolingEnd - Date.now()) / (1000 * 60 * 60)));
-        return res.status(403).json({
-          status: false,
-          message: `This payout account is in a 24-hour security cooling period (${hoursRemaining}h remaining) to prevent unauthorized drainage.`,
-        });
-      }
-    }
-
-    // 5. Verify Email OTP
-    if (!otpCode) {
-      return res.status(400).json({ status: false, message: 'Withdrawal authorization OTP is required.' });
-    }
-
-    const otpRecord = await getOtpRecord(user.email, 'withdrawal');
-    const isOtpValid = otpRecord
-      ? verifyOtpHash(String(otpCode).trim(), otpRecord.codeHash)
-      : (process.env.NODE_ENV !== 'production' && String(otpCode).trim() === '123456');
-
-    if (!isOtpValid) {
-      return res.status(400).json({ status: false, message: 'Invalid or expired withdrawal OTP. Please request a new code.' });
-    }
-
-    if (otpRecord) {
-      await deleteOtpRecord(user.email, 'withdrawal');
-    }
-
-    // 6. Network fee calculation (Free >= ₦5,000, ₦50 below)
-    const fee = amountNum >= 5000 ? 0 : 50;
-    const amountKobo = amountNum * 100;
-    const feeKobo = fee * 100;
-    const totalDeductionKobo = amountKobo + feeKobo;
-
-    const availableKobo = parseInt(wallet.available_balance_kobo || '0', 10);
-    if (availableKobo < totalDeductionKobo) {
-      return res.status(400).json({
-        status: false,
-        message: `Insufficient Available balance. Available: ₦${(availableKobo / 100).toLocaleString()}. Needed: ₦${((totalDeductionKobo) / 100).toLocaleString()} (including ₦${fee} network fee).`,
-      });
-    }
-
-    // 7. Check PAYOUTS_ENABLED
-    const PAYOUTS_ENABLED = process.env.PAYOUTS_ENABLED === 'true';
-    const transferCode = `TRF_${Date.now()}_${Math.floor(10000 + Math.random() * 90000)}`;
-    let paystackTransferResult: any = null;
-
-    if (PAYOUTS_ENABLED && PAYSTACK_SECRET_KEY) {
-      try {
-        // Create recipient
-        const recipRes = await fetch('https://api.paystack.co/transferrecipient', {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            type: 'nuban',
-            name: account.accountName || seller?.shop_name || user.name,
-            account_number: account.accountNumber,
-            bank_code: account.bankCode || '044',
-            currency: 'NGN',
-          }),
-        });
-        const recipData: any = await recipRes.json();
-
-        if (recipData.status && recipData.data?.recipient_code) {
-          const transRes = await fetch('https://api.paystack.co/transfer', {
-            method: 'POST',
-            headers: {
-              Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              source: 'balance',
-              amount: amountKobo,
-              recipient: recipData.data.recipient_code,
-              reason: `Shop It Seller Withdrawal - ${seller?.shop_name || user.name}`,
-              reference: transferCode,
-            }),
-          });
-          paystackTransferResult = await transRes.json();
-          if (!paystackTransferResult.status) {
-            return res.status(502).json({
-              status: false,
-              message: `Paystack Transfer failed: ${paystackTransferResult.message || 'Unknown error'}`,
-            });
-          }
-        }
-      } catch (paystackErr: any) {
-        console.error('[Paystack Transfer Error]:', paystackErr.message);
-        return res.status(502).json({
-          status: false,
-          message: `Failed to initiate Paystack Transfer: ${paystackErr.message}`,
-        });
-      }
-    } else {
-      console.log(`[Paystack Payout Safe Simulation] PAYOUTS_ENABLED=${PAYOUTS_ENABLED}. Transfer ₦${amountNum} simulated to ${account.bankName} (${account.accountNumber}). TransferCode: ${transferCode}`);
-    }
-
-    // 8. Atomic Wallet Balance Update & Ledger Debit
-    const newAvailableKobo = availableKobo - totalDeductionKobo;
-    const currentWithdrawnKobo = parseInt(wallet.total_withdrawn_kobo || '0', 10);
-    const newWithdrawnKobo = currentWithdrawnKobo + amountKobo;
-
-    await dbQuery(
-      `UPDATE shopit_wallets
-       SET available_balance_kobo = $1,
-           available_balance = $2,
-           total_withdrawn_kobo = $3,
-           total_withdrawn = $4,
-           updated_at = NOW()
-       WHERE seller_id = $5`,
-      [newAvailableKobo, newAvailableKobo / 100, newWithdrawnKobo, newWithdrawnKobo / 100, actualSellerId]
-    );
-
-    const ledgerId = `LEDGER-WTD-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
-    await dbQuery(
-      `INSERT INTO shopit_ledger_entries (
-        id, wallet_id, type, amount, fee, balance_after, balance_type,
-        amount_kobo, fee_kobo, balance_after_kobo, description, reference, created_at
-      ) VALUES (
-        $1, $2, 'withdrawal', $3, $4, $5, 'available',
-        $6, $7, $8, $9, $10, NOW()
-      )`,
-      [
-        ledgerId,
-        actualSellerId,
-        amountNum,
-        fee,
-        newAvailableKobo / 100,
-        amountKobo,
-        feeKobo,
-        newAvailableKobo,
-        `Paystack Transfer Payout · ${account.bankName} (${account.accountNumber})`,
-        transferCode,
-      ]
-    );
-
-    // 9. Alert admin if withdrawal >= ₦50,000
-    if (amountNum >= 50000) {
-      await sendAdminAlert(
-        `withdrawal_alert_${transferCode}`,
-        `High-Value Withdrawal Request (₦${amountNum.toLocaleString()})`,
-        `Artisan <strong>"${seller?.shop_name || user.name}"</strong> withdrew <strong>₦${amountNum.toLocaleString()}</strong>.<br/>
-         Bank: <strong>${account.bankName}</strong><br/>
-         Account Number: <strong>Ending in ${String(account.accountNumber).slice(-4)}</strong><br/>
-         Reference: <strong>${transferCode}</strong>`
-      );
-    }
-
-    // 10. Audit Log
-    logAuditEvent({
-      action: 'SELLER_WITHDRAWAL_DISPATCHED',
-      actor: { id: user.userId, email: user.email, role: user.role },
-      target: { type: 'wallet', id: actualSellerId },
-      details: { amount: amountNum, fee, transferCode, simulated: !PAYOUTS_ENABLED, bankName: account.bankName },
-      ip: req.ip,
-      userAgent: req.headers['user-agent'] as string,
-    });
-
-    return res.json({
-      status: true,
-      transferCode,
-      amount: amountNum,
-      fee,
-      bankName: account.bankName,
-      accountNumber: account.accountNumber,
-      simulated: !PAYOUTS_ENABLED,
-      message: PAYOUTS_ENABLED
-        ? `Transfer of ₦${amountNum.toLocaleString()} dispatched to ${account.bankName} (${account.accountNumber}). Reference: ${transferCode}`
-        : `Transfer of ₦${amountNum.toLocaleString()} completed in test mode (PAYOUTS_ENABLED is disabled). Balance debited. Reference: ${transferCode}`,
-    });
-  } catch (err: any) {
-    console.error('[Withdrawal Handler Error]:', err.message);
-    return res.status(500).json({ status: false, message: `Withdrawal failed: ${err.message}` });
-  }
-});
-
-// 7b. POST /reports - Submit safety/dispute report (Part 2 Item 4)
-router.post('/reports', async (req, res) => {
-  try {
     const { targetType, targetId, targetTitle, reporterEmail, reason, details } = req.body;
-
     if (!targetType || !targetId || !reason) {
       return res.status(400).json({ status: false, message: 'targetType, targetId, and reason are required' });
     }
 
-    const reportId = `REP_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
+    const reportId = `REP_${Date.now()}_${crypto.randomInt(1000, 10000)}`;
+    const resolvedEmail = req.user?.email || reporterEmail || undefined;
+
     const newReport: ReportRecord = {
       id: reportId,
       targetType: targetType as any,
-      targetId,
-      targetTitle: targetTitle || 'Marketplace Item / User',
-      reporterEmail,
-      reason,
-      details: details || '',
+      targetId: String(targetId).slice(0, 120),
+      targetTitle: String(targetTitle || 'Marketplace Item / User').slice(0, 200),
+      reporterEmail: resolvedEmail ? String(resolvedEmail).slice(0, 200) : undefined,
+      reason: String(reason).slice(0, 200),
+      details: String(details || '').slice(0, 2000),
       status: 'open',
       actionLogs: [
         {
           action: 'Report Submitted',
-          note: `Flagged for: ${reason}`,
+          note: `Flagged for: ${String(reason).slice(0, 150)}`,
           timestamp: new Date().toISOString(),
         },
       ],
@@ -2512,31 +2435,23 @@ router.post('/reports', async (req, res) => {
 
     await saveReportRecord(newReport);
 
-    // Part 2 Item 5: Alert admin of new safety report
     await sendAdminAlert(
       `report_alert_${reportId}`,
-      `Safety Report Filed: ${targetType.toUpperCase()}`,
-      `A user submitted a safety report.<br/>
-       Target Type: <strong>${targetType}</strong><br/>
-       Target: <strong>${targetTitle || targetId}</strong><br/>
-       Reason: <strong>${reason}</strong><br/>
-       Details: ${details || 'None provided'}<br/>
-       Reporter: ${reporterEmail || 'Anonymous'}`
+      `Safety Report Filed: ${escapeHtml(String(targetType).toUpperCase())}`,
+      `Target Type: <strong>${escapeHtml(targetType)}</strong><br/>
+       Target: <strong>${escapeHtml(newReport.targetTitle)}</strong><br/>
+       Reason: <strong>${escapeHtml(newReport.reason)}</strong><br/>
+       Details: ${escapeHtml(newReport.details || 'None provided')}<br/>
+       Reporter: ${escapeHtml(newReport.reporterEmail || 'Anonymous')}`
     );
 
-    return res.json({
-      status: true,
-      reportId,
-      message: 'Report received. Our moderation team will investigate promptly.',
-    });
+    return res.json({ status: true, reportId, message: 'Report received. Our moderation team will investigate promptly.' });
   } catch (err: any) {
-    console.error('Error submitting report:', err.message);
-    return res.status(500).json({ status: false, message: 'Internal server error filing report' });
+    return res.status(500).json({ status: false, message: 'Internal server error filing report.' });
   }
 });
 
-// 7c. GET /reports - List all reports for Moderator Panel (Part 2 Item 4)
-router.get('/reports', async (_req, res) => {
+router.get('/reports', requireModerator, async (_req: AuthenticatedRequest, res) => {
   try {
     const reports = await getAllReportRecords();
     return res.json({ status: true, reports });
@@ -2545,137 +2460,37 @@ router.get('/reports', async (_req, res) => {
   }
 });
 
-// 7d. PATCH /reports/:id - Update report status and add action note (Part 2 Item 4)
-router.patch('/reports/:id', async (req, res) => {
+router.patch('/reports/:id', requireModerator, async (req: AuthenticatedRequest, res) => {
   try {
     const { id } = req.params;
     const { status, actionNote } = req.body;
-
     if (!['open', 'reviewing', 'resolved'].includes(status)) {
       return res.status(400).json({ status: false, message: 'Invalid status. Must be open, reviewing, or resolved.' });
     }
-
     await updateReportStatus(id, status as any, actionNote);
+    await logAuditEvent({
+      action: 'REPORT_STATUS_UPDATED',
+      actor: { id: req.user!.userId, email: req.user!.email, role: req.user!.role },
+      target: { type: 'report', id },
+      details: { status, actionNote },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
     return res.json({ status: true, message: `Report status updated to ${status}.` });
   } catch (err: any) {
     return res.status(500).json({ status: false, message: err.message });
   }
 });
 
-// 7e. GET /admin/export-data - Sanitized JSON export omitting NINs & biometric photos (Part 2 Item 3)
-router.get('/admin/export-data', async (_req, res) => {
-  try {
-    const payments = await getAllPaymentRecords();
-    const reports = await getAllReportRecords();
-    
-    // Sanitize verification records: never export full NINs or base64 photo buffers!
-    const sanitizedVerifications = Array.from(verificationSubmissions.values()).map(v => ({
-      id: v.id,
-      sellerId: v.sellerId,
-      shopName: v.shopName,
-      ownerName: v.ownerName,
-      idType: v.idType,
-      maskedNin: v.idNumber, // masked like ***-***-1234
-      under18: v.under18,
-      status: v.status,
-      submittedAt: v.submittedAt,
-      reviewedAt: v.reviewedAt,
-      // NOTE: Photographic image data and plain NINs omitted under NDPA 2023
-    }));
-
-    const exportPayload = {
-      version: '1.0',
-      exportedAt: new Date().toISOString(),
-      platform: 'Shop It Nigeria (TEEDS)',
-      summary: {
-        totalPayments: payments.length,
-        totalReports: reports.length,
-        totalVerifications: sanitizedVerifications.length,
-      },
-      payments,
-      reports,
-      verifications: sanitizedVerifications,
-      orders: Array.from(serverOrders.values()),
-    };
-
-    res.setHeader('Content-Type', 'application/json');
-    res.setHeader('Content-Disposition', `attachment; filename="shopit-backup-${Date.now()}.json"`);
-    return res.send(JSON.stringify(exportPayload, null, 2));
-  } catch (err: any) {
-    return res.status(500).json({ status: false, message: err.message });
-  }
-});
-
 // ============================================================================
-// REAL SELLER IDENTITY VERIFICATION ENGINE (NDPA 2023 COMPLIANT)
+// SELLER IDENTITY VERIFICATION ENGINE (NDPA 2023 + AES-256-GCM + POSTGRESQL)
 // ============================================================================
 
-// Secret salt for hashing NINs (never store plain NINs at rest)
-const NIN_HASH_SALT = process.env.NIN_HASH_SALT || 'shopit_ndpa_nin_salt_2026';
-const DOC_TOKEN_SECRET = process.env.DOC_TOKEN_SECRET || 'shopit_doc_signed_key_2026';
-
-// Server-side state stores for verification
-const registeredNinHashes = new Map<string, { sellerId: string; shopName: string; registeredAt: string }>();
-const failedVerificationAttempts = new Map<string, { count: number; lockedUntil: number }>();
-const verificationSubmissions = new Map<string, any>();
-const verificationDocuments = new Map<string, { data: string; sellerId: string; type: string; uploadedAt: string }>();
-const verificationAuditLogs: Array<{ id: string; action: string; targetId: string; moderator: string; timestamp: string; details: string }> = [];
-
-// Helper: Hash NIN with salt for duplicate detection
-function hashNin(nin: string): string {
-  return crypto.createHmac('sha256', NIN_HASH_SALT).update(nin.trim()).digest('hex');
-}
-
-// Helper: Generate short-lived signed access token for private document preview
-function generateDocToken(docId: string, expiresInMs = 60 * 60 * 1000): { token: string; expires: number; url: string } {
-  const expires = Date.now() + expiresInMs;
-  const signature = crypto.createHmac('sha256', DOC_TOKEN_SECRET).update(`${docId}:${expires}`).digest('hex');
-  const token = `${signature}.${expires}`;
-  const url = `/api/verification/document/${docId}?token=${encodeURIComponent(token)}`;
-  return { token, expires, url };
-}
-
-// Helper: Verify signed document token
-function verifyDocToken(docId: string, token: string): boolean {
-  try {
-    const [sig, expStr] = token.split('.');
-    const expires = Number(expStr);
-    if (!sig || !expires || Date.now() > expires) return false;
-
-    const expectedSig = crypto.createHmac('sha256', DOC_TOKEN_SECRET).update(`${docId}:${expires}`).digest('hex');
-    const sigBuf = Buffer.from(sig, 'utf8');
-    const expBuf = Buffer.from(expectedSig, 'utf8');
-    return sigBuf.length === expBuf.length && crypto.timingSafeEqual(sigBuf, expBuf);
-  } catch {
-    return false;
-  }
-}
-
-// Helper: Compare typed full name with NIMC registered name (case-insensitive token overlap)
-function calculateNameMatch(typed: string, registered: string): number {
-  if (!typed || !registered) return 0;
-  const typedTokens = typed.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(Boolean);
-  const regTokens = registered.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(Boolean);
-  if (typedTokens.length === 0 || regTokens.length === 0) return 0;
-
-  let matches = 0;
-  for (const t of typedTokens) {
-    if (regTokens.includes(t)) matches++;
-  }
-  return Math.round((matches / Math.max(typedTokens.length, 2)) * 100);
-}
-
-// Server-side call to real Nigerian Identity Verification API
 async function verifyWithNigerianIdentityApi(nin: string, fullName: string, dob: string) {
-  const apiKey =
-    process.env.PREMBLY_API_KEY ||
-    process.env.DOJAH_API_KEY ||
-    process.env.SMILE_ID_API_KEY ||
-    process.env.YOUVERIFY_API_KEY ||
-    process.env.NIN_VERIFY_API_KEY;
-
-  // If a live API key is configured, call the active provider
-  if (apiKey && process.env.PREMBLY_API_KEY) {
+  const apiKey = (process.env.PREMBLY_API_KEY || '').trim();
+  if (apiKey) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
     try {
       const response = await fetch('https://api.prembly.com/identity-pass/verification/nin', {
         method: 'POST',
@@ -2685,423 +2500,368 @@ async function verifyWithNigerianIdentityApi(nin: string, fullName: string, dob:
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ number: nin }),
+        signal: controller.signal,
       });
       const data: any = await response.json();
       if (data.status && data.data) {
         const nimcName = `${data.data.firstname || ''} ${data.data.middlename || ''} ${data.data.surname || ''}`.trim();
         const nimcDob = data.data.birthdate || data.data.dob || '';
-        const nameScore = calculateNameMatch(fullName, nimcName);
+        const typedTokens = fullName.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(Boolean);
+        const regTokens = nimcName.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(Boolean);
+        const matches = typedTokens.filter(t => regTokens.includes(t)).length;
+        const nameScore = Math.round((matches / Math.max(typedTokens.length, 2)) * 100);
         const dobMatch = Boolean(dob && nimcDob && dob.replace(/-/g, '') === nimcDob.replace(/-/g, ''));
 
         return {
           success: true,
           provider: 'prembly',
-          status: nameScore >= 60 && dobMatch ? 'match' : 'manual_review_required',
-          nameMatchScore: nameScore,
-          dobMatch,
-          nimcRegisteredName: nimcName,
-          nimcDob,
-          verifiedAt: new Date().toISOString(),
+          status: nameScore >= 60 && dobMatch ? ('match' as const) : ('manual_review_required' as const),
         };
       }
     } catch (err: any) {
-      console.warn('Prembly API call failed, forwarding to admin review queue:', err.message);
+      console.warn('Prembly API check failed, routing to manual review queue:', err.message);
+    } finally {
+      clearTimeout(timeout);
     }
   }
 
-  // When live 3rd-party API key is not present on host, validate 11-digit NIN format & checksum
-  const cleanDigits = String(nin).replace(/\D/g, '');
-  if (cleanDigits.length === 11 && fullName && fullName.trim().length >= 2) {
-    return {
-      success: true,
-      provider: 'nimc_direct_verification',
-      status: 'match' as const,
-      nameMatchScore: 95,
-      dobMatch: true,
-      nimcRegisteredName: fullName.trim(),
-      verifiedAt: new Date().toISOString(),
-    };
-  }
-
+  // Never auto-verify solely from 11 digits without a live NIN verification API response
   return {
     success: false,
-    provider: 'nimc_direct_verification',
+    provider: 'manual_moderator_review',
     status: 'manual_review_required' as const,
-    nameMatchScore: 85,
-    dobMatch: true,
-    requiresAdminReview: true,
-    verifiedAt: new Date().toISOString(),
   };
 }
 
-// 9. POST /verification/submit - Submit full seller verification payload
-router.post('/verification/submit', async (req: any, res) => {
-  try {
-    const {
-      sellerId,
-      shopName,
-      fullName,
-      dateOfBirth,
-      nin,
-      idDocumentType,
-      idDocumentPhoto,
-      selfiePhoto,
-      livenessScore,
-      under18,
-      guardianFullName,
-      guardianNin,
-      guardianIdDocumentPhoto,
-      guardianConsentSigned,
-      ndpaConsentSigned,
-    } = req.body;
+router.post(
+  '/sellers/verify/submit',
+  requireAuth,
+  requireOwnershipOrAdmin(req => req.body?.sellerId || req.body?.userId || ''),
+  async (req: AuthenticatedRequest, res) => {
+    try {
+      const user = req.user!;
+      const { sellerId, ownerName, shopName, nin, idType, under18, guardianName, guardianPhone, guardianConsent } = req.body;
+      const targetId = sellerId || user.sellerId || user.userId;
 
-    if (!sellerId || !fullName || !nin || !idDocumentPhoto || !selfiePhoto) {
-      return res.status(400).json({
-        status: false,
-        message: 'Missing required verification details (Full Name, NIN, ID Photo, and Live Selfie are mandatory).',
-      });
+      if (!ownerName || !String(ownerName).trim()) {
+        return res.status(400).json({ status: false, message: 'Legal full name (ownerName) is required.' });
+      }
+
+      const cleanNin = String(nin || '').trim().replace(/\D/g, '');
+      if (cleanNin.length !== 11) {
+        return res.status(400).json({ status: false, message: 'A valid 11-digit NIN is required.' });
+      }
+
+      const rlCheck = await checkAndRecordRateLimit(`verif_legacy:${targetId}`, 5, 24 * 60 * 60 * 1000);
+      if (!rlCheck.allowed) {
+        return res.status(429).json({ status: false, message: 'Too many verification attempts today. Please try again later.' });
+      }
+
+      const ninLast4 = cleanNin.slice(-4);
+      const reqId = `VERIF-${Date.now()}-${crypto.randomBytes(2).toString('hex')}`;
+
+      await dbQuery(
+        `INSERT INTO shopit_verifications (
+          id, seller_id, user_id, shop_name, owner_name, id_type, id_number_masked, full_nin_last4,
+          status, under_18, guardian_name, guardian_phone, notes, submitted_at, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9, $10, $11, $12, NOW(), NOW(), NOW())`,
+        [
+          reqId,
+          targetId,
+          user.userId,
+          shopName || null,
+          ownerName || user.name,
+          idType || 'nin_slip',
+          ninLast4 ? `***-***-${ninLast4}` : '****',
+          ninLast4 || '****',
+          Boolean(under18),
+          guardianName || null,
+          guardianPhone || null,
+          'Submitted for moderator review',
+        ]
+      );
+
+      await dbQuery(
+        `UPDATE shopit_sellers
+         SET verification_status = 'pending', verified_legal_name = COALESCE($1, verified_legal_name),
+             verified_nin_last4 = COALESCE($2, verified_nin_last4), under_18 = $3,
+             guardian_name = $4, guardian_phone = $5, guardian_consent = $6, updated_at = NOW()
+         WHERE id = $7 OR user_id = $7`,
+        [ownerName || null, ninLast4 || null, Boolean(under18), guardianName || null, guardianPhone || null, Boolean(guardianConsent), targetId]
+      );
+
+      return res.json({ status: true, requestId: reqId, message: 'Verification submitted for review.' });
+    } catch (err: any) {
+      return res.status(500).json({ status: false, message: err.message });
     }
+  }
+);
 
-    // Rule 1: Validate 11-digit numeric NIN
-    const cleanNin = String(nin).trim().replace(/\D/g, '');
-    if (cleanNin.length !== 11) {
-      return res.status(400).json({
-        status: false,
-        message: 'National Identification Number (NIN) must contain exactly 11 numeric digits.',
-      });
-    }
+router.post(
+  '/verification/submit',
+  requireAuth,
+  requireOwnershipOrAdmin(req => req.body?.sellerId || req.user?.sellerId || req.user?.userId || ''),
+  async (req: AuthenticatedRequest, res) => {
+    try {
+      const user = req.user!;
+      const {
+        sellerId,
+        shopName,
+        fullName,
+        dateOfBirth,
+        nin,
+        idDocumentType,
+        idDocumentPhoto,
+        selfiePhoto,
+        livenessScore,
+        under18,
+        guardianFullName,
+        guardianNin,
+        guardianIdDocumentPhoto,
+        guardianConsentSigned,
+        ndpaConsentSigned,
+      } = req.body;
 
-    // Rule 1: NDPA Consent required
-    if (!ndpaConsentSigned) {
-      return res.status(400).json({
-        status: false,
-        message: 'You must provide consent under the Nigeria Data Protection Act (NDPA 2023) to continue.',
-      });
-    }
+      const resolvedSellerId = sellerId || user.sellerId || user.userId;
 
-    // Rule 5: Failed attempts limiter (Max 3 failed attempts in 24 hours)
-    const attemptsEntry = failedVerificationAttempts.get(sellerId);
-    if (attemptsEntry) {
-      if (Date.now() < attemptsEntry.lockedUntil) {
-        const remainingMinutes = Math.ceil((attemptsEntry.lockedUntil - Date.now()) / (60 * 1000));
+      if (!fullName || !nin || !idDocumentPhoto || !selfiePhoto) {
+        return res.status(400).json({
+          status: false,
+          message: 'Full Name, NIN, ID Photo, and Live Selfie are mandatory.',
+        });
+      }
+
+      if (!ndpaConsentSigned) {
+        return res.status(400).json({ status: false, message: 'NDPA 2023 consent is required.' });
+      }
+
+      const maxDocChars = 7 * 1024 * 1024;
+      if (
+        String(idDocumentPhoto).length > maxDocChars ||
+        String(selfiePhoto).length > maxDocChars ||
+        (guardianIdDocumentPhoto && String(guardianIdDocumentPhoto).length > maxDocChars)
+      ) {
+        return res.status(413).json({ status: false, message: 'Uploaded verification images exceed maximum 5MB limit.' });
+      }
+
+      const cleanNin = String(nin).trim().replace(/\D/g, '');
+      if (cleanNin.length !== 11) {
+        return res.status(400).json({ status: false, message: 'NIN must contain exactly 11 numeric digits.' });
+      }
+
+      // Limit verification failures in Postgres across serverless restarts (3 tries / 24h)
+      const rlCheck = await checkAndRecordRateLimit(`verif_submit:${resolvedSellerId}`, 5, 24 * 60 * 60 * 1000);
+      if (!rlCheck.allowed) {
         return res.status(429).json({
           status: false,
           code: 'VERIFICATION_LOCKED',
-          message: `Too many failed verification attempts. Your verification is locked for security. Please try again in ${remainingMinutes} minutes or contact Moderator Support.`,
-          lockedUntil: new Date(attemptsEntry.lockedUntil).toISOString(),
+          message: 'Too many verification submissions today. Please wait 24 hours or contact Support.',
         });
-      } else if (Date.now() >= attemptsEntry.lockedUntil) {
-        // Reset expired lock
-        failedVerificationAttempts.delete(sellerId);
       }
-    }
 
-    // Rule 5: One NIN per account enforcement
-    const ninDigest = hashNin(cleanNin);
-    const existingRegistration = registeredNinHashes.get(ninDigest);
-    if (existingRegistration && existingRegistration.sellerId !== sellerId) {
-      // Record failed attempt
-      const curr = failedVerificationAttempts.get(sellerId) || { count: 0, lockedUntil: 0 };
-      const newCount = curr.count + 1;
-      const lockedUntil = newCount >= 3 ? Date.now() + 24 * 60 * 60 * 1000 : 0;
-      failedVerificationAttempts.set(sellerId, { count: newCount, lockedUntil });
+      // Check duplicate NIN across distinct sellers directly in Postgres
+      const ninDigest = hashNin(cleanNin);
+      const dupRes = await dbQuery('SELECT seller_id FROM shopit_verifications WHERE id_hash = $1 LIMIT 1', [ninDigest]);
+      if (dupRes.rows.length > 0 && dupRes.rows[0].seller_id !== resolvedSellerId) {
+        await logAuditEvent({
+          action: 'DUPLICATE_NIN_FLAGGED',
+          actor: { id: user.userId, email: user.email, role: user.role },
+          target: { type: 'seller', id: resolvedSellerId },
+          ip: req.ip,
+          userAgent: req.get('user-agent'),
+        });
+        return res.status(409).json({
+          status: false,
+          code: 'DUPLICATE_NIN',
+          message: 'This NIN is already associated with another Shop It account.',
+        });
+      }
 
-      verificationAuditLogs.unshift({
-        id: `audit_${Date.now()}`,
-        action: 'DUPLICATE_NIN_FLAGGED',
-        targetId: sellerId,
-        moderator: 'SYSTEM_FRAUD_SCANNER',
-        timestamp: new Date().toISOString(),
-        details: `Duplicate NIN attempt detected. Already registered to seller "${existingRegistration.shopName}" (${existingRegistration.sellerId}).`,
+      if (under18) {
+        if (!guardianFullName || !guardianNin || !guardianConsentSigned || !guardianIdDocumentPhoto) {
+          return res.status(400).json({
+            status: false,
+            message: 'Sellers under 18 require guardian full name, 11-digit NIN, guardian ID, and consent.',
+          });
+        }
+        if (String(guardianNin).replace(/\D/g, '').length !== 11) {
+          return res.status(400).json({ status: false, message: 'Guardian NIN must contain 11 numeric digits.' });
+        }
+      }
+
+      const idDocId = `doc_id_${resolvedSellerId}_${Date.now()}`;
+      const selfieDocId = `doc_selfie_${resolvedSellerId}_${Date.now()}`;
+      const guardianDocId = under18 ? `doc_guardian_${resolvedSellerId}_${Date.now()}` : undefined;
+
+      const idDocSigned = generateDocToken(idDocId);
+      const selfieDocSigned = generateDocToken(selfieDocId);
+
+      const apiResult = await verifyWithNigerianIdentityApi(cleanNin, fullName, dateOfBirth);
+      const finalStatus: 'pending' | 'verified' =
+        apiResult.success && apiResult.status === 'match' && (Number(livenessScore) || 0) >= 70 ? 'verified' : 'pending';
+
+      const submissionId = `VERIF_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
+      const fullNinLast4 = cleanNin.slice(-4);
+      const maskedNin = `***-***-${fullNinLast4}`;
+
+      await withTransaction(async client => {
+        await client.query(
+          `INSERT INTO shopit_verification_documents (id, seller_id, doc_type, encrypted_data, created_at)
+           VALUES ($1, $2, 'id_document', $3, NOW()), ($4, $2, 'selfie', $5, NOW())`,
+          [
+            idDocId,
+            resolvedSellerId,
+            encryptSensitiveData(String(idDocumentPhoto)),
+            selfieDocId,
+            encryptSensitiveData(String(selfiePhoto)),
+          ]
+        );
+
+        if (guardianDocId && guardianIdDocumentPhoto) {
+          await client.query(
+            `INSERT INTO shopit_verification_documents (id, seller_id, doc_type, encrypted_data, created_at)
+             VALUES ($1, $2, 'guardian_id', $3, NOW())`,
+            [guardianDocId, resolvedSellerId, encryptSensitiveData(String(guardianIdDocumentPhoto))]
+          );
+        }
+
+        await client.query(
+          `INSERT INTO shopit_verifications (
+            id, seller_id, user_id, shop_name, owner_name, id_type,
+            id_number_masked, full_nin_last4, nin_last4, id_hash,
+            document_url, selfie_url, under_18, guardian_name,
+            guardian_phone, status, notes, submitted_at, created_at, updated_at
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, NOW(), NOW(), NOW())`,
+          [
+            submissionId,
+            resolvedSellerId,
+            user.userId,
+            shopName || `${fullName}'s Crafts`,
+            fullName.trim(),
+            idDocumentType || 'nin_slip',
+            maskedNin,
+            fullNinLast4,
+            fullNinLast4,
+            ninDigest,
+            idDocSigned.url,
+            selfieDocSigned.url,
+            Boolean(under18),
+            guardianFullName ? String(guardianFullName).trim() : null,
+            guardianNin ? String(guardianNin).slice(-4) : null,
+            finalStatus,
+            `Submission via portal (${apiResult.provider}). Liveness: ${Math.round(Number(livenessScore) || 90)}%`,
+          ]
+        );
+
+        await client.query(
+          `UPDATE shopit_sellers
+           SET verification_status = $1, is_verified_seller = $2, verified_legal_name = $3,
+               verified_nin_last4 = $4, verified_at = CASE WHEN $2 = true THEN NOW() ELSE verified_at END, updated_at = NOW()
+           WHERE id = $5 OR user_id = $5`,
+          [finalStatus, finalStatus === 'verified', fullName.trim(), fullNinLast4, resolvedSellerId]
+        );
       });
 
-      return res.status(409).json({
-        status: false,
-        code: 'DUPLICATE_NIN',
-        message: 'This National Identification Number (NIN) has already been registered to another Shop It account. Each artisan requires a unique NIN.',
-        attemptsLeft: Math.max(0, 3 - newCount),
+      await logAuditEvent({
+        action: finalStatus === 'verified' ? 'NIN_AUTO_VERIFIED' : 'NIN_SUBMITTED_FOR_ADMIN_REVIEW',
+        actor: { id: user.userId, email: user.email, role: user.role },
+        target: { type: 'seller', id: resolvedSellerId },
+        details: { submissionId, maskedNin, provider: apiResult.provider },
+        ip: req.ip,
+        userAgent: req.get('user-agent'),
       });
-    }
 
-    // Rule 1: Sellers under 18 guardian requirements
-    if (under18) {
-      if (!guardianFullName || !guardianNin || !guardianConsentSigned || !guardianIdDocumentPhoto) {
-        return res.status(400).json({
-          status: false,
-          message: 'Sellers under 18 must provide guardian full name, guardian 11-digit NIN, guardian ID upload, and signed consent.',
-        });
-      }
-      const cleanGuardianNin = String(guardianNin).trim().replace(/\D/g, '');
-      if (cleanGuardianNin.length !== 11) {
-        return res.status(400).json({
-          status: false,
-          message: 'Guardian National Identification Number (NIN) must contain exactly 11 numeric digits.',
-        });
-      }
-    }
+      await sendAdminAlert(
+        `verif_submission_${submissionId}`,
+        `New Seller Identity Verification: ${escapeHtml(shopName || fullName)}`,
+        `Artisan <strong>"${escapeHtml(shopName || fullName)}"</strong> (${escapeHtml(fullName)}) submitted verification.<br/>
+         Status: <strong>${finalStatus === 'verified' ? 'Verified' : 'Pending Moderator Review'}</strong><br/>
+         Masked NIN: <strong>${escapeHtml(maskedNin)}</strong>`
+      );
 
-    // Store documents privately with signed tokens
-    const idDocId = `doc_id_${sellerId}_${Date.now()}`;
-    const selfieDocId = `doc_selfie_${sellerId}_${Date.now()}`;
-    const guardianDocId = under18 ? `doc_guardian_${sellerId}_${Date.now()}` : undefined;
-
-    verificationDocuments.set(idDocId, { data: idDocumentPhoto, sellerId, type: 'id_document', uploadedAt: new Date().toISOString() });
-    verificationDocuments.set(selfieDocId, { data: selfiePhoto, sellerId, type: 'selfie', uploadedAt: new Date().toISOString() });
-    if (guardianDocId && guardianIdDocumentPhoto) {
-      verificationDocuments.set(guardianDocId, { data: guardianIdDocumentPhoto, sellerId, type: 'guardian_id', uploadedAt: new Date().toISOString() });
-    }
-
-    const idDocSigned = generateDocToken(idDocId);
-    const selfieDocSigned = generateDocToken(selfieDocId);
-    const guardianDocSigned = guardianDocId ? generateDocToken(guardianDocId) : undefined;
-
-    // Rule 2: Run Real Nigerian Identity API Check
-    const apiResult = await verifyWithNigerianIdentityApi(cleanNin, fullName, dateOfBirth);
-
-    const submissionId = `VERIF_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
-    const fullNinLast4 = cleanNin.slice(-4);
-    const maskedNin = `***-***-${fullNinLast4}`;
-
-    // Status assignment: if API successfully confirmed match, it can be verified; if unavailable/flagged, goes to admin queue
-    let finalStatus: 'pending' | 'verified' | 'needs_resubmission' = 'pending';
-    if (apiResult.success && apiResult.status === 'match' && (Number(livenessScore) || 90) >= 70) {
-      finalStatus = 'verified';
-      // Register NIN hash
-      registeredNinHashes.set(ninDigest, { sellerId, shopName: shopName || fullName, registeredAt: new Date().toISOString() });
-    } else {
-      finalStatus = 'pending'; // In Admin Review Queue
-    }
-
-    const submissionRecord = {
-      id: submissionId,
-      sellerId,
-      shopName: shopName || `${fullName}'s Crafts`,
-      ownerName: fullName.trim(),
-      dateOfBirth,
-      idType: idDocumentType || 'nin_slip',
-      fullNinLast4,
-      idNumber: maskedNin,
-      idDocId,
-      selfieDocId,
-      guardianDocId,
-      idCardPhotoUrl: idDocSigned.url,
-      selfiePhotoUrl: selfieDocSigned.url,
-      guardianIdCardPhotoUrl: guardianDocSigned?.url,
-      livenessVerified: true,
-      livenessScore: Math.round(Number(livenessScore) || 92),
-      under18: Boolean(under18),
-      guardianName: guardianFullName ? String(guardianFullName).trim() : undefined,
-      guardianNinLast4: guardianNin ? String(guardianNin).slice(-4) : undefined,
-      guardianConsentSigned: Boolean(guardianConsentSigned),
-      ndpaConsentSigned: true,
-      ndpaConsentTimestamp: new Date().toISOString(),
-      submittedAt: new Date().toISOString(),
-      status: finalStatus,
-      attemptsCount: 1,
-      apiCheckResult: apiResult,
-      deviceFingerprint: req.headers['user-agent'] || 'Web Browser',
-      ipAddress: req.ip || '127.0.0.1',
-    };
-
-    verificationSubmissions.set(sellerId, submissionRecord);
-
-    // Persist to Neon PostgreSQL shopit_verifications
-    try {
-      await dbQuery(`
-        INSERT INTO shopit_verifications (
-          id, seller_id, user_id, shop_name, owner_name, id_type,
-          id_number_masked, full_nin_last4, nin_last4, id_hash,
-          document_url, selfie_url, under_18, guardian_name,
-          guardian_phone, status, notes, submitted_at, created_at, updated_at
-        ) VALUES (
-          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, NOW(), NOW(), NOW()
-        )
-      `, [
-        submissionId,
-        sellerId,
-        req.user?.id || sellerId,
-        shopName || `${fullName}'s Crafts`,
-        fullName.trim(),
-        idDocumentType || 'nin_slip',
+      return res.status(200).json({
+        status: true,
+        verificationId: submissionId,
+        verificationStatus: finalStatus,
         maskedNin,
-        fullNinLast4,
-        fullNinLast4,
-        ninDigest,
-        idDocSigned.url,
-        selfieDocSigned.url,
-        Boolean(under18),
-        guardianFullName ? String(guardianFullName).trim() : null,
-        guardianNin ? String(guardianNin).slice(-4) : null,
-        finalStatus,
-        `Submission via portal. Liveness: ${Math.round(Number(livenessScore) || 92)}%`
-      ]);
-
-      // Update shopit_sellers status
-      await dbQuery(`
-        UPDATE shopit_sellers
-        SET verification_status = $1,
-            is_verified_seller = $2,
-            verified_legal_name = $3,
-            verified_nin_last4 = $4,
-            verified_at = CASE WHEN $2 = true THEN NOW() ELSE verified_at END,
-            updated_at = NOW()
-        WHERE id = $5 OR user_id = $5
-      `, [
-        finalStatus,
-        finalStatus === 'verified',
-        fullName.trim(),
-        fullNinLast4,
-        sellerId
-      ]);
-
-      // Update shopit_users status
-      await dbQuery(`
-        UPDATE shopit_users
-        SET verification_status = $1,
-            is_verified_seller = $2,
-            updated_at = NOW()
-        WHERE id = $3 OR id IN (SELECT user_id FROM shopit_sellers WHERE id = $3)
-      `, [
-        finalStatus,
-        finalStatus === 'verified',
-        sellerId
-      ]);
-    } catch (dbErr: any) {
-      console.warn('[Verification Submit DB Save Warning]:', dbErr.message);
+        ownerName: fullName,
+        verifiedAt: finalStatus === 'verified' ? new Date().toISOString() : undefined,
+        message:
+          finalStatus === 'verified'
+            ? 'Identity verification succeeded. Your Verified Artisan badge is active!'
+            : 'Verification submitted successfully. Your documents have been queued for Trust & Safety review.',
+      });
+    } catch (err: any) {
+      console.error('Error in /api/verification/submit:', err.message);
+      return res.status(500).json({ status: false, message: 'Internal server error processing verification submission.' });
     }
-
-    verificationAuditLogs.unshift({
-      id: `audit_${Date.now()}`,
-      action: finalStatus === 'verified' ? 'NIN_AUTO_VERIFIED' : 'NIN_SUBMITTED_FOR_ADMIN_REVIEW',
-      targetId: sellerId,
-      moderator: finalStatus === 'verified' ? 'SYSTEM_NIMC_API' : 'PENDING_MODERATOR',
-      timestamp: new Date().toISOString(),
-      details: `Artisan "${fullName}" submitted verification. Status: ${finalStatus}. Masked NIN: ${maskedNin}. API Provider: ${apiResult.provider}.`,
-    });
-
-    // Part 2 Item 5: Alert admin of new seller verification submission
-    await sendAdminAlert(
-      `verif_submission_${submissionId}`,
-      `New Seller Identity Verification: ${shopName || fullName}`,
-      `Artisan <strong>"${shopName || fullName}"</strong> (${fullName}) submitted identity documents for verification.<br/>
-       Status: <strong>${finalStatus === 'verified' ? 'Auto-Verified with NIMC' : 'Pending Moderator Review'}</strong><br/>
-       ID Type: <strong>${idDocumentType || 'NIN Slip'}</strong><br/>
-       Masked NIN: <strong>${maskedNin}</strong><br/>
-       Under 18: <strong>${under18 ? 'Yes (Guardian details attached)' : 'No'}</strong>`
-    );
-
-    return res.status(200).json({
-      status: true,
-      verificationId: submissionId,
-      verificationStatus: finalStatus,
-      maskedNin,
-      ownerName: fullName,
-      verifiedAt: finalStatus === 'verified' ? new Date().toISOString() : undefined,
-      message:
-        finalStatus === 'verified'
-          ? 'Identity verification succeeded with NIMC records. Your Verified Artisan badge is active!'
-          : 'Verification submitted successfully. Your documents have been forwarded to the Trust & Safety review queue.',
-    });
-  } catch (err: any) {
-    console.error('Error in /api/verification/submit:', err.message);
-    return res.status(500).json({ status: false, message: 'Internal server error processing verification submission.' });
   }
-});
+);
 
-// 10. GET /verification/status/:sellerId - Check current verification status for seller (Neon PostgreSQL)
-router.get('/verification/status/:sellerId', async (req, res) => {
-  try {
-    const { sellerId } = req.params;
-
-    // 1. Query PostgreSQL shopit_sellers & shopit_users
-    const sellerRes = await dbQuery(`
-      SELECT s.is_verified_seller, s.verification_status, s.verification_rejection_reason,
-             s.verified_legal_name, s.verified_nin_last4, s.verified_at,
-             u.is_verified_seller as user_is_verified, u.verification_status as user_verification_status
-      FROM shopit_sellers s
-      LEFT JOIN shopit_users u ON s.user_id = u.id OR s.id = u.id
-      WHERE s.id = $1 OR s.user_id = $1 OR LOWER(s.email) = LOWER($1)
-    `, [sellerId]);
-
-    let userRow: any = null;
-    if (sellerRes.rows.length === 0) {
-      const uRes = await dbQuery(
-        'SELECT is_verified_seller, verification_status FROM shopit_users WHERE id = $1 OR LOWER(email) = LOWER($1)',
+router.get(
+  '/verification/status/:sellerId',
+  requireAuth,
+  requireOwnershipOrAdmin(req => req.params.sellerId),
+  async (req: AuthenticatedRequest, res) => {
+    try {
+      const { sellerId } = req.params;
+      const sellerRes = await dbQuery(
+        `SELECT s.is_verified_seller, s.verification_status, s.verification_rejection_reason,
+                s.verified_legal_name, s.verified_nin_last4, s.verified_at
+         FROM shopit_sellers s
+         WHERE s.id = $1 OR s.user_id = $1`,
         [sellerId]
       );
-      if (uRes.rows.length > 0) userRow = uRes.rows[0];
+
+      const sellerRow = sellerRes.rows[0];
+      const verifRes = await dbQuery(
+        'SELECT status, rejection_reason, admin_notes FROM shopit_verifications WHERE seller_id = $1 OR user_id = $1 ORDER BY submitted_at DESC LIMIT 1',
+        [sellerId]
+      );
+
+      const isVerified = Boolean(
+        sellerRow?.is_verified_seller ||
+        sellerRow?.verification_status === 'verified' ||
+        sellerRow?.verification_status === 'approved' ||
+        verifRes.rows[0]?.status === 'verified' ||
+        verifRes.rows[0]?.status === 'approved'
+      );
+
+      const verifStatus = isVerified
+        ? 'verified'
+        : verifRes.rows[0]?.status || sellerRow?.verification_status || 'not_started';
+
+      return res.json({
+        status: true,
+        verificationStatus: verifStatus,
+        isVerified,
+        maskedNin: sellerRow?.verified_nin_last4 ? `******${sellerRow.verified_nin_last4}` : undefined,
+        ownerName: sellerRow?.verified_legal_name,
+        verifiedAt: sellerRow?.verified_at,
+        rejectionReason: sellerRow?.verification_rejection_reason || verifRes.rows[0]?.rejection_reason || verifRes.rows[0]?.admin_notes,
+        isLocked: false,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ status: false, message: 'Database error retrieving verification status.' });
     }
-
-    const sellerRow = sellerRes.rows[0];
-    const isVerified = Boolean(
-      sellerRow?.is_verified_seller ||
-      sellerRow?.user_is_verified ||
-      sellerRow?.verification_status === 'verified' ||
-      sellerRow?.verification_status === 'approved' ||
-      sellerRow?.user_verification_status === 'verified' ||
-      userRow?.is_verified_seller ||
-      userRow?.verification_status === 'verified' ||
-      userRow?.verification_status === 'approved'
-    );
-
-    let verifStatus = isVerified
-      ? 'verified'
-      : (sellerRow?.verification_status || userRow?.verification_status || 'not_started');
-
-    // 2. Check shopit_verifications for any recent submission
-    const verifRes = await dbQuery(
-      'SELECT status, rejection_reason, admin_notes FROM shopit_verifications WHERE seller_id = $1 OR user_id = $1 ORDER BY submitted_at DESC LIMIT 1',
-      [sellerId]
-    );
-
-    if (verifRes.rows.length > 0) {
-      const vStatus = verifRes.rows[0].status;
-      if (isVerified || vStatus === 'approved' || vStatus === 'verified') {
-        verifStatus = 'verified';
-      } else if (vStatus === 'pending') {
-        verifStatus = 'pending';
-      } else if (vStatus === 'rejected') {
-        verifStatus = 'rejected';
-      } else if (vStatus === 'needs_resubmission') {
-        verifStatus = 'needs_resubmission';
-      }
-    }
-
-    const rejectionReason =
-      sellerRow?.verification_rejection_reason ||
-      verifRes.rows[0]?.rejection_reason ||
-      verifRes.rows[0]?.admin_notes;
-
-    return res.json({
-      status: true,
-      verificationStatus: verifStatus,
-      isVerified,
-      maskedNin: sellerRow?.verified_nin_last4 ? `******${sellerRow.verified_nin_last4}` : undefined,
-      ownerName: sellerRow?.verified_legal_name,
-      verifiedAt: sellerRow?.verified_at,
-      rejectionReason,
-      isLocked: false,
-      attemptsLeft: 3,
-    });
-  } catch (err: any) {
-    console.error('[Verification Status Error]:', err.message);
-    return res.status(500).json({ status: false, message: 'Database error retrieving verification status.' });
   }
-});
+);
 
-
-// 11. GET /verification/admin/queue - Full review queue for Moderator Panel (Neon PostgreSQL)
-router.get('/verification/admin/queue', async (_req, res) => {
+router.get('/verification/admin/queue', requireModerator, async (_req: AuthenticatedRequest, res) => {
   try {
     const dbRes = await dbQuery(`
-      SELECT v.*, s.shop_name as seller_shop_name, s.owner_name as seller_owner_name, s.email as seller_email
+      SELECT v.*, s.shop_name as seller_shop_name, s.owner_name as seller_owner_name
       FROM shopit_verifications v
       LEFT JOIN shopit_sellers s ON (s.id = v.seller_id OR s.user_id = v.seller_id)
       ORDER BY v.submitted_at DESC
       LIMIT 100
     `);
 
-    const dbQueue = dbRes.rows.map((row: any) => ({
+    const auditRes = await dbQuery(
+      "SELECT id, action, target_id, actor_email, details, created_at FROM shopit_audit_logs WHERE action LIKE 'NIN_%' OR action LIKE '%VERIF%' OR action LIKE '%NIN%' ORDER BY created_at DESC LIMIT 50"
+    );
+
+    const queue = dbRes.rows.map((row: any) => ({
       id: row.id,
       sellerId: row.seller_id,
       shopName: row.shop_name || row.seller_shop_name || 'Artisan Shop',
@@ -3112,212 +2872,250 @@ router.get('/verification/admin/queue', async (_req, res) => {
       under18: Boolean(row.under_18),
       guardianName: row.guardian_name,
       guardianPhone: row.guardian_phone,
-      guardianConsent: Boolean(row.guardian_consent),
       status: row.status,
       rejectionReason: row.rejection_reason,
       adminNotes: row.admin_notes || row.notes,
       reviewedBy: row.reviewed_by,
       reviewedAt: row.reviewed_at,
-      submittedAt: row.submitted_at || row.created_at || new Date().toISOString(),
-      idCardPhotoUrl: row.document_url || '/shopit-logo.png',
-      selfiePhotoUrl: row.selfie_url || '/shopit-logo.png',
+      submittedAt: row.submitted_at || row.created_at,
+      idCardPhotoUrl: row.document_url || '',
+      selfiePhotoUrl: row.selfie_url || '',
     }));
-
-    const memQueue = Array.from(verificationSubmissions.values()).map(sub => {
-      const idDoc = generateDocToken(sub.idDocId);
-      const selfieDoc = generateDocToken(sub.selfieDocId);
-      const guardianDoc = sub.guardianDocId ? generateDocToken(sub.guardianDocId) : undefined;
-      return {
-        ...sub,
-        idCardPhotoUrl: idDoc.url,
-        selfiePhotoUrl: selfieDoc.url,
-        guardianIdCardPhotoUrl: guardianDoc?.url,
-      };
-    });
-
-    const combinedQueue = [...dbQueue];
-    for (const mem of memQueue) {
-      if (!combinedQueue.some(q => q.id === mem.id || q.sellerId === mem.sellerId)) {
-        combinedQueue.push(mem);
-      }
-    }
 
     return res.json({
       status: true,
-      totalCount: combinedQueue.length,
-      pendingCount: combinedQueue.filter(q => q.status === 'pending').length,
-      queue: combinedQueue,
-      auditLogs: verificationAuditLogs.slice(0, 50),
+      totalCount: queue.length,
+      pendingCount: queue.filter((q: any) => q.status === 'pending').length,
+      queue,
+      auditLogs: auditRes.rows,
     });
   } catch (err: any) {
     return res.status(500).json({ status: false, message: err.message });
   }
 });
 
-// 12. POST /verification/admin/review - Approve, reject, or request resubmission in PostgreSQL
-router.post('/verification/admin/review', async (req: any, res) => {
+router.post('/verification/admin/review', requireModerator, async (req: AuthenticatedRequest, res) => {
   try {
+    const user = req.user!;
     const sellerTarget = req.body.sellerId || req.body.requestId || req.body.targetId;
     const rawAction = req.body.action || req.body.decision;
     const reason = req.body.reason || req.body.rejectionReason;
-    const adminName = req.body.adminName || 'Adeyinka Joseph (Moderator)';
+    const reviewedBy = user.email; // Derived strictly from authenticated moderator session
 
     if (!sellerTarget) {
-      return res.status(400).json({ status: false, message: 'sellerId or requestId is required' });
+      return res.status(400).json({ status: false, message: 'sellerId or requestId is required.' });
     }
 
     const action = rawAction === 'approved' ? 'verified' : rawAction;
     if (!['verified', 'rejected', 'needs_resubmission'].includes(action)) {
-      return res.status(400).json({ status: false, message: 'Invalid action. Must be verified, rejected, or needs_resubmission.' });
+      return res.status(400).json({ status: false, message: 'Invalid action.' });
     }
 
     const isVerified = action === 'verified';
-    const status = action;
 
-    // 1. Update shopit_sellers in PostgreSQL
-    const sellerUpdate = await dbQuery(
-      `UPDATE shopit_sellers
-       SET is_verified_seller = $1,
-           verification_status = $2,
-           verified_at = CASE WHEN $1 = true THEN NOW() ELSE NULL END,
-           verification_rejection_reason = $3,
-           updated_at = NOW()
-       WHERE id = $4 OR user_id = $4 OR LOWER(email) = LOWER($4)`,
-      [isVerified, status, isVerified ? null : (reason || null), sellerTarget]
-    );
-
-    // If no row existed in shopit_sellers, create it from shopit_users
-    if (sellerUpdate.rowCount === 0) {
-      await dbQuery(
-        `INSERT INTO shopit_sellers (
-           id, user_id, shop_name, owner_name, email, is_verified_seller, verification_status, verified_at, created_at, updated_at
-         )
-         SELECT u.id, u.id, COALESCE(u.name || '''s Shop', 'Artisan Shop'), u.name, u.email, $1, $2, CASE WHEN $1 = true THEN NOW() ELSE NULL END, NOW(), NOW()
-         FROM shopit_users u
-         WHERE u.id = $3 OR LOWER(u.email) = LOWER($3)
-         ON CONFLICT (id) DO UPDATE SET is_verified_seller = $1, verification_status = $2, updated_at = NOW()`,
-        [isVerified, status, sellerTarget]
+    await withTransaction(async client => {
+      const sellerUpdate = await client.query(
+        `UPDATE shopit_sellers
+         SET is_verified_seller = $1, verification_status = $2,
+             verified_at = CASE WHEN $1 = true THEN NOW() ELSE NULL END,
+             verification_rejection_reason = $3, updated_at = NOW()
+         WHERE id = $4 OR user_id = $4 OR LOWER(email) = LOWER($4)`,
+        [isVerified, action, isVerified ? null : reason || null, sellerTarget]
       );
-    }
 
-    // 2. Update shopit_users in PostgreSQL so the seller's account is verified everywhere
-    await dbQuery(
-      `UPDATE shopit_users
-       SET is_verified_seller = $1,
-           verification_status = $2,
-           role = CASE WHEN $1 = true AND role = 'buyer' THEN 'seller' ELSE role END,
-           updated_at = NOW()
-       WHERE id = $3 OR LOWER(email) = LOWER($3)
-          OR id IN (SELECT user_id FROM shopit_sellers WHERE id = $3)`,
-      [isVerified, status, sellerTarget]
-    );
+      if (sellerUpdate.rowCount === 0) {
+        await client.query(
+          `INSERT INTO shopit_sellers (id, user_id, shop_name, owner_name, email, is_verified_seller, verification_status, verified_at, created_at, updated_at)
+           SELECT u.id, u.id, COALESCE(u.name || '''s Shop', 'Artisan Shop'), u.name, u.email, $1, $2, CASE WHEN $1 = true THEN NOW() ELSE NULL END, NOW(), NOW()
+           FROM shopit_users u WHERE u.id = $3 OR LOWER(u.email) = LOWER($3)
+           ON CONFLICT (id) DO UPDATE SET is_verified_seller = $1, verification_status = $2, updated_at = NOW()`,
+          [isVerified, action, sellerTarget]
+        );
+      }
 
-    // 3. Update shopit_verifications in PostgreSQL
-    await dbQuery(
-      `UPDATE shopit_verifications
-       SET status = $1,
-           reviewed_by = $2,
-           reviewed_at = NOW(),
-           rejection_reason = $3,
-           admin_notes = $3,
-           notes = $3,
-           updated_at = NOW()
-       WHERE seller_id = $4 OR user_id = $4 OR id = $4`,
-      [status, adminName, reason || null, sellerTarget]
-    );
+      await client.query(
+        `UPDATE shopit_users
+         SET role = CASE WHEN $1 = true AND role = 'buyer' THEN 'seller' ELSE role END, updated_at = NOW()
+         WHERE id = $2 OR LOWER(email) = LOWER($2) OR id IN (SELECT user_id FROM shopit_sellers WHERE id = $2)`,
+        [isVerified, sellerTarget]
+      );
 
-    // Update memory cache if present
-    const submission = verificationSubmissions.get(sellerTarget);
-    if (submission) {
-      submission.status = action;
-      submission.reviewedAt = new Date().toISOString();
-      submission.reviewedBy = adminName;
-      submission.rejectionReason = action === 'verified' ? undefined : reason;
-    }
+      await client.query(
+        `UPDATE shopit_verifications
+         SET status = $1, reviewed_by = $2, reviewed_at = NOW(),
+             rejection_reason = $3, admin_notes = $3, notes = $3, updated_at = NOW()
+         WHERE seller_id = $4 OR user_id = $4 OR id = $4`,
+        [action, reviewedBy, reason || null, sellerTarget]
+      );
+    });
 
-    console.log(`[Admin Governance] Review completed in PostgreSQL for ${sellerTarget}: ${action} by ${adminName}`);
+    await logAuditEvent({
+      action: `VERIFICATION_${action.toUpperCase()}`,
+      actor: { id: user.userId, email: user.email, role: user.role },
+      target: { type: 'seller', id: sellerTarget },
+      details: { reason },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
+
     return res.json({
       status: true,
       sellerId: sellerTarget,
       isVerifiedSeller: isVerified,
-      verificationStatus: status,
-      message: `Seller verification status updated to '${action}' in PostgreSQL database.`,
+      verificationStatus: action,
+      message: `Seller verification status updated to '${action}'.`,
     });
   } catch (err: any) {
-    console.error('[Admin Review Error]:', err.message);
     return res.status(500).json({ status: false, message: err.message });
   }
 });
 
-// 13. GET /verification/document/:docId - Secure signed token document stream
-router.get('/verification/document/:docId', (req, res) => {
-  const { docId } = req.params;
-  const token = req.query.token as string;
+router.get('/verification/document/:docId', requireAuth, async (req: AuthenticatedRequest, res) => {
+  try {
+    const user = req.user!;
+    const { docId } = req.params;
+    const token = String(req.query.token || '');
 
-  if (!token || !verifyDocToken(docId, token)) {
-    return res.status(403).json({ status: false, message: 'Access denied: invalid or expired document view token.' });
+    if (!token || !verifyDocToken(docId, token)) {
+      return res.status(403).json({ status: false, message: 'Access denied: invalid or expired document token.' });
+    }
+
+    const docRes = await dbQuery('SELECT seller_id, encrypted_data FROM shopit_verification_documents WHERE id = $1', [docId]);
+    if (docRes.rows.length === 0) {
+      return res.status(404).json({ status: false, message: 'Requested identity document was not found or was purged.' });
+    }
+
+    const doc = docRes.rows[0];
+    const isOwner = doc.seller_id === user.userId || (user.sellerId && doc.seller_id === user.sellerId);
+    const isModeratorAdmin = user.role === 'admin' && ['superadmin', 'moderator'].includes(user.subRole || '');
+    if (!isOwner && !isModeratorAdmin) {
+      return res.status(403).json({ status: false, message: 'Forbidden: only the document owner or a Trust & Safety moderator may view identity documents.' });
+    }
+
+    const plainData = decryptSensitiveData(doc.encrypted_data);
+    if (plainData.startsWith('data:image/')) {
+      const matches = plainData.match(/^data:(image\/[a-zA-Z0-9+.-]+);base64,(.+)$/);
+      if (matches) {
+        res.setHeader('Content-Type', matches[1]);
+        res.setHeader('Cache-Control', 'no-store');
+        return res.send(Buffer.from(matches[2], 'base64'));
+      }
+    }
+
+    return res.json({ status: true, docId, data: plainData });
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: 'Unable to retrieve document.' });
   }
+});
 
-  const doc = verificationDocuments.get(docId);
-  if (!doc) {
-    return res.status(404).json({ status: false, message: 'Requested identity document was not found or was purged under NDPA.' });
-  }
+router.post(
+  '/verification/delete-data',
+  requireAuth,
+  requireOwnershipOrAdmin(req => req.body?.sellerId || req.user?.sellerId || req.user?.userId || ''),
+  async (req: AuthenticatedRequest, res) => {
+    try {
+      const user = req.user!;
+      const sellerId = req.body?.sellerId || user.sellerId || user.userId;
+      const { confirmationText } = req.body;
 
-  // If data is base64 data URI, extract buffer and return binary image
-  if (doc.data.startsWith('data:image/')) {
-    const matches = doc.data.match(/^data:(image\/[a-zA-Z0-9+.-]+);base64,(.+)$/);
-    if (matches) {
-      const contentType = matches[1];
-      const buffer = Buffer.from(matches[2], 'base64');
-      res.setHeader('Content-Type', contentType);
-      res.setHeader('Cache-Control', 'private, max-age=3600');
-      return res.send(buffer);
+      if (confirmationText !== 'PURGE_MY_IDENTITY_DATA') {
+        return res.status(400).json({ status: false, message: 'Confirmation phrase "PURGE_MY_IDENTITY_DATA" required.' });
+      }
+
+      await withTransaction(async client => {
+        await client.query('DELETE FROM shopit_verification_documents WHERE seller_id = $1', [sellerId]);
+        await client.query(
+          `UPDATE shopit_verifications
+           SET document_url = '[Purged]', selfie_url = '[Purged]', id_hash = NULL, updated_at = NOW()
+           WHERE seller_id = $1 OR user_id = $1`,
+          [sellerId]
+        );
+      });
+
+      await logAuditEvent({
+        action: 'NDPA_DATA_PURGED',
+        actor: { id: user.userId, email: user.email, role: user.role },
+        target: { type: 'seller', id: sellerId },
+        ip: req.ip,
+        userAgent: req.get('user-agent'),
+      });
+
+      return res.json({ status: true, message: 'Identification documents permanently purged under NDPA 2023.' });
+    } catch (err: any) {
+      return res.status(500).json({ status: false, message: err.message });
     }
   }
+);
 
-  // Fallback return data URI as JSON
-  return res.json({ status: true, docId, data: doc.data });
+// ============================================================================
+// CRON JOBS (Guarded by CRON_SECRET Bearer token or Admin Session)
+// ============================================================================
+
+// expireStalePendingOrders imported from ./lib/payments.js (30-min pending expiry + atomic stock restore)
+
+router.all('/cron/escrow', requireCronOrAdmin, async (_req, res) => {
+  const result = await processEscrowAutoRelease();
+  return res.json({ status: true, ...result });
 });
 
-// 14. POST /verification/delete-data - NDPA 2023 / GDPR Right to be forgotten
-router.post('/verification/delete-data', (req, res) => {
-  const { sellerId, confirmationText } = req.body;
-
-  if (!sellerId || confirmationText !== 'PURGE_MY_IDENTITY_DATA') {
-    return res.status(400).json({ status: false, message: 'Confirmation phrase "PURGE_MY_IDENTITY_DATA" required.' });
-  }
-
-  const sub = verificationSubmissions.get(sellerId);
-  if (sub) {
-    if (sub.idDocId) verificationDocuments.delete(sub.idDocId);
-    if (sub.selfieDocId) verificationDocuments.delete(sub.selfieDocId);
-    if (sub.guardianDocId) verificationDocuments.delete(sub.guardianDocId);
-    verificationSubmissions.delete(sellerId);
-  }
-
-  verificationAuditLogs.unshift({
-    id: `audit_${Date.now()}`,
-    action: 'NDPA_DATA_PURGED',
-    targetId: sellerId,
-    moderator: 'USER_SELF_PURGE',
-    timestamp: new Date().toISOString(),
-    details: `All photographic ID images and biometric selfies permanently purged under Nigeria Data Protection Act.`,
-  });
-
-  return res.json({
-    status: true,
-    message: 'All identification documents and verification records have been permanently purged.',
-  });
+router.all('/cron/expire-orders', requireCronOrAdmin, async (_req, res) => {
+  const result = await expireStalePendingOrders();
+  return res.json({ status: true, ...result });
 });
 
-// Mount router under BOTH '/api' and '/' so any Vercel path rewrite matches flawlessly
+router.post('/coupons/validate', requireAuth, async (req: AuthenticatedRequest, res) => {
+  try {
+    const cleanCode = String(req.body?.code || '').trim().toUpperCase();
+    const subtotalNaira = Math.max(0, Number(req.body?.subtotal) || 0);
+    if (!cleanCode) {
+      return res.status(400).json({ status: false, message: 'Promo code is required.' });
+    }
+
+    const couponRes = await dbQuery('SELECT * FROM shopit_coupons WHERE UPPER(code) = $1 LIMIT 1', [cleanCode]);
+    if (couponRes.rows.length === 0) {
+      return res.status(404).json({ status: false, message: 'Invalid promo code.' });
+    }
+
+    const coupon = couponRes.rows[0];
+    if (!coupon.is_active) {
+      return res.status(400).json({ status: false, message: 'This promo code is no longer active.' });
+    }
+    if (coupon.expires_at && new Date(coupon.expires_at).getTime() < Date.now()) {
+      return res.status(400).json({ status: false, message: 'This promo code has expired.' });
+    }
+    if (coupon.max_uses !== null && coupon.max_uses !== undefined && Number(coupon.current_uses || 0) >= Number(coupon.max_uses)) {
+      return res.status(400).json({ status: false, message: 'This promo code has reached its usage limit.' });
+    }
+
+    const minOrderNaira = koboToNaira(parseInt(String(coupon.min_subtotal_kobo || '0'), 10));
+    if (subtotalNaira < minOrderNaira) {
+      return res.status(400).json({
+        status: false,
+        message: `This promo code requires a minimum item order of ₦${minOrderNaira.toLocaleString()}.`,
+      });
+    }
+
+    const discountAmount = koboToNaira(parseInt(String(coupon.discount_kobo || '0'), 10));
+    return res.json({
+      status: true,
+      coupon: {
+        code: coupon.code,
+        discountAmount,
+        minOrder: minOrderNaira,
+        description: `₦${discountAmount.toLocaleString()} promo discount (${coupon.code})`,
+      },
+    });
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: 'Unable to validate promo code.' });
+  }
+});
+
+// Mount router under BOTH '/api' and '/' so Vercel rewrites match cleanly
 app.use('/api', router);
 app.use('/', router);
 
-// Export standard handler for Vercel Serverless Functions
 export default function handler(req: any, res: any) {
   return app(req, res);
 }
 
-// Also export app for local development server mounting
 export { app };

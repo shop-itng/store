@@ -176,19 +176,3 @@ export const INITIAL_WALLETS: Record<string, SellerWallet> = {};
 
 export const INITIAL_SECURITY_PROFILES: Record<string, SecurityProfile> = {};
 
-export const NIGERIAN_BANKS = [
-  { code: '999992', name: 'OPay Digital Services', icon: '🟢' },
-  { code: '999991', name: 'PalmPay Limited', icon: '🟣' },
-  { code: '058', name: 'Guaranty Trust Bank (GTBank)', icon: '🟠' },
-  { code: '057', name: 'Zenith Bank', icon: '🔴' },
-  { code: '044', name: 'Access Bank', icon: '🟠' },
-  { code: '011', name: 'First Bank of Nigeria', icon: '🔵' },
-  { code: '033', name: 'United Bank for Africa (UBA)', icon: '🔴' },
-  { code: '50211', name: 'Kuda Microfinance Bank', icon: '🟣' },
-  { code: '50515', name: 'Moniepoint Microfinance Bank', icon: '🔵' },
-  { code: '035', name: 'Wema Bank / ALAT', icon: '🟣' },
-  { code: '214', name: 'First City Monument Bank (FCMB)', icon: '🟡' },
-  { code: '070', name: 'Fidelity Bank', icon: '🔵' },
-  { code: '232', name: 'Sterling Bank', icon: '🔴' },
-  { code: '221', name: 'Stanbic IBTC Bank', icon: '🔵' },
-];

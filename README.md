@@ -16,25 +16,27 @@ In the Vercel project deployment screen, open **Environment Variables** and add 
 
 | Variable Name | Description | Value / Example |
 | :--- | :--- | :--- |
-| `PAYSTACK_PUBLIC_KEY` | Public key used for checkout (no `VITE_` prefix required) | `pk_live_cc9a7381a83f3279812dfceaef5475977441cd94` |
-| `PAYSTACK_SECRET_KEY` | Server-only secret key for verification | `sk_live_...` (from your Paystack Dashboard) |
-| `PAYSTACK_WEBHOOK_SECRET` | Secret key used to verify webhook HMAC SHA-512 | `sk_live_...` (same as secret key) |
+| `FLW_PUBLIC_KEY` | Flutterwave public key | `FLWPUBK_TEST-...` (from Flutterwave Dashboard) |
+| `FLW_SECRET_KEY` | Server-only secret key for API calls & verification | `FLWSECK_TEST-...` (from Flutterwave Dashboard) |
+| `FLW_WEBHOOK_SECRET_HASH` | Secret hash matched against `verif-hash` header | Unique 32+ char secret set in Flutterwave Dashboard |
+| `VITE_FLW_PUBLIC_KEY` | Optional client test-mode indicator | `FLWPUBK_TEST-...` |
 | `APP_URL` | Your live Vercel URL | `https://shop-itng-pied.vercel.app` |
 
 Click **Deploy**.
 
 ---
 
-### Step 3: Set Your Paystack Webhook URL
+### Step 3: Set Your Flutterwave Webhook URL
 
-In your [Paystack Dashboard](https://dashboard.paystack.com/):
+In your [Flutterwave Dashboard](https://app.flutterwave.com/):
 
-1. Go to **Settings** → **API Keys & Webhooks**.
-2. Under **Live Webhook URL**, paste your exact endpoint:
+1. Go to **Settings** → **Webhooks**.
+2. Under **URL**, paste your exact endpoint:
    ```text
-   https://shop-itng-pied.vercel.app/api/paystack/webhook
+   https://shop-itng-pied.vercel.app/api/payments/webhook
    ```
-3. Click **Save Changes** (and click **Test** to send a test event).
+3. Under **Secret Hash**, paste the exact value you set for `FLW_WEBHOOK_SECRET_HASH`.
+4. Enable **Receive webhook response in JSON format** and click **Save**.
 
 ---
 
@@ -67,7 +69,7 @@ Outputs static assets to `dist/`.
 ---
 
 ## 🔒 Security Architecture
-- **Cryptographic HMAC SHA-512 Webhook Verification**: Incoming Paystack webhooks are verified with constant-time equality checks against the raw body buffer.
+- **Constant-Time `verif-hash` Webhook Verification + Server Re-Verification**: Incoming Flutterwave webhooks verify `verif-hash` in constant time and re-verify transactions directly via `GET /v3/transactions/:id/verify` before settling ledger balances.
 - **Server-Authoritative Pricing**: Subtotals, tiered service fees, delivery costs, and kobo amounts are computed strictly on the backend.
 - **Anti-Bypass Protection**: Phone numbers, account numbers, and off-platform contact patterns are filtered in chat to protect buyers and sellers from off-platform fraud.
 - **Handshake Verification**: 4-digit numeric OTPs secure safe campus and local parcel pickups.

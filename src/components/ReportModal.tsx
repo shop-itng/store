@@ -188,7 +188,7 @@ export const ReportModal: React.FC<Props> = ({
                 type="email"
                 value={reporterEmail}
                 onChange={e => setReporterEmail(e.target.value)}
-                placeholder="e.g. shopper@campus.ng"
+                placeholder="you@example.com"
                 className="w-full p-2.5 rounded-xl border-2 border-slate-200 dark:border-stone-700 bg-white dark:bg-stone-900 text-slate-900 dark:text-white focus:border-[#FF6B00] outline-hidden text-xs"
               />
             </div>

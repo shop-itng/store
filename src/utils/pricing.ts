@@ -8,8 +8,8 @@ export const DEFAULT_FEE_SETTINGS: FeeSettings = {
   tierHighPercentage: 0.05, // 5% above ₦10,000
   firstMonthPromoFree: false,
   withdrawalFeeRule: {
-    freeThreshold: 5000,
-    flatFeeBelowThreshold: 50,
+    freeThreshold: 0,
+    flatFeeBelowThreshold: 0,
   },
 };
 

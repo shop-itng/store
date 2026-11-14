@@ -58,11 +58,22 @@ export const OrdersView: React.FC = () => {
   React.useEffect(() => {
     if (typeof window === 'undefined') return;
     const urlParams = new URLSearchParams(window.location.search);
-    const ref = urlParams.get('ref') || urlParams.get('reference') || urlParams.get('trxref');
+    const ref =
+      urlParams.get('payment_ref') ||
+      urlParams.get('tx_ref') ||
+      urlParams.get('ref') ||
+      urlParams.get('reference') ||
+      urlParams.get('trxref');
+    const transactionId = urlParams.get('transaction_id');
     const trackId = urlParams.get('track') || urlParams.get('trackOrder');
 
     if (ref) {
-      fetch(`/api/paystack/verify/${encodeURIComponent(ref)}`)
+      const token = typeof localStorage !== 'undefined' ? localStorage.getItem('shopit_session_token') : null;
+      const query = transactionId ? `?transaction_id=${encodeURIComponent(transactionId)}` : '';
+      fetch(`/api/payments/verify/${encodeURIComponent(ref)}${query}`, {
+        headers: token ? { Authorization: `Bearer ${token}`, 'x-session-token': token } : {},
+        credentials: 'include',
+      })
         .then(res => res.json())
         .then(data => {
           if (data.isPaid === true) {
@@ -71,7 +82,9 @@ export const OrdersView: React.FC = () => {
               amount: data.amountNaira,
               orderId: data.orderId,
             });
-            notify('Payment confirmed via Paystack! Order verified and funds held in Escrow.', 'success');
+            notify('Payment confirmed via Flutterwave! Order verified and funds held in Escrow.', 'success');
+          } else if (data.expired) {
+            notify('Your 30-minute checkout window expired before payment settled. If you were debited, contact support with your reference.', 'error');
           }
         })
         .catch(() => {});
@@ -89,16 +102,18 @@ export const OrdersView: React.FC = () => {
 
   const filteredOrders = orders.filter(ord => {
     if (activeTab === 'active') {
-      return ord.status === 'paid' || ord.status === 'packed' || ord.status === 'shipped' || ord.status === 'delivered';
+      return ord.status === 'pending_payment' || ord.status === 'paid' || ord.status === 'packed' || ord.status === 'shipped' || ord.status === 'delivered';
     }
     if (activeTab === 'completed') {
-      return ord.status === 'completed' || ord.status === 'cancelled' || ord.status === 'disputed';
+      return ord.status === 'completed' || ord.status === 'cancelled' || ord.status === 'refunded' || ord.status === 'disputed';
     }
     return true;
   });
 
   const getStatusBadge = (status: OrderStatus) => {
     switch (status) {
+      case 'pending_payment':
+        return { label: 'Awaiting Payment', color: 'bg-amber-50 text-amber-800 border-amber-200' };
       case 'paid':
         return { label: 'Paid · In Escrow', color: 'bg-blue-50 text-blue-800 border-blue-200' };
       case 'packed':
@@ -109,6 +124,8 @@ export const OrdersView: React.FC = () => {
         return { label: 'Delivered · Awaiting Confirmation', color: 'bg-emerald-50 text-emerald-800 border-emerald-300 font-bold' };
       case 'completed':
         return { label: 'Completed · Escrow Released', color: 'bg-slate-100 text-slate-800 border-slate-200' };
+      case 'refunded':
+        return { label: 'Refunded', color: 'bg-rose-50 text-rose-800 border-rose-200' };
       case 'cancelled':
         return { label: 'Cancelled & Refunded', color: 'bg-rose-50 text-rose-800 border-rose-200' };
       case 'disputed':
@@ -199,7 +216,7 @@ export const OrdersView: React.FC = () => {
             </div>
             <div className="text-xs space-y-1">
               <span className="font-black text-emerald-800 dark:text-emerald-300 uppercase tracking-wider text-[10px] bg-emerald-100 dark:bg-emerald-900/50 px-2 py-0.5 rounded-full">
-                Payment Verified by Paystack
+                Payment Verified by Flutterwave
               </span>
               <h3 className="font-bold text-sm text-slate-900 dark:text-white">
                 Transaction Confirmed · Funds Secured in Escrow

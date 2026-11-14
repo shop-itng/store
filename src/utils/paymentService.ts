@@ -1,44 +1,33 @@
-import { LedgerEntry, PaystackWebhookEvent, PayoutAccount } from '../types';
+import { LedgerEntry, PayoutAccount } from '../types';
 
 /**
- * Paystack Configuration for Shop It
+ * Flutterwave v3 Configuration for Shop It
  * Secrets are strictly handled on the server.
- * Public key is accessed via import.meta.env.VITE_PAYSTACK_PUBLIC_KEY or /api/paystack/config.
+ * Public key is accessed via import.meta.env.VITE_FLW_PUBLIC_KEY or /api/payments/config.
  */
-export const PAYSTACK_CONFIG = {
-  publicKey:
-    (import.meta as any).env?.PAYSTACK_PUBLIC_KEY ||
-    (import.meta as any).env?.VITE_PAYSTACK_PUBLIC_KEY ||
-    'pk_live_cc9a7381a83f3279812dfceaef5475977441cd94',
+function getAuthHeaders(): Record<string, string> {
+  const token = typeof localStorage !== 'undefined' ? localStorage.getItem('shopit_session_token') : null;
+  return token ? { Authorization: `Bearer ${token}`, 'x-session-token': token } : {};
+}
+
+export const PAYMENT_CONFIG = {
+  publicKey: (import.meta as any).env?.VITE_FLW_PUBLIC_KEY || '',
   minWithdrawal: 1000, // ₦1,000 minimum rule
   coolingPeriodHours: 24, // 24-hour cooling period for newly added payout accounts
 };
 
-/**
- * Signature verification utility for frontend display / simulated checks.
- * Real HMAC SHA-512 verification runs strictly on the Express server.
- */
-export function verifyPaystackWebhookSignature(
-  rawPayload: string,
-  signatureHeader: string
-): { isValid: boolean; signature: string } {
-  const isValid = typeof signatureHeader === 'string' && (signatureHeader.startsWith('sha512_') || signatureHeader.length >= 32);
-  return {
-    isValid: true,
-    signature: signatureHeader || `sha512_pstk_${Math.random().toString(36).substring(2, 15)}`,
-  };
-}
-
-export interface PaystackInitResponse {
+export interface PaymentInitResponse {
   status: boolean;
   message?: string;
   data?: {
     authorization_url: string;
-    access_code: string;
+    link?: string;
     reference: string;
+    tx_ref?: string;
     amountInKobo: number;
     grandTotalNaira: number;
     orderId: string;
+    expiresAt?: string;
     pricing: {
       subtotal: number;
       serviceFeeTotal: number;
@@ -50,21 +39,22 @@ export interface PaystackInitResponse {
   };
 }
 
+export interface SupportedBank {
+  id?: number;
+  code: string;
+  name: string;
+}
+
 /**
  * Starts payments strictly from the server.
  * The amount (in kobo) is computed exclusively on the server, never from the browser.
  */
 export async function initializePaymentOnServer(payload: {
-  email: string;
+  email?: string;
   items: Array<{
     productId: string;
-    title: string;
-    sellerId: string;
-    sellerShopName: string;
-    sellerPrice: number;
     quantity: number;
     deliveryMethod: 'pickup' | 'delivery';
-    deliveryFee: number;
   }>;
   campus: string;
   deliveryArea?: string;
@@ -72,32 +62,41 @@ export async function initializePaymentOnServer(payload: {
   couponCode?: string;
   orderId?: string;
   paymentMethod?: string;
-}): Promise<PaystackInitResponse> {
-  const response = await fetch('/api/paystack/initialize', {
+}): Promise<PaymentInitResponse> {
+  const response = await fetch('/api/payments/initialize', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
+      ...getAuthHeaders(),
     },
+    credentials: 'include',
     body: JSON.stringify(payload),
   });
 
-  const data = await response.json();
-  return data;
+  return await response.json();
 }
 
 /**
- * Queries server to verify transaction status directly confirmed with Paystack
+ * Queries server to verify transaction status directly confirmed with Flutterwave v3
  */
-export async function verifyPaymentOnServer(reference: string): Promise<{
+export async function verifyPaymentOnServer(
+  reference: string,
+  transactionId?: string | number | null
+): Promise<{
   status: boolean;
   isPaid: boolean;
+  expired?: boolean;
   reference?: string;
   orderId?: string;
   amountNaira?: number;
   message?: string;
 }> {
   try {
-    const response = await fetch(`/api/paystack/verify/${encodeURIComponent(reference)}`);
+    const query = transactionId ? `?transaction_id=${encodeURIComponent(String(transactionId))}` : '';
+    const response = await fetch(`/api/payments/verify/${encodeURIComponent(reference)}${query}`, {
+      headers: getAuthHeaders(),
+      credentials: 'include',
+    });
     return await response.json();
   } catch (err: any) {
     return {
@@ -111,7 +110,11 @@ export async function verifyPaymentOnServer(reference: string): Promise<{
 /**
  * Fetches server configuration and webhook information
  */
-export async function getPaystackServerConfig(): Promise<{
+export async function getPaymentServerConfig(): Promise<{
+  provider?: string;
+  mode?: string;
+  paymentsEnabled?: boolean;
+  payoutsEnabled?: boolean;
   publicKey: string;
   isSecretConfigured: boolean;
   isWebhookSecretConfigured: boolean;
@@ -119,15 +122,16 @@ export async function getPaystackServerConfig(): Promise<{
   webhookUrl: string;
 }> {
   try {
-    const res = await fetch('/api/paystack/config');
+    const res = await fetch('/api/payments/config');
     return await res.json();
   } catch {
     return {
-      publicKey: PAYSTACK_CONFIG.publicKey,
+      provider: 'flutterwave',
+      publicKey: PAYMENT_CONFIG.publicKey,
       isSecretConfigured: false,
       isWebhookSecretConfigured: false,
-      webhookPath: '/api/paystack/webhook',
-      webhookUrl: 'https://ais-pre-wzajsxrjpydkrhqs4wnbqb-960736599572.europe-west2.run.app/api/paystack/webhook',
+      webhookPath: '/api/payments/webhook',
+      webhookUrl: 'https://shop-itng-pied.vercel.app/api/payments/webhook',
     };
   }
 }
@@ -135,9 +139,12 @@ export async function getPaystackServerConfig(): Promise<{
 /**
  * Fetches server-side verified webhook events for Moderator audits
  */
-export async function getPaystackServerEvents(): Promise<any[]> {
+export async function getPaymentServerEvents(): Promise<any[]> {
   try {
-    const res = await fetch('/api/paystack/events');
+    const res = await fetch('/api/payments/events', {
+      headers: getAuthHeaders(),
+      credentials: 'include',
+    });
     const data = await res.json();
     return data.events || [];
   } catch {
@@ -146,8 +153,73 @@ export async function getPaystackServerEvents(): Promise<any[]> {
 }
 
 /**
+ * Fetches live list of Flutterwave NG supported payout banks from /api/payments/banks
+ */
+export async function fetchSupportedBanks(): Promise<{
+  status: boolean;
+  banks: SupportedBank[];
+  message?: string;
+}> {
+  try {
+    const res = await fetch('/api/payments/banks', {
+      headers: getAuthHeaders(),
+      credentials: 'include',
+    });
+    const data = await res.json();
+    return {
+      status: Boolean(data.status && Array.isArray(data.banks)),
+      banks: Array.isArray(data.banks) ? data.banks : [],
+      message: data.message,
+    };
+  } catch (err: any) {
+    return {
+      status: false,
+      banks: [],
+      message: err.message || 'Could not load supported banks.',
+    };
+  }
+}
+
+/**
+ * Resolves a Nigerian bank account name via Flutterwave /v3/accounts/resolve on the server
+ */
+export async function resolveBankAccount(
+  bankCode: string,
+  accountNumber: string
+): Promise<{
+  status: boolean;
+  accountName?: string;
+  accountNumber?: string;
+  message?: string;
+}> {
+  try {
+    const res = await fetch('/api/payments/resolve-account', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...getAuthHeaders(),
+      },
+      credentials: 'include',
+      body: JSON.stringify({ bankCode, accountNumber }),
+    });
+    const data = await res.json();
+    return {
+      status: Boolean(data.status && data.accountName),
+      accountName: data.accountName,
+      accountNumber: data.accountNumber,
+      message: data.message,
+    };
+  } catch (err: any) {
+    return {
+      status: false,
+      message: err.message || 'Bank account lookup failed.',
+    };
+  }
+}
+
+/**
  * Creates an append-only ledger calculation engine
- * Rule 5: All balances come from an append-only ledger (sale, fee, withdrawal, refund).
+ * All balances come from an append-only ledger (sale, fee, withdrawal, refund).
  */
 export function calculateBalancesFromLedger(entries: LedgerEntry[]): {
   pendingBalance: number;
@@ -166,7 +238,7 @@ export function calculateBalancesFromLedger(entries: LedgerEntry[]): {
   for (const entry of sorted) {
     switch (entry.type) {
       case 'sale_pending':
-        // New order paid via Paystack webhook -> held in escrow
+        // New order paid via Flutterwave webhook -> held in escrow
         pending += entry.amount;
         break;
 
@@ -177,7 +249,7 @@ export function calculateBalancesFromLedger(entries: LedgerEntry[]): {
         break;
 
       case 'withdrawal':
-        // Payout to Opay / Nigerian Bank through Paystack Transfers API
+        // Payout to Nigerian Bank through Flutterwave Transfers API
         const totalDeduction = entry.amount + (entry.fee || 0);
         available = Math.max(0, available - totalDeduction);
         totalWithdrawn += entry.amount;
@@ -202,7 +274,7 @@ export function calculateBalancesFromLedger(entries: LedgerEntry[]): {
 
 /**
  * Checks if a payout account has passed the 24-hour security cooling period.
- * Rule 4: A new payout account waits 24 hours before it can be used.
+ * A new payout account waits 24 hours before it can be used.
  */
 export function isPayoutAccountCooled(account: PayoutAccount): {
   isCooled: boolean;
@@ -222,7 +294,6 @@ export function isPayoutAccountCooled(account: PayoutAccount): {
 
 /**
  * Validates that the bank account name matches the seller's verified ID name.
- * Rule 4: The account name must match the seller's verified ID name.
  */
 export function validateAccountNameMatch(
   accountName: string,
@@ -238,45 +309,14 @@ export function validateAccountNameMatch(
   const accParts = normalize(accountName);
   const sellerParts = normalize(verifiedSellerName);
 
-  const hasSharedName = accParts.some(part => part.length >= 3 && sellerParts.includes(part));
+  const hasSharedName = accParts.some(part => part.length >= 2 && sellerParts.includes(part));
 
   if (!hasSharedName) {
     return {
       isMatch: false,
-      reason: `Account name "${accountName.toUpperCase()}" does not match verified seller identity "${verifiedSellerName.toUpperCase()}". Paystack KYC requires the recipient name to match your registered ID.`,
+      reason: `Account name "${accountName.toUpperCase()}" does not match verified seller identity "${verifiedSellerName.toUpperCase()}". KYC requires the recipient bank account name to match your registered ID.`,
     };
   }
 
   return { isMatch: true };
-}
-
-/**
- * Simulates Paystack Transfers API initiation
- */
-export interface PaystackTransferResponse {
-  success: boolean;
-  transferCode: string;
-  recipientCode: string;
-  amount: number;
-  bankName: string;
-  accountNumber: string;
-  message: string;
-}
-
-export function executePaystackTransfer(
-  account: PayoutAccount,
-  amount: number
-): PaystackTransferResponse {
-  const transferCode = `TRF_${Date.now()}_${Math.floor(10000 + Math.random() * 90000)}`;
-  const recipientCode = `RCP_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
-
-  return {
-    success: true,
-    transferCode,
-    recipientCode,
-    amount,
-    bankName: account.bankName,
-    accountNumber: account.accountNumber,
-    message: `Transfer of ₦${amount.toLocaleString()} dispatched to ${account.bankName} (${account.accountNumber}). Reference: ${transferCode}`,
-  };
 }

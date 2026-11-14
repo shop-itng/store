@@ -91,8 +91,8 @@ export const ResetPasswordPage: React.FC = () => {
       return;
     }
 
-    if (cleanPass.length < 6) {
-      setErrorMessage('Your new password must be at least 6 characters long.');
+    if (cleanPass.length < 8) {
+      setErrorMessage('Your new password must be at least 8 characters long.');
       return;
     }
 
@@ -259,13 +259,13 @@ export const ResetPasswordPage: React.FC = () => {
               {/* New Password field */}
               <div>
                 <label className="text-xs font-bold text-slate-700 dark:text-stone-300 block mb-1.5">
-                  New Password (at least 6 characters)
+                  New Password (at least 8 characters)
                 </label>
                 <div className="relative">
                   <input
                     type={showPassword ? 'text' : 'password'}
                     required
-                    minLength={6}
+                    minLength={8}
                     value={newPassword}
                     onChange={e => setNewPassword(e.target.value)}
                     placeholder="Create a strong password"
@@ -290,7 +290,7 @@ export const ResetPasswordPage: React.FC = () => {
                   <input
                     type={showConfirmPassword ? 'text' : 'password'}
                     required
-                    minLength={6}
+                    minLength={8}
                     value={confirmPassword}
                     onChange={e => setConfirmPassword(e.target.value)}
                     placeholder="Repeat your new password"

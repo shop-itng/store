@@ -146,8 +146,8 @@ export const AuthModal: React.FC = () => {
       return;
     }
 
-    if (newPassword.length < 6) {
-      notify('Password must be at least 6 characters long.', 'error');
+    if (newPassword.length < 8) {
+      notify('Password must be at least 8 characters long.', 'error');
       return;
     }
 
@@ -204,26 +204,27 @@ export const AuthModal: React.FC = () => {
     }
 
     let matchedUser: any = null;
+    let sessionToken: string | undefined;
 
     try {
       const res = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({ email: cleanEmail, password: cleanPass }),
       });
       const data = await res.json();
       if (res.ok && data.status && data.user) {
         matchedUser = data.user;
+        sessionToken = data.sessionToken;
       } else {
-        if (data.error === 'EMAIL_NOT_REGISTERED') {
-          notify(data.message || 'No account is registered with this email address. Please register an account first.', 'error');
-        } else if (data.error === 'EMAIL_NOT_VERIFIED') {
+        if (data.error === 'EMAIL_NOT_VERIFIED') {
           notify('Your email is not verified yet. We are sending you a 6-digit verification code now.', 'info');
           setEmail(cleanEmail);
           setAuthTab('otp');
           generateEmailOtp(cleanEmail, 'signup', { name: cleanEmail.split('@')[0] });
         } else {
-          notify(data.message || 'Invalid login credentials. Please check your email and password.', 'error');
+          notify(data.message || 'Invalid email or password.', 'error');
         }
         return;
       }
@@ -233,8 +234,14 @@ export const AuthModal: React.FC = () => {
     }
 
     if (!matchedUser) {
-      notify('Invalid login credentials. Please check your email and password.', 'error');
+      notify('Invalid email or password.', 'error');
       return;
+    }
+
+    if (sessionToken) {
+      try {
+        localStorage.setItem('shopit_session_token', sessionToken);
+      } catch {}
     }
 
     // New Device Security Check (Rule 3)
@@ -246,7 +253,7 @@ export const AuthModal: React.FC = () => {
         return;
       }
 
-      setPendingNewDeviceUser(matchedUser);
+      setPendingNewDeviceUser({ ...matchedUser, sessionToken });
       setNewDeviceCooldown(60);
       setDeviceOtpInput('');
       setAuthTab('new_device_otp' as any);
@@ -260,7 +267,7 @@ export const AuthModal: React.FC = () => {
     } else {
       localStorage.removeItem('shopit_admin_session_active');
     }
-    login(matchedUser);
+    login({ ...matchedUser, sessionToken } as any);
     closeAuthModal();
     notify(`Welcome back, ${matchedUser.name}!`, 'success');
   };
@@ -309,8 +316,8 @@ export const AuthModal: React.FC = () => {
       return;
     }
 
-    if (password.length < 6) {
-      notify('Password should be at least 6 characters.', 'error');
+    if (password.length < 8) {
+      notify('Password should be at least 8 characters.', 'error');
       return;
     }
 
@@ -656,14 +663,14 @@ export const AuthModal: React.FC = () => {
                 </div>
 
                 <div>
-                  <label className="text-xs font-semibold text-slate-700 block mb-1">New Password (Min 6 chars)</label>
+                  <label className="text-xs font-semibold text-slate-700 block mb-1">New Password (Min 8 chars)</label>
                   <input
                     type="password"
                     required
-                    minLength={6}
+                    minLength={8}
                     value={newPassword}
                     onChange={e => setNewPassword(e.target.value)}
-                    placeholder="At least 6 characters"
+                    placeholder="At least 8 characters"
                     className="w-full h-11 px-3.5 rounded-xl border border-slate-200 text-xs sm:text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#FF6B00]"
                   />
                 </div>
@@ -673,7 +680,7 @@ export const AuthModal: React.FC = () => {
                   <input
                     type="password"
                     required
-                    minLength={6}
+                    minLength={8}
                     value={confirmPassword}
                     onChange={e => setConfirmPassword(e.target.value)}
                     placeholder="Repeat new password"
@@ -776,9 +783,10 @@ export const AuthModal: React.FC = () => {
               <input
                 type="password"
                 required
+                minLength={8}
                 value={password}
                 onChange={e => setPassword(e.target.value)}
-                placeholder="At least 6 characters"
+                placeholder="At least 8 characters"
                 className="w-full h-11 px-3.5 rounded-xl border border-slate-200 text-xs sm:text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#FF6B00]"
               />
             </div>

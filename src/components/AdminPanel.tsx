@@ -46,7 +46,7 @@ import {
 } from 'lucide-react';
 import { formatNaira, calculateServiceFee, getPricingBreakdown } from '../utils/pricing';
 import { AdminSubRole, LedgerEntryType, Order } from '../types';
-import { PAYSTACK_CONFIG } from '../utils/paystackService';
+import { PAYMENT_CONFIG } from '../utils/paymentService';
 import { EscrowReceiptModal } from './EscrowReceiptModal';
 
 export const AdminPanel: React.FC = () => {
@@ -65,7 +65,7 @@ export const AdminPanel: React.FC = () => {
     orders,
     wallets,
     ledgerEntries,
-    paystackWebhooks,
+    paymentWebhooks,
     toggleWalletFreeze,
     sellers,
     products,
@@ -159,7 +159,7 @@ export const AdminPanel: React.FC = () => {
   });
   const [selectedAdminReceiptOrder, setSelectedAdminReceiptOrder] = useState<Order | null>(null);
 
-  // Paystack Live Payments audit state (Point 11)
+  // Flutterwave Live Payments audit state
   const [paymentsList, setPaymentsList] = useState<any[]>([]);
   const [loadingPayments, setLoadingPayments] = useState(false);
   const [recheckingRef, setRecheckingRef] = useState<string | null>(null);
@@ -171,10 +171,18 @@ export const AdminPanel: React.FC = () => {
   const [reportActionNotes, setReportActionNotes] = useState<Record<string, string>>({});
   const [isExportingData, setIsExportingData] = useState(false);
 
+  const getAuthHeaders = (): Record<string, string> => {
+    const token = typeof localStorage !== 'undefined' ? localStorage.getItem('shopit_session_token') : null;
+    return token ? { Authorization: `Bearer ${token}`, 'x-session-token': token } : {};
+  };
+
   const fetchPayments = async () => {
     setLoadingPayments(true);
     try {
-      const res = await fetch('/api/paystack/payments');
+      const res = await fetch('/api/payments/payments', {
+        headers: getAuthHeaders(),
+        credentials: 'include',
+      });
       const data = await res.json();
       if (data.status && Array.isArray(data.payments)) {
         setPaymentsList(data.payments);
@@ -189,7 +197,10 @@ export const AdminPanel: React.FC = () => {
   const fetchReports = async () => {
     setLoadingReports(true);
     try {
-      const res = await fetch('/api/reports');
+      const res = await fetch('/api/reports', {
+        headers: getAuthHeaders(),
+        credentials: 'include',
+      });
       const data = await res.json();
       if (data.status && Array.isArray(data.reports)) {
         setReportsList(data.reports);
@@ -201,13 +212,16 @@ export const AdminPanel: React.FC = () => {
     }
   };
 
-  const recheckPaymentWithPaystack = async (reference: string) => {
+  const recheckPaymentWithGateway = async (reference: string) => {
     setRecheckingRef(reference);
     try {
-      const res = await fetch(`/api/paystack/verify/${encodeURIComponent(reference)}`);
+      const res = await fetch(`/api/payments/verify/${encodeURIComponent(reference)}`, {
+        headers: getAuthHeaders(),
+        credentials: 'include',
+      });
       const data = await res.json();
       if (data.status) {
-        notify(`Payment Verified: Ref ${reference} is ${data.isPaid ? 'PAID' : data.paystackStatus || 'Pending'}`, 'success');
+        notify(`Payment Verified: Ref ${reference} is ${data.isPaid ? 'PAID' : data.gatewayStatus || 'Pending'}`, 'success');
         await fetchPayments();
       } else {
         notify(`Verification Check: ${data.message || 'Payment not verified'}`, 'info');
@@ -224,7 +238,8 @@ export const AdminPanel: React.FC = () => {
     try {
       const res = await fetch(`/api/reports/${encodeURIComponent(reportId)}`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        credentials: 'include',
         body: JSON.stringify({ status, actionNote: note }),
       });
       const data = await res.json();
@@ -240,7 +255,10 @@ export const AdminPanel: React.FC = () => {
   const handleExportData = async () => {
     setIsExportingData(true);
     try {
-      const res = await fetch('/api/admin/export-data');
+      const res = await fetch('/api/admin/export-data', {
+        headers: getAuthHeaders(),
+        credentials: 'include',
+      });
       if (!res.ok) throw new Error('Export request failed');
       const blob = await res.blob();
       const url = window.URL.createObjectURL(blob);
@@ -291,7 +309,10 @@ export const AdminPanel: React.FC = () => {
   const fetchMetrics = async () => {
     setLoadingMetrics(true);
     try {
-      const res = await fetch('/api/admin/metrics');
+      const res = await fetch('/api/admin/metrics', {
+        headers: getAuthHeaders(),
+        credentials: 'include',
+      });
       const data = await res.json();
       if (data.status) {
         setMetricsData(data);
@@ -312,7 +333,10 @@ export const AdminPanel: React.FC = () => {
         q: q.trim(),
         role: role,
       });
-      const res = await fetch(`/api/admin/users?${params.toString()}`);
+      const res = await fetch(`/api/admin/users?${params.toString()}`, {
+        headers: getAuthHeaders(),
+        credentials: 'include',
+      });
       const data = await res.json();
       if (data.status) {
         setDbUsers(data.users || []);
@@ -328,11 +352,12 @@ export const AdminPanel: React.FC = () => {
   };
 
   React.useEffect(() => {
+    if (currentUser?.role !== 'admin') return;
     fetchPayments();
     fetchReports();
     fetchMetrics();
     fetchDbUsers(1);
-  }, []);
+  }, [currentUser?.role]);
 
   // Calculate live financial figures
   const pendingOrders = orders.filter(o => o.status === 'paid' || o.status === 'packed' || o.status === 'shipped' || o.status === 'delivered');
@@ -371,7 +396,7 @@ export const AdminPanel: React.FC = () => {
           <div className="flex items-center bg-stone-900 p-1.5 rounded-xl border border-stone-800 shrink-0 overflow-x-auto gap-1">
             {[
               { id: 'moderator', label: 'NIN & Safety', icon: ShieldCheck, badge: verificationRequests.filter(r => r.status === 'pending').length },
-              { id: 'payments', label: 'Payments & Paystack', icon: CreditCard, badge: undefined },
+              { id: 'payments', label: 'Payments & Gateway', icon: CreditCard, badge: undefined },
               { id: 'reports', label: 'Reports Queue', icon: Flag, badge: reportsList.filter(r => r.status === 'open').length },
               { id: 'accounts', label: 'All Accounts & Powers', icon: Users, badge: registeredUsers.length },
               { id: 'finance', label: 'Finance & Escrow', icon: DollarSign, badge: undefined },
@@ -1413,22 +1438,24 @@ export const AdminPanel: React.FC = () => {
             </div>
           </div>
 
-          {/* Paystack Test Mode System Overview */}
+          {/* Flutterwave Gateway System Overview */}
           <div className="bg-[#111111] text-white p-5 rounded-2xl border-2 border-[#111111] shadow-[0_3px_0_#9FE870] space-y-4">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-3 border-b border-stone-800 gap-2">
               <div className="flex items-center gap-2.5">
                 <div className="w-8 h-8 rounded-lg bg-[#9FE870] text-[#111111] font-black flex items-center justify-center text-xs">
-                  P
+                  FW
                 </div>
                 <div>
                   <div className="flex items-center gap-2">
-                    <h3 className="text-sm font-black text-white">Paystack Integration Status</h3>
+                    <h3 className="text-sm font-black text-white">Flutterwave Integration Status</h3>
                     <span className="text-[10px] font-black text-[#111111] bg-[#9FE870] px-2 py-0.5 rounded-full border border-[#111111]">
-                      TEST MODE ACTIVE (Rule 6)
+                      {PAYMENT_CONFIG.publicKey?.startsWith('FLWPUBK-') && !PAYMENT_CONFIG.publicKey.startsWith('FLWPUBK_TEST')
+                        ? 'LIVE KEYS ACTIVE'
+                        : 'API v3 CONFIGURED'}
                     </span>
                   </div>
                   <p className="text-[11px] text-stone-400">
-                    Rule 6: Use Paystack test mode only until instructed otherwise.
+                    Flutterwave API v3 Standard Checkout &amp; Transfers (₦0 seller withdrawal fee under Option 1).
                   </p>
                 </div>
               </div>
@@ -1436,7 +1463,7 @@ export const AdminPanel: React.FC = () => {
               <div className="text-right">
                 <span className="text-[11px] font-mono text-stone-400">Public Key:</span>
                 <span className="text-xs font-mono font-bold text-[#9FE870] ml-1.5">
-                  {PAYSTACK_CONFIG.publicKey.slice(0, 14)}...
+                  {PAYMENT_CONFIG.publicKey ? `${PAYMENT_CONFIG.publicKey.slice(0, 14)}...` : 'Server Config'}
                 </span>
               </div>
             </div>
@@ -1456,7 +1483,7 @@ export const AdminPanel: React.FC = () => {
 
               <div className="bg-stone-900/90 p-3 rounded-xl border border-stone-800">
                 <span className="text-stone-400 text-[10px] uppercase font-bold tracking-wider">Rule 3 · Webhook Verification</span>
-                <p className="font-bold text-[#9FE870] text-xs mt-1">HMAC SHA-512 Strict</p>
+                <p className="font-bold text-[#9FE870] text-xs mt-1">verif-hash + API v3 Verify</p>
                 <span className="text-[10px] text-stone-400">Idempotent (processed 1x)</span>
               </div>
 
@@ -1802,50 +1829,50 @@ export const AdminPanel: React.FC = () => {
             </div>
           </div>
 
-          {/* Paystack Integration & Live Webhook Configuration Info */}
+          {/* Flutterwave Integration & Live Webhook Configuration Info */}
           <div className="bg-[#111111] text-white p-5 rounded-2xl border-2 border-[#111111] shadow-[0_4px_0_#FF6B00] space-y-4">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-stone-800 pb-3">
               <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 rounded-lg bg-[#00C3F7] text-[#111111] font-black flex items-center justify-center text-sm shadow-xs">
-                  P
+                <div className="w-8 h-8 rounded-lg bg-[#F5A623] text-[#111111] font-black flex items-center justify-center text-xs shadow-xs">
+                  FW
                 </div>
                 <div>
                   <h4 className="text-sm font-extrabold text-white flex items-center gap-2">
-                    <span>Paystack Webhook & Escrow Server Integration</span>
+                    <span>Flutterwave Webhook &amp; Escrow Server Integration</span>
                     <span className="text-[10px] bg-[#9FE870] text-[#111111] px-2 py-0.5 rounded-full font-bold">
                       ACTIVE
                     </span>
                   </h4>
                   <p className="text-[11px] text-stone-400">
-                    Server-authoritative kobo calculation · HMAC SHA-512 signature check · Strict idempotency
+                    Server-authoritative kobo calculation · verif-hash constant-time check · Strict idempotency
                   </p>
                 </div>
               </div>
 
               <div className="flex items-center gap-2">
                 <span className="text-[11px] font-mono text-[#9FE870] bg-emerald-950/60 px-2.5 py-1 rounded-lg border border-emerald-800">
-                  Dual-Check: Webhook + Paystack API
+                  Dual-Check: Webhook + Flutterwave v3 Verify
                 </span>
               </div>
             </div>
 
             <div className="space-y-2">
               <label className="text-[11px] font-bold text-stone-300 block">
-                Your Exact Paystack Live Webhook URL (Copy & paste into Paystack Dashboard):
+                Your Exact Flutterwave Webhook URL (Copy &amp; paste into Flutterwave Dashboard):
               </label>
               <div className="flex items-center gap-2">
                 <input
                   type="text"
                   readOnly
-                  value="https://ais-pre-wzajsxrjpydkrhqs4wnbqb-960736599572.europe-west2.run.app/api/paystack/webhook"
+                  value="https://shop-itng-pied.vercel.app/api/payments/webhook"
                   className="flex-1 bg-stone-900 border border-stone-700 text-xs text-[#9FE870] font-mono px-3 py-2 rounded-xl select-all focus:outline-hidden"
                 />
                 <button
                   onClick={() => {
                     navigator.clipboard.writeText(
-                      'https://ais-pre-wzajsxrjpydkrhqs4wnbqb-960736599572.europe-west2.run.app/api/paystack/webhook'
+                      'https://shop-itng-pied.vercel.app/api/payments/webhook'
                     );
-                    notify('Paystack Webhook URL copied to clipboard!', 'success');
+                    notify('Flutterwave Webhook URL copied to clipboard!', 'success');
                   }}
                   className="px-3.5 py-2 bg-[#FF6B00] hover:bg-[#ff7a1a] text-[#111111] font-black rounded-xl text-xs border border-[#111111] shadow-[0_2px_0_#ffffff] shrink-0"
                 >
@@ -1853,25 +1880,25 @@ export const AdminPanel: React.FC = () => {
                 </button>
               </div>
               <p className="text-[11px] text-stone-400 leading-relaxed">
-                <strong>Paystack Setup:</strong> Go to Paystack Dashboard → <strong>Settings</strong> → <strong>API Keys &amp; Webhooks</strong> → In the <strong>Live Webhook URL</strong> field, paste the URL above and click <strong>Save Changes</strong>.
+                <strong>Flutterwave Setup:</strong> Go to Flutterwave Dashboard → <strong>Settings</strong> → <strong>Webhooks</strong> → Paste the URL above, set your <strong>Secret Hash</strong> (<code>FLW_WEBHOOK_SECRET_HASH</code>), and click <strong>Save</strong>.
               </p>
             </div>
           </div>
 
-          {/* Paystack Webhook Ingestion Log (Rule 3) */}
+          {/* Flutterwave Webhook Ingestion Log */}
           <div className="bg-white rounded-2xl border border-stone-200 overflow-hidden shadow-xs">
             <div className="p-4 sm:p-5 border-b border-stone-200 bg-stone-50/60 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
               <div>
                 <h3 className="text-base font-bold font-heading text-stone-900 flex items-center gap-2">
                   <ShieldCheck className="w-4 h-4 text-[#FF6B00]" />
-                  <span>Paystack Webhook Verification & Idempotency Log (Rule 3)</span>
+                  <span>Flutterwave Webhook Verification &amp; Idempotency Log</span>
                 </h3>
                 <p className="text-xs text-stone-500 mt-0.5">
-                  Rule 3: Payment status changes only when Paystack's webhook confirms it, verified by signature and processed once per payment. Never trust the browser.
+                  Payment status changes only when Flutterwave confirms via verif-hash webhook + server transaction verify. Never trust the browser.
                 </p>
               </div>
               <span className="text-xs font-mono text-emerald-700 font-bold bg-emerald-50 px-2 py-1 rounded border border-emerald-200">
-                100% Signature Verification
+                100% Secret Hash Verification
               </span>
             </div>
 
@@ -1881,16 +1908,16 @@ export const AdminPanel: React.FC = () => {
                   <tr>
                     <th className="p-3">Processed At</th>
                     <th className="p-3">Event</th>
-                    <th className="p-3">Paystack Reference</th>
+                    <th className="p-3">Transaction Reference</th>
                     <th className="p-3">Order ID</th>
                     <th className="p-3">Channel</th>
                     <th className="p-3">Amount</th>
-                    <th className="p-3">HMAC SHA-512 Signature Check</th>
+                    <th className="p-3">verif-hash Verification</th>
                     <th className="p-3">Idempotency</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-stone-200 font-mono text-[11px]">
-                  {paystackWebhooks.map(webhook => (
+                  {paymentWebhooks.map(webhook => (
                     <tr key={webhook.id} className="hover:bg-stone-50/50">
                       <td className="p-3 text-stone-500">
                         {new Date(webhook.processedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
@@ -1918,7 +1945,7 @@ export const AdminPanel: React.FC = () => {
                     </tr>
                   ))}
 
-                  {paystackWebhooks.length === 0 && (
+                  {paymentWebhooks.length === 0 && (
                     <tr>
                       <td colSpan={8} className="p-6 text-center text-stone-400 font-sans">
                         No webhooks received yet. Make a checkout purchase to trigger live webhook ingestion.
@@ -2110,7 +2137,7 @@ export const AdminPanel: React.FC = () => {
                 {emergencyControls.pauseNewOrders ? 'ORDERS PAUSED' : 'OPERATIONAL'}
               </p>
               <span className="text-[11px] text-stone-500">
-                {emergencyControls.pauseNewOrders ? 'New checkouts blocked' : 'Paystack escrow live'}
+                {emergencyControls.pauseNewOrders ? 'New checkouts blocked' : 'Flutterwave escrow live'}
               </span>
             </div>
 
@@ -2189,13 +2216,13 @@ export const AdminPanel: React.FC = () => {
                     onClick={() => {
                       setBroadcastForm({
                         title: 'Banking Network Advisory',
-                        message: 'Paystack bank transfers are experiencing slight delays. Card payments clear immediately into safe escrow.',
+                        message: 'Flutterwave bank transfers are experiencing slight delays. Card payments clear immediately into safe escrow.',
                         tone: 'info',
                         isActive: true,
                       });
                       updateBroadcastAnnouncement({
                         title: 'Banking Network Advisory',
-                        message: 'Paystack bank transfers are experiencing slight delays. Card payments clear immediately into safe escrow.',
+                        message: 'Flutterwave bank transfers are experiencing slight delays. Card payments clear immediately into safe escrow.',
                         tone: 'info',
                         isActive: true,
                       });
@@ -2399,7 +2426,7 @@ export const AdminPanel: React.FC = () => {
                 <div>
                   <h4 className="text-sm font-bold text-stone-950">Pause New Orders</h4>
                   <p className="text-[11px] text-stone-500 mt-1 leading-relaxed">
-                    Temporarily halts new Paystack checkout sessions if courier networks or campus banking has widespread downtime.
+                    Temporarily halts new Flutterwave checkout sessions if courier networks or campus banking has widespread downtime.
                   </p>
                 </div>
               </div>
@@ -2509,8 +2536,7 @@ export const AdminPanel: React.FC = () => {
       )}
 
       {/* ========================================================= */}
-      {/* 6. PAYMENTS & PAYSTACK AUDIT TAB (Point 11)              */}
-      {/* ========================================================= */}
+      {/* 6. PAYMENTS & FLUTTERWAVE AUDIT TAB */}
       {activeTab === 'payments' && (
         <div className="space-y-6">
           {/* Top Metrics Cards */}
@@ -2520,7 +2546,7 @@ export const AdminPanel: React.FC = () => {
               <p className="text-2xl font-black font-mono-numbers text-stone-900 mt-1">
                 {paymentsList.length}
               </p>
-              <span className="text-[11px] text-stone-400 mt-0.5 block">Card, Transfer & USSD</span>
+              <span className="text-[11px] text-stone-400 mt-0.5 block">Card, Transfer, USSD &amp; OPay</span>
             </div>
 
             <div className="p-4 bg-white rounded-2xl border border-stone-200 shadow-xs">
@@ -2540,7 +2566,7 @@ export const AdminPanel: React.FC = () => {
                     .reduce((sum, p) => sum + (p.amountNaira || 0), 0)
                 )}
               </p>
-              <span className="text-[11px] text-stone-400 mt-0.5 block">Processed through Paystack</span>
+              <span className="text-[11px] text-stone-400 mt-0.5 block">Processed through Flutterwave</span>
             </div>
 
             <div className="p-4 bg-white rounded-2xl border border-stone-200 shadow-xs">
@@ -2548,7 +2574,7 @@ export const AdminPanel: React.FC = () => {
               <p className="text-2xl font-black font-mono-numbers text-[#FF6B00] mt-1">
                 {paymentsList.filter(p => p.webhookReceived).length}
               </p>
-              <span className="text-[11px] text-stone-400 mt-0.5 block">HMAC SHA512 confirmed</span>
+              <span className="text-[11px] text-stone-400 mt-0.5 block">verif-hash confirmed</span>
             </div>
           </div>
 
@@ -2558,10 +2584,10 @@ export const AdminPanel: React.FC = () => {
               <div>
                 <h3 className="text-base font-black text-stone-900 flex items-center gap-2">
                   <CreditCard className="w-5 h-5 text-[#FF6B00]" />
-                  <span>Paystack Real-Time Payments Ledger</span>
+                  <span>Flutterwave Real-Time Payments Ledger</span>
                 </h3>
                 <p className="text-xs text-stone-500 mt-0.5">
-                  Every transaction started on server in kobo with unique reference, channels, and Paystack verification status.
+                  Every transaction started on server in kobo with unique reference, channels, and Flutterwave verification status.
                 </p>
               </div>
 
@@ -2676,10 +2702,10 @@ export const AdminPanel: React.FC = () => {
                           <td className="py-3.5 px-4 text-right">
                             <button
                               type="button"
-                              onClick={() => recheckPaymentWithPaystack(payment.reference)}
+                              onClick={() => recheckPaymentWithGateway(payment.reference)}
                               disabled={isRechecking}
                               className="px-3 py-1.5 rounded-lg bg-stone-900 hover:bg-black text-[#9FE870] text-[11px] font-black transition-all inline-flex items-center gap-1 disabled:opacity-50 cursor-pointer"
-                              title="Query Paystack Verify Transaction API directly"
+                              title="Query Flutterwave Verify Transaction API directly"
                             >
                               <RefreshCw className={`w-3 h-3 ${isRechecking ? 'animate-spin' : ''}`} />
                               <span>{isRechecking ? 'Checking...' : 'Re-check'}</span>
@@ -2970,8 +2996,8 @@ export const AdminPanel: React.FC = () => {
 
             <p className="text-xs text-stone-600 leading-relaxed">
               {freezeModal.isCurrentlyFrozen
-                ? 'Unfreezing this wallet will re-enable withdrawals via Paystack Transfers API and restore automated escrow releases.'
-                : 'Freezing this wallet halts all Paystack withdrawals immediately and prevents pending escrow release until cleared by an admin.'}
+                ? 'Unfreezing this wallet will re-enable withdrawals via Flutterwave Transfers API and restore automated escrow releases.'
+                : 'Freezing this wallet halts all Flutterwave withdrawals immediately and prevents pending escrow release until cleared by an admin.'}
             </p>
 
             {!freezeModal.isCurrentlyFrozen && (
@@ -3155,7 +3181,7 @@ export const AdminPanel: React.FC = () => {
                 />
               </div>
               <div className="flex items-center justify-between text-[11px] pt-1">
-                <span className="text-stone-500">Min 6 characters</span>
+                <span className="text-stone-500">Min 8 characters</span>
                 <button
                   type="button"
                   onClick={() => {
@@ -3179,7 +3205,7 @@ export const AdminPanel: React.FC = () => {
               </button>
               <button
                 type="button"
-                disabled={resetPasswordModal.newPassword.trim().length < 6}
+                disabled={resetPasswordModal.newPassword.trim().length < 8}
                 onClick={async () => {
                   adminResetUserPassword(resetPasswordModal.userId, resetPasswordModal.newPassword.trim());
                   setResetPasswordModal(prev => ({ ...prev, isOpen: false }));
@@ -3366,7 +3392,7 @@ export const AdminPanel: React.FC = () => {
                     )}
                   </div>
                   <div className="text-[11px] text-stone-500 flex items-center justify-between">
-                    <span className="text-emerald-700 font-semibold">✓ Liveness Score: {inspectRequest.livenessScore || 94}% (Interactive Oval Test Passed)</span>
+                    <span className="text-emerald-700 font-semibold">✓ Liveness Score: {inspectRequest.livenessScore || 94}% (Liveness Check Passed)</span>
                     <button
                       type="button"
                       onClick={() => setSelectedVerificationDoc(inspectRequest.selfiePhotoUrl)}

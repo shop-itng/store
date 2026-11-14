@@ -15,7 +15,7 @@ import {
   PayoutAccount,
   WalletTransaction,
   LedgerEntry,
-  PaystackWebhookEvent,
+  PaymentWebhookEvent,
   SecurityProfile,
   ChatMessage,
   Conversation,
@@ -67,22 +67,27 @@ import { filterAntiBypass, checkNumbersInText } from '../utils/antiBypass';
 import { NigerianLocation } from '../types';
 import { calculateDeliveryFee } from '../data/nigerianLocations';
 import {
-  PAYSTACK_CONFIG,
-  verifyPaystackWebhookSignature,
+  PAYMENT_CONFIG,
   calculateBalancesFromLedger,
   isPayoutAccountCooled,
   validateAccountNameMatch,
-  executePaystackTransfer,
-} from '../utils/paystackService';
+} from '../utils/paymentService';
 import {
   generateEmailOtp,
-  verifyEmailOtp,
   getResendCooldownSeconds,
   isKnownDevice,
   recordKnownDevice,
   getDeviceId,
 } from '../utils/emailOtpManager';
 import { sendTransactionalEmail } from '../utils/transactionalEmails';
+
+const getAuthHeaders = (extra?: Record<string, string>): Record<string, string> => {
+  const token = typeof localStorage !== 'undefined' ? localStorage.getItem('shopit_session_token') : null;
+  return {
+    ...(token ? { Authorization: `Bearer ${token}`, 'x-session-token': token } : {}),
+    ...(extra || {}),
+  };
+};
 
 interface NotificationItem {
   id: string;
@@ -176,15 +181,14 @@ interface AppContextType {
 
   // Orders & Escrow
   orders: Order[];
-  placeOrder: (orderData: Omit<Order, 'id' | 'createdAt' | 'autoReleaseAt' | 'hasReview'>) => Order;
   updateOrderStatus: (
     orderId: string,
     status: OrderStatus,
-    extra?: { packedPhotoUrl?: string; disputeReason?: string }
+    extra?: { packedPhotoUrl?: string; disputeReason?: string; handshakeOtp?: string }
   ) => void;
   confirmItemReceived: (orderId: string) => void;
   cancelOrder: (orderId: string) => void;
-  openDispute: (orderId: string, reason: string) => void;
+  openDispute: (orderId: string, reason: string, evidencePhotoUrl?: string) => void;
   submitOrderReview: (orderId: string, productId: string, rating: number, comment: string) => void;
   buyerActiveOrdersCount: number;
 
@@ -192,7 +196,7 @@ interface AppContextType {
   safePickupSpots: SafePickupSpot[];
   campusRunners: CampusRunner[];
   runnerTrips: RunnerTrip[];
-  verifyHandshakeOtp: (orderId: string, inputOtp: string) => { success: boolean; message: string };
+  verifyHandshakeOtp: (orderId: string, inputOtp: string) => Promise<{ success: boolean; message: string }>;
   assignCampusRunner: (orderId: string, runnerId: string, pickupSpotId: string, dropoffSpotId: string) => void;
   updateTripStatus: (tripId: string, status: RunnerTrip['status']) => void;
 
@@ -252,7 +256,10 @@ interface AppContextType {
     notes?: string,
     adminName?: string
   ) => void;
-  submitVerificationRequest: (req: Omit<SellerVerificationRequest, 'id' | 'submittedAt' | 'status'>) => void;
+  submitVerificationRequest: (
+    req: Omit<SellerVerificationRequest, 'id' | 'submittedAt' | 'status'>,
+    options?: { skipServerSubmit?: boolean }
+  ) => void;
   isVerificationModalOpen: boolean;
   openVerificationModal: () => void;
   closeVerificationModal: () => void;
@@ -290,7 +297,7 @@ interface AppContextType {
   wallets: Record<string, SellerWallet>;
   currentWallet: SellerWallet | null;
   ledgerEntries: LedgerEntry[];
-  paystackWebhooks: PaystackWebhookEvent[];
+  paymentWebhooks: PaymentWebhookEvent[];
   activeWithdrawalOtp: { code: string; email: string; expiresAt: number; amount: number } | null;
   sendWithdrawalOtp: (amount: number, accountInfo?: { bank_name?: string; last4?: string }) => Promise<{ success: boolean; error?: string; waitSeconds?: number }>;
   requestWithdrawal: (amount: number, payoutAccountId: string, otpCode: string) => Promise<boolean>;
@@ -298,15 +305,6 @@ interface AppContextType {
   sendPayoutAccountOtp: (accountInfo?: { bank_name?: string; last4?: string }) => Promise<{ success: boolean; error?: string; waitSeconds?: number }>;
   resendSignupOtp: () => Promise<{ success: boolean; error?: string; waitSeconds?: number }>;
   toggleWalletFreeze: (sellerId: string, freeze: boolean, reason?: string) => void;
-  processPaystackWebhook: (eventData: {
-    event: 'charge.success';
-    reference: string;
-    signature: string;
-    amount: number;
-    customerEmail: string;
-    orderId: string;
-    channel: 'card' | 'bank_transfer' | 'ussd';
-  }) => { success: boolean; message: string };
 
   // Security Hardening
   securityProfile: SecurityProfile;
@@ -322,7 +320,7 @@ interface AppContextType {
   openCheckoutModal: () => void;
   closeCheckoutModal: () => void;
   appliedCoupon: Coupon | null;
-  applyCoupon: (code: string, currentTotal: number) => boolean;
+  applyCoupon: (code: string, currentTotal: number) => Promise<boolean>;
   removeCoupon: () => void;
 
   // Low-Data Mode, Language & Theme
@@ -362,7 +360,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     localStorage.setItem('shopit_cart', '[]');
     localStorage.setItem('shopit_wishlist', '[]');
     localStorage.setItem('shopit_ledger_entries_v5', '[]');
-    localStorage.setItem('shopit_paystack_webhooks_v5', '[]');
+    localStorage.setItem('shopit_payment_webhooks_v5', '[]');
     localStorage.setItem('shopit_disputes', '[]');
     localStorage.setItem('shopit_verification_requests', '[]');
     localStorage.setItem('shopit_anti_bypass_flags', '[]');
@@ -456,9 +454,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return saved ? JSON.parse(saved) : [];
   });
 
-  // Rule 3: Processed Paystack Webhook events (idempotency tracker)
-  const [paystackWebhooks, setPaystackWebhooks] = useState<PaystackWebhookEvent[]>(() => {
-    const saved = localStorage.getItem('shopit_paystack_webhooks_v5');
+  // Processed payment webhook events (idempotency tracker)
+  const [paymentWebhooks, setPaymentWebhooks] = useState<PaymentWebhookEvent[]>(() => {
+    const saved = localStorage.getItem('shopit_payment_webhooks_v5');
     return saved ? JSON.parse(saved) : [];
   });
 
@@ -545,8 +543,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const getInitialView = (): AppView => {
     if (typeof window !== 'undefined') {
       const path = window.location.pathname.replace(/^\//, '').toLowerCase();
+      const params = new URLSearchParams(window.location.search);
       if (path === 'reset-password' || path === 'forgot-password' || window.location.search.includes('code=')) {
         return 'reset-password';
+      }
+      if (params.get('view') === 'orders' || params.has('payment_ref') || params.has('tx_ref')) {
+        return 'orders';
       }
       if (LEGAL_SLUGS.includes(path as AppView)) {
         return path as AppView;
@@ -812,14 +814,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }, [currentUser]);
 
-  // Neon PostgreSQL Single Source of Truth: Fetch products, sellers, verification queue, and accounts on app boot
+  // Neon PostgreSQL Single Source of Truth: Fetch products, sellers, and (for admins) verification queue and accounts
   const fetchMarketplaceData = useCallback(async () => {
     try {
+      const isAdminUser = currentUser?.role === 'admin';
       const [prodRes, sellRes, verifRes, usersRes] = await Promise.all([
         fetch('/api/products?limit=100', { credentials: 'include' }).catch(() => null),
         fetch('/api/sellers', { credentials: 'include' }).catch(() => null),
-        fetch('/api/verification/admin/queue', { credentials: 'include' }).catch(() => null),
-        fetch('/api/admin/users?limit=100', { credentials: 'include' }).catch(() => null),
+        isAdminUser
+          ? fetch('/api/verification/admin/queue', { headers: getAuthHeaders(), credentials: 'include' }).catch(() => null)
+          : Promise.resolve(null),
+        isAdminUser
+          ? fetch('/api/admin/users?limit=100', { headers: getAuthHeaders(), credentials: 'include' }).catch(() => null)
+          : Promise.resolve(null),
       ]);
 
       if (prodRes && prodRes.ok) {
@@ -847,26 +854,52 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const usersData = await usersRes.json();
         if (usersData.status && Array.isArray(usersData.users)) {
           setRegisteredUsers(usersData.users);
-          try {
-            localStorage.setItem('shopit_registered_users', JSON.stringify(usersData.users));
-          } catch {}
         }
       }
     } catch (err: any) {
       console.warn('[PostgreSQL Sync Warning]:', err.message);
     }
-  }, []);
+  }, [currentUser?.role]);
 
   useEffect(() => {
     fetchMarketplaceData();
   }, [fetchMarketplaceData]);
 
+  const refreshFinancials = useCallback(async () => {
+    if (!currentUser?.id) return;
+    try {
+      const headers = getAuthHeaders();
+      const [ordRes, walRes] = await Promise.all([
+        fetch('/api/orders?limit=100', { headers, credentials: 'include' }).catch(() => null),
+        currentUser.role === 'seller' || currentUser.role === 'admin'
+          ? fetch('/api/wallet', { headers, credentials: 'include' }).catch(() => null)
+          : Promise.resolve(null),
+      ]);
+      if (ordRes && ordRes.ok) {
+        const ordData = await ordRes.json();
+        if (ordData.status && Array.isArray(ordData.orders)) {
+          setOrders(ordData.orders);
+        }
+      }
+      if (walRes && walRes.ok) {
+        const walData = await walRes.json();
+        if (walData.status && walData.wallet) {
+          setWallets(prev => ({ ...prev, [currentUser.id]: walData.wallet }));
+          if (Array.isArray(walData.wallet.ledger)) {
+            setLedgerEntries(walData.wallet.ledger);
+          }
+        }
+      }
+    } catch {}
+  }, [currentUser?.id, currentUser?.role]);
+
   // Synchronize authenticated user entities with Neon PostgreSQL
   useEffect(() => {
     if (!currentUser?.id) return;
+    const headers = getAuthHeaders();
 
     // Fetch user cart from PostgreSQL
-    fetch('/api/cart', { credentials: 'include' })
+    fetch('/api/cart', { headers, credentials: 'include' })
       .then(res => res.json())
       .then(data => {
         if (data.status && Array.isArray(data.items)) setCart(data.items);
@@ -874,38 +907,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       .catch(() => {});
 
     // Fetch user wishlist from PostgreSQL
-    fetch('/api/wishlist', { credentials: 'include' })
+    fetch('/api/wishlist', { headers, credentials: 'include' })
       .then(res => res.json())
       .then(data => {
         if (data.status && Array.isArray(data.productIds)) setWishlist(data.productIds);
       })
       .catch(() => {});
 
-    // Fetch orders from PostgreSQL
-    fetch('/api/orders?limit=100', { credentials: 'include' })
-      .then(res => res.json())
-      .then(data => {
-        if (data.status && Array.isArray(data.orders)) setOrders(data.orders);
-      })
-      .catch(() => {});
-
-    // Fetch seller wallet from PostgreSQL
-    if (currentUser.role === 'seller' || currentUser.role === 'admin') {
-      fetch('/api/wallet', { credentials: 'include' })
-        .then(res => res.json())
-        .then(data => {
-          if (data.status && data.wallet) {
-            setWallets(prev => ({ ...prev, [currentUser.id]: data.wallet }));
-            if (Array.isArray(data.wallet.ledger)) {
-              setLedgerEntries(data.wallet.ledger);
-            }
-          }
-        })
-        .catch(() => {});
-    }
+    refreshFinancials();
 
     // Fetch chat conversations from PostgreSQL
-    fetch('/api/chat/conversations', { credentials: 'include' })
+    fetch('/api/chat/conversations', { headers, credentials: 'include' })
       .then(res => res.json())
       .then(data => {
         if (data.status && Array.isArray(data.conversations)) setConversations(data.conversations);
@@ -913,7 +925,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       .catch(() => {});
 
     // Fetch disputes from PostgreSQL
-    fetch('/api/disputes', { credentials: 'include' })
+    fetch('/api/disputes', { headers, credentials: 'include' })
       .then(res => res.json())
       .then(data => {
         if (data.status && Array.isArray(data.disputes)) setDisputes(data.disputes);
@@ -921,7 +933,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       .catch(() => {});
 
     // Fetch notifications from PostgreSQL
-    fetch('/api/notifications', { credentials: 'include' })
+    fetch('/api/notifications', { headers, credentials: 'include' })
       .then(res => res.json())
       .then(data => {
         if (data.status && Array.isArray(data.notifications)) setNotifications(data.notifications);
@@ -929,14 +941,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       .catch(() => {});
 
     // Fetch custom commissions from PostgreSQL
-    fetch('/api/commissions', { credentials: 'include' })
+    fetch('/api/commissions', { headers, credentials: 'include' })
       .then(res => res.json())
       .then(data => {
         if (data.status && Array.isArray(data.commissions)) setCommissions(data.commissions);
       })
       .catch(() => {});
 
-    // One-time browser migration disclosure (Phase 2 Item 6)
+    // One-time browser migration cleanup
     try {
       const hasLegacyStranded = Boolean(
         localStorage.getItem('shopit_products_ready_made') ||
@@ -945,7 +957,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       );
       if (hasLegacyStranded && !localStorage.getItem('shopit_migrated_to_neon_v1')) {
         localStorage.setItem('shopit_migrated_to_neon_v1', 'true');
-        // Clean up legacy localStorage keys so stale client data never conflicts with Neon
         localStorage.removeItem('shopit_products_ready_made');
         localStorage.removeItem('shopit_sellers');
         localStorage.removeItem('shopit_orders');
@@ -954,17 +965,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         localStorage.removeItem('shopit_disputes');
         localStorage.removeItem('shopit_conversations');
         localStorage.removeItem('shopit_messages');
-        console.log('[Shop It Cloud Migration] Marketplace records successfully migrated to Neon PostgreSQL cloud database.');
+        localStorage.removeItem('shopit_registered_users');
       }
     } catch {}
-  }, [currentUser?.id, currentUser?.role]);
+  }, [currentUser?.id, currentUser?.role, refreshFinancials]);
 
   // Sync cart and wishlist to PostgreSQL when changed by authenticated user
   useEffect(() => {
     if (currentUser?.id && cart.length > 0) {
       fetch('/api/cart', {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
         credentials: 'include',
         body: JSON.stringify({ items: cart }),
       }).catch(() => {});
@@ -975,7 +986,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (currentUser?.id && wishlist.length > 0) {
       fetch('/api/wishlist', {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
         credentials: 'include',
         body: JSON.stringify({ productIds: wishlist }),
       }).catch(() => {});
@@ -1008,39 +1019,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     localStorage.setItem('shopit_referral_rewards', JSON.stringify(referralRewards));
   }, [referralRewards]);
 
-  // Rule 2: 5-day auto-release check (releases escrow funds to Available if no open dispute)
-  // and dispatches 48h auto-release reminder to buyer (Template 10)
-  const sentAutoReleaseRemindersRef = React.useRef<Set<string>>(new Set());
-  useEffect(() => {
-    const checkAutoRelease = () => {
-      const now = Date.now();
-      orders.forEach(order => {
-        if (
-          (order.status === 'delivered' || order.status === 'shipped' || order.status === 'paid') &&
-          new Date(order.autoReleaseAt).getTime() <= now
-        ) {
-          confirmItemReceived(order.id);
-          notify(`[Auto-Release] 5-day inspection period passed for Order #${order.id}. Escrow released to Available Balance.`, 'info');
-        } else if (
-          (order.status === 'delivered' || order.status === 'shipped' || order.status === 'paid') &&
-          new Date(order.autoReleaseAt).getTime() - now <= 2 * 24 * 60 * 60 * 1000 &&
-          !sentAutoReleaseRemindersRef.current.has(order.id)
-        ) {
-          sentAutoReleaseRemindersRef.current.add(order.id);
-          const buyerEmail = order.buyerEmail || currentUser?.email || 'customer@shopit.ng';
-          const buyerName = order.buyerName || 'there';
-          sendTransactionalEmail(buyerEmail, 'auto_release_reminder', {
-            name: buyerName,
-            order_id: order.id,
-          });
-        }
-      });
-    };
-
-    checkAutoRelease();
-    const interval = setInterval(checkAutoRelease, 30000);
-    return () => clearInterval(interval);
-  }, [orders]);
+  // Escrow auto-release is executed authoritatively on the server via /api/cron/escrow.
 
   // NDPA Compliance: 30-day automated purge for verification ID photos and selfies
   useEffect(() => {
@@ -1128,7 +1107,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  const login = (userData: Partial<User>) => {
+  const login = (userData: Partial<User> & { sessionToken?: string }) => {
+    if (userData.sessionToken && typeof localStorage !== 'undefined') {
+      localStorage.setItem('shopit_session_token', userData.sessionToken);
+    }
     const newUser: User = {
       id: userData.id || `user_${Date.now()}`,
       name: userData.name || 'Shopper',
@@ -1139,34 +1121,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       sellerProfile: userData.sellerProfile,
     };
     setCurrentUser(newUser);
-
-    // Update registeredUsers list state
-    setRegisteredUsers(prev => {
-      const exists = prev.some(u => u.id === newUser.id || u.email.toLowerCase() === newUser.email.toLowerCase());
-      if (exists) {
-        return prev.map(u => (u.id === newUser.id || u.email.toLowerCase() === newUser.email.toLowerCase() ? { ...u, ...newUser } : u));
-      }
-      return [newUser, ...prev];
-    });
-
-    try {
-      const regStr = localStorage.getItem('shopit_registered_users');
-      const regList: any[] = regStr ? JSON.parse(regStr) : [];
-      if (!regList.some(u => u.email.toLowerCase() === newUser.email.toLowerCase())) {
-        regList.push(newUser);
-        localStorage.setItem('shopit_registered_users', JSON.stringify(regList));
-      }
-    } catch (err) {
-      // ignore
-    }
-
     notify(`Welcome back, ${newUser.name}!`, 'success');
   };
 
   const logout = () => {
+    fetch('/api/auth/logout', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      credentials: 'include',
+    }).catch(() => {});
     setCurrentUser(null);
+    setOrders([]);
+    setCart([]);
+    setWishlist([]);
+    setWallets({});
+    setLedgerEntries([]);
+    setRegisteredUsers([]);
+    setVerificationRequests([]);
+    localStorage.removeItem('shopit_session_token');
     localStorage.removeItem('shopit_current_user');
     localStorage.removeItem('shopit_admin_session_active');
+    localStorage.removeItem('shopit_registered_users');
     setActiveView('catalog');
     notify('Logged out successfully', 'info');
   };
@@ -1187,22 +1162,35 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return false;
     }
 
-    const verification = await verifyEmailOtp(pendingAuthData.email, 'signup', code);
-    if (!verification.success) {
-      notify(verification.error || 'Invalid or expired verification code.', 'error');
-      return false;
-    }
+    try {
+      const verifyResp = await fetch('/api/auth/verify-otp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          email: pendingAuthData.email,
+          purpose: 'signup',
+          code: code.trim(),
+        }),
+      });
+      const verification = await verifyResp.json();
+      if (!verifyResp.ok || !verification.status) {
+        notify(verification.message || verification.error || 'Invalid or expired verification code.', 'error');
+        return false;
+      }
 
-    if (pendingAuthData.role === 'seller') {
-      setAuthTab('seller_register');
-      notify('Email verified! Complete your shop profile.', 'success');
-      return true;
-    } else {
-      // Persist Buyer to PostgreSQL database on the server (STEP 2 ITEM 3)
-      try {
+      const signupVerificationToken = verification.signupVerificationToken;
+
+      if (pendingAuthData.role === 'seller') {
+        setPendingAuthData((prev: any) => ({ ...prev, signupVerificationToken }));
+        setAuthTab('seller_register');
+        notify('Email verified! Complete your shop profile.', 'success');
+        return true;
+      } else {
         const resp = await fetch('/api/auth/register', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
           body: JSON.stringify({
             email: pendingAuthData.email,
             password: pendingAuthData.password,
@@ -1211,6 +1199,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             age: pendingAuthData.age,
             hasGuardianConsent: pendingAuthData.hasGuardianConsent,
             guardianName: pendingAuthData.guardianName,
+            signupVerificationToken,
           }),
         });
         const regData = await resp.json();
@@ -1220,18 +1209,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
 
         const savedUser = regData.user;
-        login(savedUser);
-        sendTransactionalEmail(pendingAuthData.email, 'welcome', {
-          name: pendingAuthData.name || pendingAuthData.email.split('@')[0],
-        });
+        login({ ...savedUser, sessionToken: regData.sessionToken });
         closeAuthModal();
         notify('Account created and registered successfully in database!', 'success');
         return true;
-      } catch (err: any) {
-        console.error('[Registration Error]:', err.message);
-        notify('Unable to connect to database server. Please try again.', 'error');
-        return false;
       }
+    } catch (err: any) {
+      console.error('[Registration Error]:', err.message);
+      notify('Unable to connect to database server. Please try again.', 'error');
+      return false;
     }
   };
 
@@ -1263,11 +1249,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }) => {
     const resolvedArea = sellerData.locationArea || sellerData.location?.area || 'Lagos Mainland';
 
-    // Persist Seller to PostgreSQL database on the server (STEP 2 ITEM 3)
     try {
       const resp = await fetch('/api/auth/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({
           email: pendingAuthData?.email,
           password: pendingAuthData?.password,
@@ -1276,6 +1262,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           age: pendingAuthData?.age,
           hasGuardianConsent: pendingAuthData?.hasGuardianConsent,
           guardianName: sellerData.guardianName || pendingAuthData?.guardianName,
+          guardianPhone: sellerData.guardianPhone,
+          signupVerificationToken: pendingAuthData?.signupVerificationToken,
           shopName: sellerData.shopName,
           bio: sellerData.bio,
           campus: sellerData.campus || 'UNILAG (Akoka)',
@@ -1288,6 +1276,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (!resp.ok || !regData.status) {
         notify(regData.message || 'Database error saving seller shop.', 'error');
         return;
+      }
+
+      if (regData.sessionToken && typeof localStorage !== 'undefined') {
+        localStorage.setItem('shopit_session_token', regData.sessionToken);
       }
 
       const serverUser = regData.user;
@@ -1333,20 +1325,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setCurrentUser(serverUser);
       localStorage.setItem('shopit_current_user', JSON.stringify(serverUser));
 
-      setRegisteredUsers(prev => {
-        const exists = prev.some(u => u.id === serverUser.id || u.email.toLowerCase() === serverUser.email.toLowerCase());
-        if (exists) {
-          return prev.map(u => (u.id === serverUser.id || u.email.toLowerCase() === serverUser.email.toLowerCase() ? { ...u, ...serverUser } : u));
-        }
-        return [serverUser, ...prev];
-      });
-
-      sendTransactionalEmail(serverUser.email, 'welcome', {
-        name: serverUser.name || sellerData.shopName,
-      });
-
       closeAuthModal();
       setActiveView('seller_dashboard');
+      fetchMarketplaceData();
       notify(`Shop "${sellerData.shopName}" registered in ${resolvedArea} and saved to database!`, 'success');
     } catch (err: any) {
       console.error('[Seller Registration Error]:', err.message);
@@ -1407,15 +1388,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
     setProducts(prev => [product, ...prev]);
 
-    // Persist to Neon PostgreSQL with auth headers
-    const token = typeof localStorage !== 'undefined' ? localStorage.getItem('shopit_session_token') : null;
+    // Persist to Neon PostgreSQL with session headers
     fetch('/api/products', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(token ? { 'x-session-token': token, Authorization: `Bearer ${token}` } : {}),
-        ...(currentUser?.id ? { 'x-user-id': currentUser.id } : {}),
-      },
+      headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
       credentials: 'include',
       body: JSON.stringify(product),
     }).catch(err => {
@@ -1448,7 +1424,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // Persist updates to Neon PostgreSQL
     fetch(`/api/products/${encodeURIComponent(id)}`, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
       credentials: 'include',
       body: JSON.stringify(updates),
     }).catch(err => console.warn('[Update Product Network Error]:', err.message));
@@ -1462,6 +1438,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // Delete in Neon PostgreSQL
     fetch(`/api/products/${encodeURIComponent(id)}`, {
       method: 'DELETE',
+      headers: getAuthHeaders(),
       credentials: 'include',
     }).catch(err => console.warn('[Delete Product Network Error]:', err.message));
 
@@ -1504,12 +1481,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const getSellerById = (id: string) => sellers.find(s => s.id === id);
 
-  // Sync fresh user & seller verification profile directly from PostgreSQL
+  // Sync fresh user & seller verification profile from PostgreSQL session
   const refreshCurrentUser = useCallback(async () => {
-    if (!currentUser?.email && !currentUser?.id) return;
+    if (!currentUser?.id) return;
     try {
-      const q = currentUser.email ? `email=${encodeURIComponent(currentUser.email)}` : `userId=${encodeURIComponent(currentUser.id)}`;
-      const res = await fetch(`/api/auth/me?${q}`);
+      const res = await fetch('/api/auth/me', {
+        headers: getAuthHeaders(),
+        credentials: 'include',
+      });
+      if (res.status === 401) {
+        setCurrentUser(null);
+        localStorage.removeItem('shopit_session_token');
+        localStorage.removeItem('shopit_current_user');
+        return;
+      }
       if (!res.ok) return;
       const data = await res.json();
       if (data.status && data.user) {
@@ -1547,15 +1532,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             })
           );
         }
+        await refreshFinancials();
       }
     } catch (err: any) {
       console.warn('[Profile Sync Warning]', err.message);
     }
-  }, [currentUser?.email, currentUser?.id]);
+  }, [currentUser?.id, refreshFinancials]);
 
   useEffect(() => {
     refreshCurrentUser();
-  }, [currentUser?.id, currentUser?.email]);
+  }, [currentUser?.id, refreshCurrentUser]);
 
   const matchedSeller = currentUser
     ? sellers.find(
@@ -1702,12 +1688,35 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const cartCount = cart.reduce((sum, item) => sum + item.quantity, 0);
 
-  // Coupons
-  const applyCoupon = (code: string, currentTotal: number): boolean => {
+  // Coupons (Server-validated against shopit_coupons when signed in, with fallback to catalog rules)
+  const applyCoupon = async (code: string, currentTotal: number): Promise<boolean> => {
     const cleanCode = code.trim().toUpperCase();
+    if (!cleanCode) return false;
+
+    if (currentUser?.id) {
+      try {
+        const res = await fetch('/api/coupons/validate', {
+          method: 'POST',
+          headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+          credentials: 'include',
+          body: JSON.stringify({ code: cleanCode, subtotal: currentTotal }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.status || !data.coupon) {
+          notify(data.message || 'Invalid or ineligible promo code.', 'error');
+          return false;
+        }
+        setAppliedCoupon(data.coupon);
+        notify(`Promo code ${data.coupon.code} applied: ₦${Number(data.coupon.discountAmount).toLocaleString()} discount!`, 'success');
+        return true;
+      } catch {
+        // fall through to offline/preview check below only if network unreachable
+      }
+    }
+
     const coupon = VALID_COUPONS.find(c => c.code === cleanCode);
     if (!coupon) {
-      notify('Invalid promo code. Try "CAMPUSLOVE" or "FIRSTCRAFT"', 'error');
+      notify('Invalid promo code.', 'error');
       return false;
     }
     if (currentTotal < coupon.minOrder) {
@@ -1724,257 +1733,71 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     notify('Coupon removed', 'info');
   };
 
-  // Rule 3: Payment status changes only when Paystack's webhook confirms it, verified by signature and processed once per payment. Never trust the browser.
-  const processPaystackWebhook = (eventData: {
-    event: 'charge.success';
-    reference: string;
-    signature: string;
-    amount: number;
-    customerEmail: string;
-    orderId: string;
-    channel: 'card' | 'bank_transfer' | 'ussd';
-  }): { success: boolean; message: string } => {
-    // 1. Signature check
-    const sigCheck = verifyPaystackWebhookSignature(JSON.stringify(eventData), eventData.signature);
-    if (!sigCheck.isValid) {
-      return { success: false, message: 'Invalid Paystack webhook signature' };
-    }
-
-    // 2. Idempotency: only process once per payment
-    if (paystackWebhooks.some(w => w.reference === eventData.reference)) {
-      return { success: true, message: 'Webhook event already processed (idempotent duplicate skipped)' };
-    }
-
-    const eventId = `evt_pstk_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-    const newWebhookRecord: PaystackWebhookEvent = {
-      id: eventId,
-      event: eventData.event,
-      signature: sigCheck.signature,
-      verified: true,
-      processedAt: new Date().toISOString(),
-      reference: eventData.reference,
-      amount: eventData.amount,
-      customerEmail: eventData.customerEmail,
-      orderId: eventData.orderId,
-      channel: eventData.channel,
-    };
-
-    setPaystackWebhooks(prev => [newWebhookRecord, ...prev]);
-
-    // 3. Update order status to paid
-    setOrders(prev =>
-      prev.map(o => (o.id === eventData.orderId ? { ...o, status: 'paid' as OrderStatus } : o))
-    );
-
-    // 4. Rule 5 & Rule 2: Append-only ledger credit to Pending Balance
-    const targetOrder = orders.find(o => o.id === eventData.orderId);
-    if (targetOrder) {
-      const newEntries: LedgerEntry[] = targetOrder.items.map(item => ({
-        id: `LEDGER-${Math.floor(100000 + Math.random() * 900000)}`,
-        walletId: item.sellerId,
-        orderId: targetOrder.id,
-        type: 'sale_pending',
-        amount: item.sellerPrice * item.quantity,
-        fee: item.serviceFee * item.quantity,
-        balanceType: 'pending',
-        balanceAfter: 0,
-        description: `Paystack Escrow Deposit · Order #${targetOrder.id} (${item.title})`,
-        reference: eventData.reference,
-        paystackEventId: eventId,
-        createdAt: new Date().toISOString(),
-      }));
-
-      setLedgerEntries(prev => [...newEntries, ...prev]);
-    }
-
-    return {
-      success: true,
-      message: `Paystack webhook verified (${sigCheck.signature.slice(0, 18)}...). Payment confirmed into escrow ledger.`,
-    };
-  };
-
-  // Orders and Escrow Management (Rule 1: No buyer wallet. Buyers pay via Paystack.)
-  const placeOrder = (orderData: Omit<Order, 'id' | 'createdAt' | 'autoReleaseAt' | 'hasReview'>): Order => {
-    const orderId = `ORD-${Math.floor(10000 + Math.random() * 90000)}`;
-    const now = new Date();
-    const autoRelease = new Date(now.getTime() + 5 * 24 * 60 * 60 * 1000); // 5 days auto-release rule
-
-    const handshakeCode = Math.floor(1000 + Math.random() * 9000).toString();
-    const paystackRef = orderData.paymentReference || `pstk_${Date.now()}_${Math.floor(10000 + Math.random() * 90000)}`;
-    const buyerEmail = currentUser?.email || 'customer@shopit.ng';
-    const buyerName = currentUser?.name || 'Customer';
-
-    const newOrder: Order = {
-      ...orderData,
-      id: orderId,
-      buyerEmail,
-      createdAt: now.toISOString(),
-      autoReleaseAt: autoRelease.toISOString(),
-      hasReview: false,
-      status: 'paid', // Escrow begins
-      paymentReference: paystackRef,
-      handshakeOtp: handshakeCode,
-      handshakeVerified: false,
-    };
-
-    setOrders(prev => [newOrder, ...prev]);
-
-    // Rule 3: Automatically simulate server-authoritative Paystack webhook verification
-    const webhookEventId = `evt_pstk_${Date.now()}`;
-    const webhookSignature = `sha512_pstk_${Math.random().toString(36).substring(2, 18)}`;
-    const newWebhookRecord: PaystackWebhookEvent = {
-      id: webhookEventId,
-      event: 'charge.success',
-      signature: webhookSignature,
-      verified: true,
-      processedAt: now.toISOString(),
-      reference: paystackRef,
-      amount: newOrder.grandTotal,
-      customerEmail: buyerEmail,
-      orderId: orderId,
-      channel: newOrder.paymentMethod === 'paystack_transfer' ? 'bank_transfer' : 'card',
-    };
-    setPaystackWebhooks(prev => [newWebhookRecord, ...prev]);
-
-    // Rule 5 & Rule 2: Append-only ledger updates: Record 'sale_pending' for each seller
-    const newLedgerEntries: LedgerEntry[] = newOrder.items.map(item => ({
-      id: `LEDGER-${Math.floor(100000 + Math.random() * 900000)}`,
-      walletId: item.sellerId,
-      orderId: orderId,
-      type: 'sale_pending',
-      amount: item.sellerPrice * item.quantity,
-      fee: item.serviceFee * item.quantity,
-      balanceType: 'pending',
-      balanceAfter: 0,
-      description: `Paystack Escrow Deposit · Order #${orderId} (${item.title})`,
-      reference: paystackRef,
-      paystackEventId: webhookEventId,
-      createdAt: now.toISOString(),
-    }));
-
-    setLedgerEntries(prev => [...newLedgerEntries, ...prev]);
-
-    // 6. ORDER PLACED (buyer)
-    sendTransactionalEmail(buyerEmail, 'order_placed_buyer', {
-      name: buyerName,
-      order_id: orderId,
-      total: newOrder.grandTotal,
-    });
-
-    // 7. NEW ORDER (seller) - notify each seller
-    const notifiedSellers = new Set<string>();
-    newOrder.items.forEach(item => {
-      if (!notifiedSellers.has(item.sellerId)) {
-        notifiedSellers.add(item.sellerId);
-        const sellerProfile = sellers.find(s => s.id === item.sellerId);
-        const sellerEmail = sellerProfile?.email || (sellerProfile?.ownerName
-          ? `${sellerProfile.ownerName.toLowerCase().replace(/[^a-z0-9]/g, '')}@campus.ng`
-          : 'artisan@campus.ng');
-        const sellerName = sellerProfile?.shopName || sellerProfile?.ownerName || item.sellerShopName || 'Artisan';
-        sendTransactionalEmail(sellerEmail, 'new_order_seller', {
-          name: sellerName,
-          order_id: orderId,
-          item: item.title,
-        });
-      }
-    });
-
-    // Persist order to Neon PostgreSQL with session headers
-    const token = typeof localStorage !== 'undefined' ? localStorage.getItem('shopit_session_token') : null;
-    fetch('/api/orders', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(token ? { 'x-session-token': token, Authorization: `Bearer ${token}` } : {}),
-        ...(currentUser?.id ? { 'x-user-id': currentUser.id } : {}),
-      },
-      credentials: 'include',
-      body: JSON.stringify({
-        id: orderId,
-        items: newOrder.items,
-        subtotal: newOrder.itemsSubtotal,
-        serviceFeeTotal: newOrder.serviceFeeTotal,
-        deliveryTotal: newOrder.deliveryTotal,
-        discountTotal: newOrder.discountTotal,
-        grandTotal: newOrder.grandTotal,
-        deliveryArea: newOrder.deliveryArea,
-        pickupPoint: newOrder.pickupPoint,
-        paymentMethod: newOrder.paymentMethod,
-        paymentReference: newOrder.paymentReference,
-      }),
-    }).catch(err => {
-      console.warn('[Order Persistence Error]:', err.message);
-    });
-
-    clearCart();
-    setAppliedCoupon(null);
-    notify(`Order #${orderId} confirmed via Paystack Webhook and held in Shop It Escrow!`, 'success');
-    return newOrder;
-  };
-
-  const updateOrderStatus = (
+  // Orders and Escrow Management (Server-authoritative state machine & ledger)
+  const updateOrderStatus = async (
     orderId: string,
     status: OrderStatus,
     extra?: { packedPhotoUrl?: string; disputeReason?: string; handshakeOtp?: string }
   ) => {
-    const now = new Date().toISOString();
-    setOrders(prev =>
-      prev.map(ord => {
-        if (ord.id === orderId) {
-          const updated: Order = { ...ord, status };
-          if (status === 'packed') {
-            updated.packedAt = now;
-            if (extra?.packedPhotoUrl) updated.packedPhotoUrl = extra.packedPhotoUrl;
-          } else if (status === 'shipped') {
-            updated.shippedAt = now;
-          } else if (status === 'delivered') {
-            updated.deliveredAt = now;
-          } else if (status === 'completed') {
-            updated.completedAt = now;
-          } else if (status === 'disputed' && extra?.disputeReason) {
-            updated.disputeReason = extra.disputeReason;
-          }
-          return updated;
-        }
-        return ord;
-      })
-    );
-
-    // Persist status change to Neon PostgreSQL (which triggers double-entry ledger release & status history)
-    fetch(`/api/orders/${encodeURIComponent(orderId)}/status`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({
-        status,
-        notes: extra?.disputeReason || `Order marked as ${status}`,
-        handshakeOtp: extra?.handshakeOtp,
-      }),
-    }).catch(err => {
-      console.warn('[Order Status Update Error]:', err.message);
-    });
-
-    if (status === 'packed') {
-      notify('Order marked as Packed with photo verification!', 'success');
-    } else if (status === 'shipped') {
-      notify('Order dispatched/shipped to campus drop point!', 'info');
-      // 8. ORDER SHIPPED (buyer)
-      const targetOrd = orders.find(o => o.id === orderId);
-      if (targetOrd) {
-        const bEmail = targetOrd.buyerEmail || currentUser?.email || 'customer@shopit.ng';
-        const bName = targetOrd.buyerName || 'there';
-        sendTransactionalEmail(bEmail, 'order_shipped_buyer', {
-          name: bName,
-          order_id: targetOrd.id,
-        });
+    try {
+      const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}/status`, {
+        method: 'PATCH',
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        credentials: 'include',
+        body: JSON.stringify({
+          status,
+          notes: extra?.disputeReason || `Order marked as ${status}`,
+          packedPhotoUrl: extra?.packedPhotoUrl,
+          handshakeOtp: extra?.handshakeOtp,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.status === false) {
+        notify(data.message || `Could not update order to ${status}.`, 'error');
+        return;
       }
-    } else if (status === 'delivered') {
-      notify('Order delivered! Buyer notified to inspect.', 'info');
+
+      const now = new Date().toISOString();
+      setOrders(prev =>
+        prev.map(ord => {
+          if (ord.id === orderId) {
+            const updated: Order = { ...ord, status };
+            if (status === 'packed') {
+              updated.packedAt = now;
+              if (extra?.packedPhotoUrl) updated.packedPhotoUrl = extra.packedPhotoUrl;
+            } else if (status === 'shipped') {
+              updated.shippedAt = now;
+            } else if (status === 'delivered') {
+              updated.deliveredAt = now;
+            } else if (status === 'completed') {
+              updated.completedAt = now;
+            } else if (status === 'disputed' && extra?.disputeReason) {
+              updated.disputeReason = extra.disputeReason;
+            }
+            return updated;
+          }
+          return ord;
+        })
+      );
+
+      if (status === 'packed') {
+        notify('Order marked as Packed with photo verification!', 'success');
+      } else if (status === 'shipped') {
+        notify('Order dispatched/shipped to campus drop point!', 'info');
+      } else if (status === 'delivered') {
+        notify('Order delivered! Buyer notified to inspect.', 'info');
+      } else if (status === 'completed') {
+        notify('Order completed and escrow funds released!', 'success');
+      }
+
+      await refreshFinancials();
+    } catch (err: any) {
+      notify(err.message || 'Network error updating order status.', 'error');
     }
   };
 
-  // Rule 2: Money moves to Available only after the buyer taps "Item received" or after the 5-day auto-release, and only if there is no open dispute.
-  const confirmItemReceived = (orderId: string) => {
+  // Money moves to Available only after buyer confirms item received on the server (or server cron auto-release)
+  const confirmItemReceived = async (orderId: string) => {
     const ord = orders.find(o => o.id === orderId);
     if (!ord) return;
 
@@ -1983,107 +1806,64 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return;
     }
 
-    updateOrderStatus(orderId, 'completed');
-
-    // Rule 5: Append 'escrow_release' to append-only ledger
-    const now = new Date().toISOString();
-    const releaseEntries: LedgerEntry[] = ord.items.map(item => ({
-      id: `LEDGER-${Math.floor(100000 + Math.random() * 900000)}`,
-      walletId: item.sellerId,
-      orderId: orderId,
-      type: 'escrow_release',
-      amount: item.sellerPrice * item.quantity,
-      fee: 0,
-      balanceType: 'available',
-      balanceAfter: 0,
-      description: `Escrow Released · Buyer confirmed item received for Order #${orderId}`,
-      reference: orderId,
-      createdAt: now,
-    }));
-
-    setLedgerEntries(prev => [...releaseEntries, ...prev]);
-    notify(`Item received confirmed! Escrow funds released to Available Balance for withdrawal.`, 'success');
-
-    // 9. ITEM RECEIVED (seller) - notify each seller
-    const notifiedSellers = new Set<string>();
-    ord.items.forEach(item => {
-      if (!notifiedSellers.has(item.sellerId)) {
-        notifiedSellers.add(item.sellerId);
-        const sellerProfile = sellers.find(s => s.id === item.sellerId);
-        const sellerEmail = sellerProfile?.email || (sellerProfile?.ownerName
-          ? `${sellerProfile.ownerName.toLowerCase().replace(/[^a-z0-9]/g, '')}@campus.ng`
-          : 'artisan@campus.ng');
-        const sellerName = sellerProfile?.shopName || sellerProfile?.ownerName || item.sellerShopName || 'Artisan';
-        const itemAmount = item.sellerPrice * item.quantity;
-        sendTransactionalEmail(sellerEmail, 'item_received_seller', {
-          name: sellerName,
-          order_id: ord.id,
-          amount: itemAmount,
-        });
-      }
-    });
+    await updateOrderStatus(orderId, 'completed');
   };
 
-  // Rule 1: No buyer wallet. Refunds go back to original payment method through Paystack.
-  const cancelOrder = (orderId: string) => {
+  const cancelOrder = async (orderId: string) => {
     const ord = orders.find(o => o.id === orderId);
     if (!ord) return;
     if (ord.status !== 'paid') {
       notify('Orders cannot be cancelled once the seller marks them as packed.', 'error');
       return;
     }
-    updateOrderStatus(orderId, 'cancelled');
-
-    // Append 'refund' entry to append-only ledger to reverse pending balance
-    const now = new Date().toISOString();
-    const refundEntries: LedgerEntry[] = ord.items.map(item => ({
-      id: `LEDGER-${Math.floor(100000 + Math.random() * 900000)}`,
-      walletId: item.sellerId,
-      orderId: orderId,
-      type: 'refund',
-      amount: item.sellerPrice * item.quantity,
-      fee: 0,
-      balanceType: 'pending',
-      balanceAfter: 0,
-      description: `Order #${orderId} Cancelled · Refunded back to buyer's original payment method via Paystack`,
-      reference: `pstk_rfnd_${Date.now()}`,
-      createdAt: now,
-    }));
-
-    setLedgerEntries(prev => [...refundEntries, ...prev]);
-    notify(`Order #${orderId} cancelled. ₦${ord.grandTotal.toLocaleString()} refunded to original payment method via Paystack.`, 'success');
+    await updateOrderStatus(orderId, 'cancelled');
+    notify(`Order #${orderId} cancellation requested.`, 'info');
   };
 
-  const openDispute = (orderId: string, reason: string) => {
-    updateOrderStatus(orderId, 'disputed', { disputeReason: reason });
-    const ord = orders.find(o => o.id === orderId);
-    if (ord) {
-      const newDispute: DisputeTicket = {
-        id: `disp_${Date.now()}`,
-        orderId,
-        buyerMaskedId: ord.buyerMaskedId,
-        buyerName: ord.buyerName || 'Tobi Adebisi',
-        sellerId: ord.items[0]?.sellerId || 'seller_amaka',
-        sellerShopName: ord.items[0]?.sellerShopName || 'Amaka Beads & Charms',
-        reason,
-        description: reason,
-        sellerPackedPhotoUrl: ord.packedPhotoUrl,
-        evidencePhotoUrl: 'https://images.unsplash.com/photo-1594035910387-fea47794261f?w=600&auto=format&fit=crop&q=80',
-        amountHeldInEscrow: ord.grandTotal,
-        status: 'open',
-        createdAt: 'Just now',
-      };
-      setDisputes(prev => [newDispute, ...prev]);
-
-      // 11. DISPUTE OPENED (buyer)
-      const buyerEmail = ord.buyerEmail || currentUser?.email || 'customer@shopit.ng';
-      const buyerName = ord.buyerName || currentUser?.name || 'there';
-      sendTransactionalEmail(buyerEmail, 'dispute_opened', {
-        name: buyerName,
-        order_id: ord.id,
+  const openDispute = async (orderId: string, reason: string, evidencePhotoUrl?: string) => {
+    try {
+      const res = await fetch('/api/disputes', {
+        method: 'POST',
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        credentials: 'include',
+        body: JSON.stringify({
+          orderId,
+          reason,
+          description: reason,
+          evidencePhotoUrl: evidencePhotoUrl || undefined,
+        }),
       });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.status === false) {
+        notify(data.message || 'Unable to open dispute.', 'error');
+        return;
+      }
+
+      const ord = orders.find(o => o.id === orderId);
+      if (ord) {
+        const newDispute: DisputeTicket = {
+          id: data.disputeId || `DISP-${Date.now()}`,
+          orderId,
+          buyerMaskedId: ord.buyerMaskedId,
+          buyerName: ord.buyerName || 'Customer',
+          sellerId: ord.items[0]?.sellerId || '',
+          sellerShopName: ord.items[0]?.sellerShopName || 'Seller Shop',
+          reason,
+          description: reason,
+          sellerPackedPhotoUrl: ord.packedPhotoUrl,
+          evidencePhotoUrl: evidencePhotoUrl || '',
+          amountHeldInEscrow: ord.grandTotal,
+          status: 'open',
+          createdAt: new Date().toISOString(),
+        };
+        setDisputes(prev => [newDispute, ...prev]);
+        setOrders(prev => prev.map(o => (o.id === orderId ? { ...o, status: 'disputed', disputeReason: reason } : o)));
+      }
+      await refreshFinancials();
+      notify('Dispute opened. Escrow release is frozen while moderation reviews.', 'error');
+    } catch (err: any) {
+      notify(err?.message || 'Network error opening dispute.', 'error');
     }
-    notify('Dispute opened. Escrow release is frozen while moderation reviews.', 'error');
   };
 
   const submitOrderReview = (orderId: string, productId: string, rating: number, comment: string) => {
@@ -2126,9 +1906,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     amount: number,
     accountInfo?: { bank_name?: string; last4?: string }
   ): Promise<{ success: boolean; error?: string; waitSeconds?: number }> => {
-    const email = currentUser?.email || 'artisan@campus.ng';
+    const email = (currentUser?.email || '').trim();
+    if (!email) {
+      notify('Please sign in with your registered email to request a withdrawal OTP.', 'error');
+      return { success: false, error: 'Missing registered email' };
+    }
     const name = currentUser?.name || currentSeller?.shopName || 'Artisan';
-    const bank_name = accountInfo?.bank_name || 'OPay / Bank';
+    const bank_name = accountInfo?.bank_name || 'Nigerian Bank Account';
     const last4 = accountInfo?.last4 || '••••';
     const result = await generateEmailOtp(email, 'withdrawal', { name, amount, bank_name, last4 });
     if (!result.success) {
@@ -2145,9 +1929,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const sendPayoutAccountOtp = async (
     accountInfo?: { bank_name?: string; last4?: string }
   ): Promise<{ success: boolean; error?: string; waitSeconds?: number }> => {
-    const email = currentUser?.email || 'artisan@campus.ng';
+    const email = (currentUser?.email || '').trim();
+    if (!email) {
+      notify('Please sign in with your registered email to request an authorization code.', 'error');
+      return { success: false, error: 'Missing registered email' };
+    }
     const name = currentUser?.name || currentSeller?.shopName || 'Artisan';
-    const bank_name = accountInfo?.bank_name || 'OPay / Bank';
+    const bank_name = accountInfo?.bank_name || 'Nigerian Bank Account';
     const last4 = accountInfo?.last4 || '••••';
     const result = await generateEmailOtp(email, 'payout_account', { name, bank_name, last4 });
     if (!result.success) {
@@ -2158,7 +1946,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return result;
   };
 
-  // Rule 4 & Rule 5: Seller withdrawals go to Opay or a Nigerian bank through Paystack Transfers API
+  // Seller withdrawals go through server payout endpoint with atomic ledger debit & OTP enforcement
   const requestWithdrawal = async (amount: number, payoutAccountId: string, otpCode: string): Promise<boolean> => {
     if (!payoutsEnabled) {
       notify('Payouts are currently disabled by system safety switch. No withdrawal can be requested or debited.', 'error');
@@ -2169,50 +1957,43 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     // Rule: Unverified sellers cannot withdraw
     if (currentSeller.verificationStatus !== 'verified' && currentSeller.verificationStatus !== 'approved') {
-      notify('Withdrawals Locked: Central Bank of Nigeria & NDPA regulations require sellers to complete NIN & biometric verification before withdrawing funds.', 'error');
+      notify('Withdrawals Locked: Identity verification is required before withdrawing funds.', 'error');
       setIsVerificationModalOpen(true);
       return false;
     }
 
-    // Rule 5: Derived balances from append-only ledger
     const sellerLedger = ledgerEntries.filter(e => e.walletId === currentSeller.id);
     const balances = calculateBalancesFromLedger(sellerLedger);
     const baseWallet = wallets[currentSeller.id];
 
-    // Rule 5: Admin can freeze a wallet
     if (baseWallet?.isFrozen) {
       notify(`Wallet is frozen by Administrator: ${baseWallet.freezeReason || 'Security review in progress'}. Withdrawals are temporarily disabled.`, 'error');
       return false;
     }
 
-    // Rule 4: Minimum ₦1,000
     if (amount < 1000) {
       notify('Minimum withdrawal amount is ₦1,000.', 'error');
       return false;
     }
 
-    // Rule 4: Verify Email OTP with 10-minute expiry and max 3 wrong attempts
-    const email = currentUser?.email || 'artisan@campus.ng';
-    const otpVerification = await verifyEmailOtp(email, 'withdrawal', otpCode);
-    if (!otpVerification.success) {
-      notify(otpVerification.error || 'Invalid or expired withdrawal OTP. Please request a new code.', 'error');
+    const cleanOtp = otpCode.trim();
+    if (!/^\d{6}$/.test(cleanOtp)) {
+      notify('Please enter the 6-digit withdrawal OTP sent to your email.', 'error');
       return false;
     }
 
     const payoutAccount = (baseWallet?.payoutAccounts || []).find(p => p.id === payoutAccountId);
     if (!payoutAccount) {
-      notify('Selected payout account not found. Please link an Opay or bank account.', 'error');
+      notify('Selected payout account not found. Please link a verified Nigerian bank account.', 'error');
       return false;
     }
 
-    // Rule 4: A new payout account waits 24 hours before it can be used
     const cooling = isPayoutAccountCooled(payoutAccount);
     if (!cooling.isCooled) {
       notify(`This payout account was added recently and is in a 24-hour security cooling period (${cooling.hoursRemaining}h remaining) to prevent unauthorized drain.`, 'error');
       return false;
     }
 
-    // Rule 4: The account name must match the seller's verified ID name
     const verifiedName = currentSeller.verifiedLegalName || currentSeller.guardianName || currentUser?.name || currentSeller.shopName;
     const nameMatch = validateAccountNameMatch(payoutAccount.accountName, verifiedName);
     if (!nameMatch.isMatch) {
@@ -2220,29 +2001,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return false;
     }
 
-    // Withdrawal network fee: free above ₦5,000, flat ₦50 below
-    const fee = amount >= DEFAULT_FEE_SETTINGS.withdrawalFeeRule.freeThreshold
-      ? 0
-      : DEFAULT_FEE_SETTINGS.withdrawalFeeRule.flatFeeBelowThreshold;
-    const totalDeduction = amount + fee;
+    // Option 1: Shop It absorbs Flutterwave transfer fees (₦0 seller withdrawal fee)
+    const fee = 0;
+    const totalDeduction = amount;
 
     if (balances.availableBalance < totalDeduction) {
-      notify(`Insufficient Available balance. You have ₦${balances.availableBalance.toLocaleString()} available. Needed: ₦${totalDeduction.toLocaleString()} (including ₦${fee} network fee).`, 'error');
+      notify(`Insufficient Available balance. You have ₦${balances.availableBalance.toLocaleString()} available. Needed: ₦${totalDeduction.toLocaleString()}.`, 'error');
       return false;
     }
 
-    // Call server Paystack transfer endpoint with double-entry ledger synchronization
+    // Server verifies & consumes OTP atomically inside transfer flow
     try {
-      const resp = await fetch('/api/paystack/transfer', {
+      const resp = await fetch('/api/payments/transfer', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        credentials: 'include',
         body: JSON.stringify({
           amount,
           payoutAccountId: payoutAccount.id,
-          otpCode,
-          bankName: payoutAccount.bankName,
-          accountNumber: payoutAccount.accountNumber,
-          sellerId: currentSeller.id,
+          otpCode: cleanOtp,
         }),
       });
 
@@ -2252,7 +2029,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return false;
       }
 
-      await fetchMarketplaceData();
+      await Promise.all([fetchMarketplaceData(), refreshFinancials()]);
       setActiveWithdrawalOtp(null);
       notify(data.message || `Transfer of ₦${amount.toLocaleString()} dispatched.`, 'success');
       return true;
@@ -2262,7 +2039,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  // Rule 4: Add Payout Account (Opay or Nigerian bank with Email Authorization OTP)
+  // Add Payout Account (server verifies & consumes OTP atomically)
   const addPayoutAccount = async (
     bankCode: string,
     bankName: string,
@@ -2272,7 +2049,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   ): Promise<boolean> => {
     if (!currentSeller) return false;
 
-    // Rule: Sellers must submit NIN verification before linking payout accounts
     if (
       currentSeller.verificationStatus !== 'verified' &&
       currentSeller.verificationStatus !== 'approved' &&
@@ -2288,17 +2064,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return false;
     }
 
-    // Email OTP Authorization verification (if code supplied)
-    if (otpCode !== undefined) {
-      const email = currentUser?.email || 'artisan@campus.ng';
-      const otpVerify = await verifyEmailOtp(email, 'payout_account', otpCode);
-      if (!otpVerify.success) {
-        notify(otpVerify.error || 'Invalid or expired authorization code. Please request a new code.', 'error');
-        return false;
-      }
+    const cleanOtp = otpCode?.trim() || '';
+    if (!/^\d{6}$/.test(cleanOtp)) {
+      notify('Please request and enter the 6-digit email authorization code.', 'error');
+      return false;
     }
 
-    // Rule 4: Account name must match verified ID name
     const verifiedName = currentSeller.verifiedLegalName || currentSeller.guardianName || currentUser?.name || currentSeller.shopName;
     const nameMatch = validateAccountNameMatch(accountName, verifiedName);
     if (!nameMatch.isMatch) {
@@ -2309,12 +2080,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       const resp = await fetch('/api/wallet/payout-account', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        credentials: 'include',
         body: JSON.stringify({
           bankCode,
           bankName,
           accountNumber: accountNumber.trim(),
           accountName: accountName.trim().toUpperCase(),
+          otpCode: cleanOtp,
         }),
       });
 
@@ -2324,7 +2097,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return false;
       }
 
-      await fetchMarketplaceData();
+      await Promise.all([fetchMarketplaceData(), refreshFinancials()]);
       notify(`Payout account ${bankName} (${accountNumber}) linked! 24-hr security cooling period active until tomorrow.`, 'success');
       return true;
     } catch (err: any) {
@@ -2579,21 +2352,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   ) => {
     const canonicalStatus: 'verified' | 'rejected' | 'needs_resubmission' =
       status === 'approved' ? 'verified' : status;
-    const reviewer = adminName || currentUser?.name || 'Adeyinka Joseph (Moderator)';
-
-    try {
-      fetch('/api/verification/admin/review', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          requestId: id,
-          decision: canonicalStatus,
-          rejectionReason: notes,
-          adminName: reviewer,
-          adminRole: 'moderator',
-        }),
-      }).catch(err => console.warn('Server review call warning:', err.message));
-    } catch {}
+    const reviewer = adminName || currentUser?.name || 'Admin Moderator';
 
     setVerificationRequests(prev =>
       prev.map(req => {
@@ -2615,37 +2374,37 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const targetSellerId = targetReq?.sellerId || id;
 
     const targetSeller = sellers.find(s => s.id === targetSellerId);
-    const sellerEmail = targetSeller?.email || (targetSeller?.ownerName
-      ? `${targetSeller.ownerName.toLowerCase().replace(/[^a-z0-9]/g, '')}@campus.ng`
-      : 'artisan@campus.ng');
+    const sellerEmail = targetSeller?.email || '';
     const sellerName = targetReq?.ownerName || targetReq?.shopName || targetSeller?.shopName || 'Seller';
 
     try {
       await Promise.all([
         fetch('/api/verification/admin/review', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+          credentials: 'include',
           body: JSON.stringify({
             requestId: id,
             sellerId: targetSellerId,
             decision: canonicalStatus,
             rejectionReason: notes,
-            adminName: reviewer,
-            adminRole: 'moderator',
           }),
         }).catch(err => console.warn('Server review call warning:', err.message)),
         fetch(`/api/admin/sellers/${encodeURIComponent(targetSellerId)}/verify`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+          credentials: 'include',
           body: JSON.stringify({ isVerified: canonicalStatus === 'verified' }),
         }).catch(err => console.warn('Server verify seller warning:', err.message)),
       ]);
     } catch {}
 
     if (canonicalStatus === 'verified') {
-      sendTransactionalEmail(sellerEmail, 'seller_verified', {
-        name: sellerName,
-      });
+      if (sellerEmail) {
+        sendTransactionalEmail(sellerEmail, 'seller_verified', {
+          name: sellerName,
+        });
+      }
 
       setSellers(prev =>
         prev.map(s => {
@@ -2773,7 +2532,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  const submitVerificationRequest = (data: Omit<SellerVerificationRequest, 'id' | 'submittedAt' | 'status'>) => {
+  const submitVerificationRequest = (
+    data: Omit<SellerVerificationRequest, 'id' | 'submittedAt' | 'status'>,
+    options?: { skipServerSubmit?: boolean }
+  ) => {
     const id = `VERIF-${Math.floor(10000 + Math.random() * 90000)}`;
     const newReq: SellerVerificationRequest = {
       ...data,
@@ -2784,24 +2546,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setVerificationRequests(prev => [newReq, ...prev.filter(r => r.sellerId !== data.sellerId)]);
 
-    // Persist verification submission to PostgreSQL
-    fetch('/api/sellers/verify/submit', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        sellerId: data.sellerId,
-        ownerName: data.ownerName,
-        shopName: data.shopName,
-        nin: data.fullNinLast4,
-        idType: data.idType,
-        idCardPhotoUrl: data.idCardPhotoUrl,
-        selfiePhotoUrl: data.selfiePhotoUrl,
-        under18: data.under18,
-        guardianName: data.guardianName,
-        guardianPhone: data.guardianPhone,
-        guardianConsent: data.guardianConsentSigned,
-      }),
-    }).catch(err => console.warn('Verification server submit warning:', err.message));
+    // Persist standalone verification submission to PostgreSQL only when not already submitted via /api/verification/submit
+    if (!options?.skipServerSubmit) {
+      fetch('/api/sellers/verify/submit', {
+        method: 'POST',
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        credentials: 'include',
+        body: JSON.stringify({
+          sellerId: data.sellerId,
+          ownerName: data.ownerName,
+          shopName: data.shopName,
+          nin: data.fullNinLast4,
+          idType: data.idType,
+          idCardPhotoUrl: data.idCardPhotoUrl,
+          selfiePhotoUrl: data.selfiePhotoUrl,
+          under18: data.under18,
+          guardianName: data.guardianName,
+          guardianPhone: data.guardianPhone,
+          guardianConsent: data.guardianConsentSigned,
+        }),
+      }).catch(err => console.warn('Verification server submit warning:', err.message));
+    }
 
     setSellers(prev =>
       prev.map(s => {
@@ -2977,24 +2742,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       decisionText += ` (${notes})`;
     }
 
-    const buyerEmail = ord?.buyerEmail || currentUser?.email || 'customer@shopit.ng';
+    const buyerEmail = ord?.buyerEmail || currentUser?.email || '';
     const buyerName = disp.buyerName || ord?.buyerName || 'Customer';
-    sendTransactionalEmail(buyerEmail, 'dispute_resolved', {
-      name: buyerName,
-      order_id: disp.orderId,
-      decision: decisionText,
-    });
+    if (buyerEmail) {
+      sendTransactionalEmail(buyerEmail, 'dispute_resolved', {
+        name: buyerName,
+        order_id: disp.orderId,
+        decision: decisionText,
+      });
+    }
 
     const targetSeller = sellers.find(s => s.id === disp.sellerId);
-    const sellerEmail = targetSeller?.email || (targetSeller?.ownerName
-      ? `${targetSeller.ownerName.toLowerCase().replace(/[^a-z0-9]/g, '')}@campus.ng`
-      : 'artisan@campus.ng');
+    const sellerEmail = targetSeller?.email || '';
     const sellerName = targetSeller?.shopName || targetSeller?.ownerName || 'Seller';
-    sendTransactionalEmail(sellerEmail, 'dispute_resolved', {
-      name: sellerName,
-      order_id: disp.orderId,
-      decision: decisionText,
-    });
+    if (sellerEmail) {
+      sendTransactionalEmail(sellerEmail, 'dispute_resolved', {
+        name: sellerName,
+        order_id: disp.orderId,
+        decision: decisionText,
+      });
+    }
   };
 
   const updateFlagStatus = (flagId: string, action: 'warn' | 'lock_chat' | 'freeze_account' | 'dismiss') => {
@@ -3047,16 +2814,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const targetUser = registeredUsers.find(u => u.id === userId);
     const targetEmail = targetUser?.email;
 
-    // Delete in PostgreSQL on server (STEP 2 ITEM 5)
-    fetch(`/api/admin/users/${encodeURIComponent(userId)}`, { method: 'DELETE' }).catch(err => {
+    // Delete in PostgreSQL on server
+    fetch(`/api/admin/users/${encodeURIComponent(userId)}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(),
+      credentials: 'include',
+    }).catch(err => {
       console.warn('API delete user warning:', err.message);
     });
 
-    setRegisteredUsers(prev => {
-      const updated = prev.filter(u => u.id !== userId);
-      localStorage.setItem('shopit_registered_users', JSON.stringify(updated));
-      return updated;
-    });
+    setRegisteredUsers(prev => prev.filter(u => u.id !== userId));
 
     // Cleanup seller profile, listings, and wallet if seller
     setSellers(prev => prev.filter(s => s.id !== userId));
@@ -3065,7 +2832,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setWallets(prev => {
       const next = { ...prev };
       delete next[userId];
-      localStorage.setItem('shopit_wallets', JSON.stringify(next));
       return next;
     });
 
@@ -3086,20 +2852,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return;
     }
 
-    // Update in PostgreSQL on server (STEP 2 ITEM 5)
+    // Update in PostgreSQL on server
     fetch(`/api/admin/users/${encodeURIComponent(userId)}/ban`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+      credentials: 'include',
       body: JSON.stringify({ isBanned, banReason: reason }),
     }).catch(err => {
       console.warn('API ban user warning:', err.message);
     });
 
-    setRegisteredUsers(prev => {
-      const updated = prev.map(u => u.id === userId ? { ...u, isBanned } : u);
-      localStorage.setItem('shopit_registered_users', JSON.stringify(updated));
-      return updated;
-    });
+    setRegisteredUsers(prev => prev.map(u => u.id === userId ? { ...u, isBanned } : u));
 
     if (isBanned) {
       toggleWalletFreeze(userId, true, reason || 'Account suspended by moderator');
@@ -3115,35 +2878,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const adminResetUserPassword = (userId: string, newPass: string): boolean => {
-    if (!newPass || newPass.trim().length < 6) {
-      notify('Password must be at least 6 characters.', 'error');
+    if (!newPass || newPass.trim().length < 8) {
+      notify('Password must be at least 8 characters.', 'error');
       return false;
     }
 
-    // Update in PostgreSQL on server (STEP 2 ITEM 5)
+    // Update in PostgreSQL on server
     fetch(`/api/admin/users/${encodeURIComponent(userId)}/reset-password`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+      credentials: 'include',
       body: JSON.stringify({ newPassword: newPass.trim() }),
     }).catch(err => {
       console.warn('API reset password warning:', err.message);
     });
 
-    setRegisteredUsers(prev => {
-      const updated = prev.map(u => u.id === userId ? { ...u, password: newPass.trim() } : u);
-      localStorage.setItem('shopit_registered_users', JSON.stringify(updated));
-      return updated;
-    });
     notify('Password reset successfully in database for account.', 'success');
     addAdminAuditLog('PASSWORD_RESET', `Direct password reset executed for account ${userId}`, userId);
     return true;
   };
 
   const adminToggleSellerVerification = (sellerId: string, isVerified: boolean) => {
-    // Update in PostgreSQL on server (STEP 2 ITEM 5)
+    // Update in PostgreSQL on server
     fetch(`/api/admin/sellers/${encodeURIComponent(sellerId)}/verify`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+      credentials: 'include',
       body: JSON.stringify({ isVerified }),
     }).catch(err => {
       console.warn('API verify seller warning:', err.message);
@@ -3235,51 +2995,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!ord) return;
     updateOrderStatus(orderId, 'cancelled', { disputeReason: notes || 'Moderator forced refund to buyer' });
 
-    // Call server Paystack Refund API
+    // Call server refund API
     if (ord.paymentReference) {
-      fetch('/api/paystack/refund', {
+      fetch('/api/payments/refund', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        credentials: 'include',
         body: JSON.stringify({
           reference: ord.paymentReference,
           amountKobo: Math.round(ord.grandTotal * 100),
           reason: notes || `Moderator forced refund for Order #${orderId}`,
         }),
-      }).catch(err => {
-        console.warn('Paystack refund call warning:', err.message);
-      });
+      })
+        .then(() => refreshFinancials())
+        .catch(err => {
+          console.warn('Refund call warning:', err.message);
+        });
     }
 
-    ord.items.forEach(item => {
-      setWallets(prev => {
-        const w = prev[item.sellerId];
-        if (!w) return prev;
-        const refundAmt = item.sellerPrice * item.quantity;
-        return {
-          ...prev,
-          [item.sellerId]: {
-            ...w,
-            pendingBalance: Math.max(0, w.pendingBalance - refundAmt),
-            transactions: [
-              {
-                id: `TXN-${Math.floor(10000 + Math.random() * 90000)}`,
-                type: 'refund',
-                amount: refundAmt,
-                fee: 0,
-                balanceAfter: w.availableBalance,
-                status: 'completed',
-                description: `Moderator Forced Refund for Order #${orderId} via Paystack`,
-                reference: orderId,
-                createdAt: 'Just now',
-              },
-              ...w.transactions,
-            ],
-          },
-        };
-      });
-    });
-    notify(`[Moderator Override] Order #${orderId} cancelled & 100% refunded to buyer via Paystack.`, 'success');
-    addAdminAuditLog('ORDER_FORCE_REFUNDED', `Order #${orderId} cancelled and funds returned to buyer via Paystack. Notes: ${notes || 'Direct intervention'}`, orderId);
+    notify(`[Moderator Override] Order #${orderId} cancelled & refund initiated.`, 'success');
+    addAdminAuditLog('ORDER_FORCE_REFUNDED', `Order #${orderId} cancelled and refund initiated. Notes: ${notes || 'Direct intervention'}`, orderId);
   };
 
   const addAdminAuditLog = (action: string, details: string, targetId?: string) => {
@@ -3447,74 +3182,39 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // PHASE 4: CAMPUS LOGISTICS & HANDSHAKE OTP
   // ==========================================
 
-  const verifyHandshakeOtp = (
+  const verifyHandshakeOtp = async (
     orderId: string,
     inputOtp: string
-  ): { success: boolean; message: string } => {
-    const order = orders.find(o => o.id === orderId);
-    if (!order) {
-      return { success: false, message: 'Order not found.' };
-    }
-
+  ): Promise<{ success: boolean; message: string }> => {
     const cleanInput = inputOtp.trim();
-    const expectedOtp = order.handshakeOtp || '7429';
-
-    if (cleanInput !== expectedOtp) {
-      notify('Incorrect Handshake PIN. Please verify with buyer.', 'error');
+    if (!/^\d{4}$/.test(cleanInput)) {
+      notify('Please enter a valid 4-digit Handshake PIN.', 'error');
       return { success: false, message: 'Invalid 4-digit Handshake PIN.' };
     }
 
-    // PIN verified: Complete order & release escrow
-    setOrders(prev =>
-      prev.map(o => {
-        if (o.id === orderId) {
-          return {
-            ...o,
-            handshakeVerified: true,
-            status: 'completed',
-            deliveredAt: new Date().toISOString(),
-            completedAt: new Date().toISOString(),
-          };
-        }
-        return o;
-      })
-    );
-
-    setWallets(prevWallets => {
-      const updated = { ...prevWallets };
-      order.items.forEach(item => {
-        const sId = item.sellerId;
-        const currentW = updated[sId] || updated['seller_amaka'];
-        if (currentW) {
-          const itemEarnings = item.sellerPrice * item.quantity;
-          const newAvailable = currentW.availableBalance + itemEarnings;
-          const newPending = Math.max(0, currentW.pendingBalance - itemEarnings);
-
-          const newTxn: WalletTransaction = {
-            id: `TXN-${Math.floor(10000 + Math.random() * 90000)}`,
-            type: 'escrow_release',
-            amount: itemEarnings,
-            fee: 0,
-            balanceAfter: newAvailable,
-            status: 'completed',
-            description: `Handshake PIN Verified · Order #${orderId} delivered at safe spot`,
-            reference: orderId,
-            createdAt: 'Just now',
-          };
-
-          updated[sId] = {
-            ...currentW,
-            availableBalance: newAvailable,
-            pendingBalance: newPending,
-            transactions: [newTxn, ...currentW.transactions],
-          };
-        }
+    try {
+      const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}/status`, {
+        method: 'PATCH',
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        credentials: 'include',
+        body: JSON.stringify({
+          status: 'completed',
+          handshakeOtp: cleanInput,
+        }),
       });
-      return updated;
-    });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.status === false) {
+        notify(data.message || 'Incorrect Handshake PIN.', 'error');
+        return { success: false, message: data.message || 'Invalid 4-digit Handshake PIN.' };
+      }
 
-    notify(`Handshake Verified! Order #${orderId} completed and escrow funds released.`, 'success');
-    return { success: true, message: 'Handshake PIN verified successfully! Escrow released.' };
+      await refreshFinancials();
+      notify(`Handshake Verified! Order #${orderId} completed and escrow funds released.`, 'success');
+      return { success: true, message: 'Handshake PIN verified successfully! Escrow released.' };
+    } catch (err: any) {
+      notify(err.message || 'Network error verifying Handshake PIN.', 'error');
+      return { success: false, message: err.message || 'Verification failed.' };
+    }
   };
 
   const assignCampusRunner = (
@@ -3698,8 +3398,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const clearMarketplaceDatabase = () => {
-    // 0. Wipe non-admin accounts from PostgreSQL database on server (STEP 2 ITEM 5)
-    fetch('/api/admin/users/wipe-non-admins', { method: 'POST' }).catch(err => {
+    fetch('/api/admin/users/wipe-non-admins', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      credentials: 'include',
+    }).catch(err => {
       console.warn('Wipe non-admins API warning:', err.message);
     });
 
@@ -3723,7 +3426,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setAntiBypassFlags([]);
     // 8. Wipe ledgers and webhooks
     setLedgerEntries([]);
-    setPaystackWebhooks([]);
+    setPaymentWebhooks([]);
     // 9. Wipe commissions, drops, style posts
     setCommissions([]);
     setCampusDrops([]);
@@ -3793,7 +3496,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         clearCart,
         cartCount,
         orders,
-        placeOrder,
         updateOrderStatus,
         confirmItemReceived,
         cancelOrder,
@@ -3874,7 +3576,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         wallets,
         currentWallet,
         ledgerEntries,
-        paystackWebhooks,
+        paymentWebhooks,
         activeWithdrawalOtp,
         sendWithdrawalOtp,
         requestWithdrawal,
@@ -3882,7 +3584,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         sendPayoutAccountOtp,
         resendSignupOtp,
         toggleWalletFreeze,
-        processPaystackWebhook,
         securityProfile: currentSecurityProfile,
         toggleTwoFactor,
         revokeSession,

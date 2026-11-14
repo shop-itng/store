@@ -79,34 +79,28 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
 
     setIsSubmittingContact(true);
     try {
-      // Send notification email via our serverless Brevo endpoint
-      await fetch('/api/email/send', {
+      const resp = await fetch('/api/support/contact', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          to: 'shopitverified@gmail.com',
-          toName: 'Shop It Support',
-          subject: `[Shop It Help] ${contactCategory} from ${contactName}`,
-          text: `Support request from ${contactName} (${contactEmail})\nCategory: ${contactCategory}\n\nMessage:\n${contactMessage}\n\nSite: ${siteUrl}`,
-          html: `<div style="font-family:sans-serif;padding:20px;">
-            <h2>New Support Request</h2>
-            <p><strong>From:</strong> ${contactName} (${contactEmail})</p>
-            <p><strong>Category:</strong> ${contactCategory}</p>
-            <p><strong>Site:</strong> ${siteUrl}</p>
-            <div style="background:#f1f5f9;padding:16px;border-radius:8px;margin-top:12px;">
-              ${contactMessage.replace(/\n/g, '<br/>')}
-            </div>
-          </div>`,
+          name: contactName,
+          email: contactEmail,
+          category: contactCategory,
+          message: contactMessage,
         }),
-      }).catch(() => {});
+      });
+      if (!resp.ok) {
+        const d = await resp.json().catch(() => ({}));
+        throw new Error(d.message || 'Could not send message right now.');
+      }
 
       setIsSubmittingContact(false);
       setContactSubmitted(true);
       notify('Message sent! Our support team will reply to your email within 3 working days.', 'success');
-    } catch {
+    } catch (err: any) {
       setIsSubmittingContact(false);
-      setContactSubmitted(true);
-      notify('Message received! We will reply within 3 working days.', 'success');
+      setContactSubmitted(false);
+      notify(err?.message || 'Unable to send message right now. Please email shopitverified@gmail.com.', 'error');
     }
   };
 
@@ -222,7 +216,7 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
                 Sellers set their own item prices. Shop It adds a service fee to each order.
               </p>
               <p>
-                The service fee is calculated automatically by the website and is displayed clearly at checkout before you make any payment. Your total checkout price is always: <em>Item Price + Service Fee + Delivery Fee = Total</em>.
+                The tiered service fee is calculated automatically by the website and is displayed clearly at checkout before you make any payment. Your total checkout price is always: <em>Item Price + Service Fee + Delivery Fee = Total</em>, with <strong>₦0 extra payment gateway surcharge</strong> for buyers and <strong>₦0 withdrawal transfer fee</strong> for sellers (Shop It absorbs Flutterwave processing fees out of its service fee).
               </p>
               <p>
                 We do not use a single fixed fee for everything. Any change to fee formulas will never affect an order that has already been paid for.
@@ -235,7 +229,7 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
             <section className="space-y-2">
               <h2 className="text-base font-black text-[#111111] dark:text-white">6. How Escrow Protection Works</h2>
               <p>
-                All payments on Shop It are processed securely through Paystack. We never see or store your debit card details or banking PINs.
+                All payments on Shop It are processed securely through Flutterwave. We never see or store your debit card details or banking PINs.
               </p>
               <p>
                 When a buyer pays, the money is held safely in escrow. The seller cannot withdraw it yet.
@@ -244,7 +238,7 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
                 Once the buyer receives the item and taps &quot;Item received&quot;, the payment is released into the seller&apos;s Available balance.
               </p>
               <p>
-                <strong>5-Day Auto-Release Rule:</strong> If the item is marked delivered and the buyer does not respond within 5 days, and there is no open dispute, the funds are automatically released to the seller.
+                <strong>5-Day Auto-Release Rule:</strong> Once an order is dispatched (shipped or delivered) and 5 days pass after payment without an open dispute or buyer confirmation, the funds are automatically released to the seller. Orders never marked shipped by the seller never auto-release.
               </p>
             </section>
 
@@ -258,7 +252,7 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
                 <li><strong>Available Balance:</strong> Earnings ready for withdrawal after buyer confirmation or 5-day auto-release.</li>
               </ul>
               <p>
-                The minimum withdrawal amount is <strong>₦1,000</strong>. Withdrawals are sent to Opay or any valid Nigerian commercial bank account.
+                The minimum withdrawal amount is <strong>₦1,000</strong>. Withdrawals are sent to any supported Nigerian bank account listed by our payment partner.
               </p>
               <p>
                 For safety, every withdrawal requires a 6-digit confirmation code sent to your registered email.
@@ -359,7 +353,7 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
                 <li><strong>Seller verification data:</strong> National Identification Number (NIN), ID slip/card photo, live selfie, and parent/guardian contact for sellers under 18.</li>
               </ul>
               <div className="p-3 bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-300 dark:border-emerald-800 rounded-xl text-xs text-emerald-900 dark:text-emerald-200">
-                <strong>What we NEVER collect:</strong> We do NOT collect your phone number. We do NOT store your bank card numbers, CVV codes, or card PINs (these are handled directly by Paystack).
+                <strong>What we NEVER collect:</strong> We do NOT collect your phone number. We do NOT store your bank card numbers, CVV codes, or card PINs (these are handled directly by Flutterwave).
               </div>
             </section>
 
@@ -384,7 +378,7 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
                 <li><strong>Neon:</strong> Secure cloud database storage.</li>
                 <li><strong>Upstash:</strong> Temporary rate limiting and cache management.</li>
                 <li><strong>Brevo:</strong> Transactional email dispatch for OTP codes and order receipts.</li>
-                <li><strong>Paystack:</strong> Central Bank of Nigeria (CBN)-licensed payment gateway for cards and bank transfers.</li>
+                <li><strong>Payment Gateway Partner:</strong> Licensed third-party Nigerian payment processor for cards and bank transfers.</li>
               </ul>
             </section>
 
@@ -666,7 +660,7 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
                 <div className="space-y-1">
                   <h3 className="font-bold text-[#111111] dark:text-white text-base">Get Paid in Your Wallet</h3>
                   <p className="text-xs">
-                    When the buyer confirms receipt (or after 5 days if they do not reply), your earnings move to your Available balance. You can withdraw anytime to your Opay or bank account (minimum ₦1,000).
+                    When the buyer confirms receipt (or after 5 days once dispatched if they do not reply), your earnings move to your Available balance. You can withdraw anytime to any verified Nigerian bank account listed in your Wallet (minimum ₦1,000, ₦0 withdrawal transfer fee).
                   </p>
                 </div>
               </div>
@@ -716,7 +710,7 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
                 <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-stone-900 border border-slate-200 dark:border-stone-800 space-y-1">
                   <span className="font-bold text-[#FF6B00] block text-sm">Step 1: Pay Securely</span>
                   <p className="text-slate-600 dark:text-stone-300">
-                    You pay online through Paystack. Your money is placed into a secure escrow account—the seller cannot touch it yet.
+                    You pay online through Flutterwave. Your money is logged in escrow protection—the seller cannot withdraw it yet.
                   </p>
                 </div>
                 <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-stone-900 border border-slate-200 dark:border-stone-800 space-y-1">
@@ -798,11 +792,11 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
                 },
                 {
                   q: 'How does escrow keep my money safe?',
-                  a: 'When you make a payment, your money stays on hold with Paystack. The seller cannot withdraw it until you receive your order and tap "Item received" in the app.',
+                  a: 'When you make a payment via Flutterwave, your order funds remain in escrow hold inside the platform ledger until you receive your order and tap "Item received" in the app.',
                 },
                 {
                   q: 'What happens if I forget to tap "Item received"?',
-                  a: 'If an item is marked delivered and you do not respond within 5 days, and there is no open dispute, the funds are automatically released to the seller.',
+                  a: 'Once the seller marks your order shipped or delivered and 5 days pass after payment with no open dispute, the escrow automatically releases to the seller. Orders that were never marked shipped never auto-release.',
                 },
                 {
                   q: 'How do I get verified as a seller?',
@@ -814,7 +808,7 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
                 },
                 {
                   q: 'How do sellers withdraw their earnings?',
-                  a: 'Sellers withdraw from their Available balance directly to Opay or any Nigerian bank account. The minimum withdrawal is ₦1,000, confirmed by an email code.',
+                  a: 'Sellers withdraw from their Available balance directly to any supported Nigerian bank account. The minimum withdrawal is ₦1,000, confirmed by an email code.',
                 },
                 {
                   q: 'Why is there a 24-hour wait on a new payout account?',

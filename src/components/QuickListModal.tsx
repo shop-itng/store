@@ -219,9 +219,9 @@ export const QuickListModal: React.FC = () => {
           <div className="mx-4 mt-3 p-3 bg-amber-50 border border-amber-200 rounded-xl flex items-start gap-2.5 text-xs text-amber-900">
             <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
             <div className="flex-1">
-              <span className="font-bold block">Seller Identity Verification Required</span>
+              <span className="font-bold block">Recommended: Verify Identity Before Withdrawals</span>
               <p className="text-[11px] text-amber-700 mt-0.5">
-                Under Nigeria Data Protection Act (NDPA 2023) regulations, sellers must verify their NIMC NIN and live selfie before listing crafts or withdrawing funds.
+                You can publish products right away. Under NDPA 2023 guidelines, you will only need to submit your NIN and live selfie before requesting bank withdrawals.
               </p>
               <div className="mt-2 flex flex-wrap items-center gap-2">
                 <button
@@ -467,30 +467,16 @@ export const QuickListModal: React.FC = () => {
             </div>
           </div>
 
-          <div className="pt-2">
-            {!isSellerVerified ? (
-              <button
-                type="button"
-                onClick={() => {
-                  closeQuickListModal();
-                  openVerificationModal();
-                }}
-                className="w-full py-3.5 bg-amber-400 hover:bg-amber-500 text-[#111111] border-2 border-[#111111] font-black text-xs sm:text-sm rounded-xl shadow-[0_3px_0_#111111] transition-all flex items-center justify-center gap-2 active:translate-y-0.5 cursor-pointer"
-              >
-                <ShieldCheck className="w-5 h-5 text-[#111111]" />
-                <span>Verify Identity with NIMC to Publish Products</span>
-              </button>
-            ) : (
-              <button
-                type="submit"
-                className="w-full py-3.5 bg-[#FF6B00] hover:bg-[#FF7A1A] text-[#111111] border-2 border-[#111111] font-black text-xs sm:text-sm rounded-xl shadow-[0_3px_0_#111111] transition-all flex items-center justify-center gap-2 active:translate-y-0.5"
-              >
-                <span className="w-5 h-5 rounded-full bg-[#9FE870] text-[#111111] flex items-center justify-center font-black">
-                  ✓
-                </span>
-                <span>Publish Product in {areaName}</span>
-              </button>
-            )}
+          <div className="pt-2 space-y-2">
+            <button
+              type="submit"
+              className="w-full py-3.5 bg-[#FF6B00] hover:bg-[#FF7A1A] text-[#111111] border-2 border-[#111111] font-black text-xs sm:text-sm rounded-xl shadow-[0_3px_0_#111111] transition-all flex items-center justify-center gap-2 active:translate-y-0.5 cursor-pointer"
+            >
+              <span className="w-5 h-5 rounded-full bg-[#9FE870] text-[#111111] flex items-center justify-center font-black">
+                ✓
+              </span>
+              <span>Publish Product in {areaName}</span>
+            </button>
           </div>
         </form>
       </div>

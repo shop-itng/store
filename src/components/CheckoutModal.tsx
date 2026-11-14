@@ -2,25 +2,27 @@ import React, { useState, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
 import { formatNaira } from '../utils/pricing';
 import { CAMPUSES } from '../data/mockData';
-import { Campus, OrderItem } from '../types';
+import { Campus } from '../types';
 import {
   X,
   CreditCard,
   Building2,
   PhoneCall,
+  Wallet,
   ShieldCheck,
-  CheckCircle2,
   Lock,
   Tag,
-  ArrowRight,
   ExternalLink,
   MapPin,
-  Clock,
-  Sparkles,
   AlertCircle,
   RefreshCw,
-  Copy,
 } from 'lucide-react';
+
+type PaymentChannelChoice =
+  | 'flutterwave_card'
+  | 'flutterwave_transfer'
+  | 'flutterwave_ussd'
+  | 'flutterwave_opay';
 
 export const CheckoutModal: React.FC = () => {
   const {
@@ -28,7 +30,9 @@ export const CheckoutModal: React.FC = () => {
     closeCheckoutModal,
     cart,
     currentUser,
-    placeOrder,
+    openAuthModal,
+    refreshCurrentUser,
+    clearCart,
     setActiveView,
     appliedCoupon,
     applyCoupon,
@@ -38,43 +42,31 @@ export const CheckoutModal: React.FC = () => {
     paymentsEnabled,
   } = useApp();
 
-  const [paymentMethod, setPaymentMethod] = useState<'paystack_card' | 'paystack_transfer' | 'ussd'>('paystack_card');
+  const [paymentMethod, setPaymentMethod] = useState<PaymentChannelChoice>('flutterwave_card');
   const [selectedCampus, setSelectedCampus] = useState<Campus>(
     (currentUser?.savedDeliveryArea as Campus) || 'UNILAG (Akoka)'
   );
-  const [deliveryAreaNote, setDeliveryAreaNote] = useState('New Hall Quad Hub / SUB Gate');
-  const [buyerEmailInput, setBuyerEmailInput] = useState(currentUser?.email || 'shopper@campus.ng');
+  const [deliveryAreaNote, setDeliveryAreaNote] = useState('');
+  const [buyerEmailInput, setBuyerEmailInput] = useState(currentUser?.email || '');
   const [couponInput, setCouponInput] = useState('');
 
   // Payment states
   const [isProcessing, setIsProcessing] = useState(false);
   const [processingStage, setProcessingStage] = useState<string>('');
   const [activePublicKey, setActivePublicKey] = useState<string>(
-    (import.meta as any).env?.VITE_PAYSTACK_PUBLIC_KEY || ''
+    (import.meta as any).env?.VITE_FLW_PUBLIC_KEY || ''
   );
   const [awaitingExternalPayment, setAwaitingExternalPayment] = useState<{
     reference: string;
     authorizationUrl: string;
     assignedOrderId: string;
+    expiresAt?: string;
     pricing: any;
-    transferDetails?: {
-      bankName: string;
-      accountNumber: string;
-      accountName: string;
-      expiresInMinutes: number;
-    };
-    ussdDetails?: {
-      gtb: string;
-      zenith: string;
-      access: string;
-      uba: string;
-    };
   } | null>(null);
 
-  // Fetch live Paystack config on modal open
   useEffect(() => {
     if (isCheckoutModalOpen) {
-      fetch('/api/paystack/config')
+      fetch('/api/payments/config')
         .then(r => r.json())
         .then(data => {
           if (data.publicKey) {
@@ -84,6 +76,12 @@ export const CheckoutModal: React.FC = () => {
         .catch(() => {});
     }
   }, [isCheckoutModalOpen]);
+
+  useEffect(() => {
+    if (currentUser?.email) {
+      setBuyerEmailInput(currentUser.email);
+    }
+  }, [currentUser?.email]);
 
   if (!isCheckoutModalOpen || cart.length === 0) return null;
 
@@ -106,103 +104,63 @@ export const CheckoutModal: React.FC = () => {
 
   const discountAmount = appliedCoupon ? appliedCoupon.discountAmount : 0;
   const grandTotal = Math.max(0, subtotalItems + totalServiceFees + deliveryTotal - discountAmount);
-  const isLiveMode = activePublicKey.startsWith('pk_live_');
+  const isLiveMode = activePublicKey.startsWith('FLWPUBK-') && !activePublicKey.startsWith('FLWPUBK_TEST');
 
-  const handleApplyCoupon = (e: React.FormEvent) => {
+  const handleApplyCoupon = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!couponInput.trim()) return;
-    applyCoupon(couponInput, subtotalItems + totalServiceFees);
+    await applyCoupon(couponInput, subtotalItems + totalServiceFees);
   };
 
-  const finalizeOrder = (
-    reference: string,
-    assignedOrderId: string,
-    pricing: {
-      subtotal: number;
-      serviceFeeTotal: number;
-      deliveryTotal: number;
-      discountTotal: number;
-      grandTotalNaira: number;
-    }
-  ) => {
-    const orderItems: OrderItem[] = cart.map(item => ({
-      productId: item.product.id,
-      title: item.product.title,
-      image: item.product.images[0] || '',
-      sellerId: item.product.sellerId,
-      sellerShopName: item.product.sellerShopName,
-      sellerCampus: item.product.sellerCampus || 'All Campuses',
-      quantity: item.quantity,
-      sellerPrice: item.product.sellerPrice,
-      serviceFee: item.product.serviceFee,
-      displayPrice: item.product.displayPrice,
-      selectedColor: item.selectedColor,
-      selectedSize: item.selectedSize,
-      customNameText: item.customNameText,
-      deliveryMethod: item.deliveryMethod,
-      deliveryFee: item.deliveryMethod === 'pickup' ? item.product.delivery.pickupFee : item.product.delivery.localDeliveryFee,
-    }));
-
-    placeOrder({
-      buyerId: currentUser?.id || 'guest_buyer',
-      buyerMaskedId: `Buyer #${Math.floor(1000 + Math.random() * 9000)}`,
-      buyerName: currentUser?.name || 'Student Shopper',
-      deliveryArea: `${selectedCampus} · ${deliveryAreaNote}`,
-      pickupPoint: deliveryAreaNote,
-      items: orderItems,
-      itemsSubtotal: pricing.subtotal,
-      serviceFeeTotal: pricing.serviceFeeTotal,
-      deliveryTotal: pricing.deliveryTotal,
-      discountTotal: pricing.discountTotal,
-      couponCode: appliedCoupon?.code,
-      grandTotal: pricing.grandTotalNaira,
-      status: 'paid',
-      paymentMethod: paymentMethod === 'ussd' ? 'paystack_transfer' : paymentMethod,
-      paymentReference: reference,
-    });
-
+  const finalizeOrder = async (assignedOrderId: string) => {
+    clearCart();
+    removeCoupon();
+    await refreshCurrentUser().catch(() => {});
     setIsProcessing(false);
     setProcessingStage('');
     setAwaitingExternalPayment(null);
     closeCheckoutModal();
     setActiveView('orders');
-    notify(`Order #${assignedOrderId} paid successfully via Paystack Escrow!`, 'success');
+    notify(`Order #${assignedOrderId} payment confirmed and held in Escrow!`, 'success');
   };
 
-  // Poll server to verify order confirmation from Paystack
   const pollVerification = async (
     reference: string,
     assignedOrderId: string,
-    pricing: any,
     retriesLeft = 6
   ) => {
     try {
-      const res = await fetch(`/api/paystack/verify/${encodeURIComponent(reference)}`);
+      const token = typeof localStorage !== 'undefined' ? localStorage.getItem('shopit_session_token') : null;
+      const res = await fetch(`/api/payments/verify/${encodeURIComponent(reference)}`, {
+        headers: token ? { Authorization: `Bearer ${token}`, 'x-session-token': token } : {},
+        credentials: 'include',
+      });
       const data = await res.json();
 
       if (data.isPaid === true) {
-        finalizeOrder(reference, assignedOrderId, pricing);
+        await finalizeOrder(assignedOrderId);
+        return;
+      }
+
+      if (data.expired === true) {
+        setIsProcessing(false);
+        setProcessingStage('');
+        setAwaitingExternalPayment(null);
+        notify('This 30-minute checkout session expired and reserved stock was released. Please start a fresh checkout.', 'error');
         return;
       }
     } catch {
-      // ignore network glitch and retry
+      // ignore transient network glitch and retry
     }
 
     if (retriesLeft > 0) {
       setTimeout(() => {
-        pollVerification(reference, assignedOrderId, pricing, retriesLeft - 1);
+        pollVerification(reference, assignedOrderId, retriesLeft - 1);
       }, 2500);
     } else {
-      // Rule 6: Unverified payments never become Paid. Keep awaiting user transfer or webhook.
       setIsProcessing(false);
       setProcessingStage('');
-      setAwaitingExternalPayment({
-        reference,
-        authorizationUrl: '',
-        assignedOrderId,
-        pricing,
-      });
-      notify('Payment pending. If you completed a bank transfer or USSD, tap "Verify Now".', 'info');
+      notify('Awaiting gateway confirmation. Complete payment on Flutterwave and tap "Check Payment Status".', 'info');
     }
   };
 
@@ -212,38 +170,54 @@ export const CheckoutModal: React.FC = () => {
       return;
     }
 
+    if (!currentUser) {
+      notify('Please sign in or register an account before paying.', 'info');
+      closeCheckoutModal();
+      openAuthModal('login');
+      return;
+    }
+
+    if (!deliveryAreaNote.trim()) {
+      notify('Please enter your delivery pickup point or landmark.', 'error');
+      return;
+    }
+
+    const cleanBuyerEmail = (buyerEmailInput || currentUser.email || '').trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanBuyerEmail)) {
+      notify('Please enter a valid email address for your payment receipt.', 'error');
+      return;
+    }
+
     setIsProcessing(true);
-    setProcessingStage('1/3 Calculating amount on server & initializing Paystack...');
+    setProcessingStage('1/3 Reserving stock & creating secure Flutterwave session...');
 
     try {
-      const emailToUse = (buyerEmailInput || currentUser?.email || 'shopper@campus.ng').trim();
-
-      const response = await fetch('/api/paystack/initialize', {
+      const token = typeof localStorage !== 'undefined' ? localStorage.getItem('shopit_session_token') : null;
+      const response = await fetch('/api/payments/initialize', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}`, 'x-session-token': token } : {}),
+        },
+        credentials: 'include',
         body: JSON.stringify({
-          email: emailToUse,
+          email: buyerEmailInput || currentUser.email,
           items: cart.map(item => ({
             productId: item.product.id,
-            title: item.product.title,
-            sellerId: item.product.sellerId,
-            sellerShopName: item.product.sellerShopName,
-            sellerPrice: item.product.sellerPrice,
             quantity: item.quantity,
             deliveryMethod: item.deliveryMethod,
-            deliveryFee: item.deliveryMethod === 'pickup' ? item.product.delivery.pickupFee : item.product.delivery.localDeliveryFee,
           })),
           campus: selectedCampus,
           deliveryArea: `${selectedCampus} · ${deliveryAreaNote}`,
           pickupPoint: deliveryAreaNote,
           couponCode: appliedCoupon?.code,
-          paymentMethod: paymentMethod === 'ussd' ? 'paystack_transfer' : paymentMethod,
+          paymentMethod,
         }),
       });
 
       const initData = await response.json();
 
-      if (!initData.status) {
+      if (!response.ok || !initData.status) {
         throw new Error(initData.message || 'Payment initialization failed. Please try again.');
       }
 
@@ -251,106 +225,30 @@ export const CheckoutModal: React.FC = () => {
       const reference = payload.reference;
       const assignedOrderId = payload.orderId;
       const pricing = payload.pricing;
-      const amountInKobo = payload.amountInKobo;
-      const authorization_url = payload.authorization_url || payload.authorizationUrl;
-      const publicKey = payload.publicKey || activePublicKey;
-      const pubKey = publicKey || activePublicKey;
+      const authorizationUrl = payload.authorization_url || payload.authorizationUrl || payload.link || '';
+      const pubKey = payload.publicKey || activePublicKey;
 
       if (pubKey) {
         setActivePublicKey(pubKey);
       }
 
-      const transferDetails = payload.transferDetails || {
-        bankName: 'Wema Bank (Paystack Escrow)',
-        accountNumber: `012${Math.floor(1000000 + Math.random() * 9000000)}`,
-        accountName: `Shop It Escrow - ${assignedOrderId.slice(-6)}`,
-        expiresInMinutes: 30,
-      };
-
-      const ussdDetails = payload.ussdDetails || {
-        gtb: `*737*000*${assignedOrderId.slice(-4)}#`,
-        zenith: `*966*000*${assignedOrderId.slice(-4)}#`,
-        access: `*901*000*${assignedOrderId.slice(-4)}#`,
-        uba: `*919*000*${assignedOrderId.slice(-4)}#`,
-      };
-
-      // 1. Bank Transfer & USSD channels - display dedicated payment instructions immediately
-      if (paymentMethod === 'paystack_transfer' || paymentMethod === 'ussd') {
-        setIsProcessing(false);
-        setProcessingStage('');
-        setAwaitingExternalPayment({
-          reference,
-          authorizationUrl: authorization_url || '',
-          assignedOrderId,
-          pricing,
-          transferDetails,
-          ussdDetails,
-        });
-        notify(
-          paymentMethod === 'paystack_transfer'
-            ? 'Virtual bank account generated! Complete your transfer and tap "Confirm Order in Escrow".'
-            : 'USSD codes generated! Dial your bank code and tap "Confirm Order in Escrow".',
-          'info'
-        );
-        return;
-      }
-
-      // 2. Debit Card Channel - Try launching Paystack Pop modal directly
-      if ((window as any).PaystackPop && pubKey) {
-        setProcessingStage('2/3 Opening Paystack Secure Gateway...');
-
-        try {
-          const handler = (window as any).PaystackPop.setup({
-            key: pubKey,
-            email: emailToUse,
-            amount: amountInKobo,
-            ref: reference,
-            channels: ['card', 'bank_transfer', 'ussd'],
-            metadata: {
-              orderId: assignedOrderId,
-              campus: selectedCampus,
-            },
-            onClose: () => {
-              setIsProcessing(false);
-              setProcessingStage('');
-              setAwaitingExternalPayment({
-                reference,
-                authorizationUrl: authorization_url || '',
-                assignedOrderId,
-                pricing,
-                transferDetails,
-                ussdDetails,
-              });
-              notify('Waiting for payment confirmation. If already paid, click "Confirm Order in Escrow".', 'info');
-            },
-            callback: async () => {
-              setProcessingStage('3/3 Verifying signature with Paystack & committing to Escrow...');
-              await pollVerification(reference, assignedOrderId, pricing);
-            },
-          });
-
-          handler.openIframe();
-          return;
-        } catch {
-          // If popup blocked or failed in iframe sandbox, fall through to awaiting payment view
-        }
-      }
-
-      // 3. Fallback: Show payment panel with verification options
       setIsProcessing(false);
       setProcessingStage('');
       setAwaitingExternalPayment({
         reference,
-        authorizationUrl: authorization_url || '',
+        authorizationUrl,
         assignedOrderId,
+        expiresAt: payload.expiresAt,
         pricing,
-        transferDetails,
-        ussdDetails,
       });
+
+      if (authorizationUrl) {
+        notify('Checkout session ready. Tap "Open Flutterwave Checkout" to pay securely, then verify status.', 'info');
+      }
     } catch (err: any) {
       setIsProcessing(false);
       setProcessingStage('');
-      notify(err.message || 'Payment initiation failed. Please check connection.', 'error');
+      notify(err.message || 'Payment initiation failed. Please try again.', 'error');
     }
   };
 
@@ -360,12 +258,12 @@ export const CheckoutModal: React.FC = () => {
         {/* Header */}
         <div className="flex items-center justify-between border-b border-slate-100 dark:border-[#27272A] pb-3.5">
           <div className="flex items-center gap-2.5">
-            <div className="w-9 h-9 rounded-xl bg-[#00C3F7] flex items-center justify-center text-[#111111] font-black text-sm shadow-xs">
-              P
+            <div className="w-9 h-9 rounded-xl bg-[#F5A623] flex items-center justify-center text-[#111111] font-black text-sm shadow-xs border border-[#111111]">
+              FW
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 className="text-base font-extrabold text-slate-900 dark:text-white">Paystack Escrow Checkout</h2>
+                <h2 className="text-base font-extrabold text-slate-900 dark:text-white">Flutterwave Escrow Checkout</h2>
                 {isLiveMode ? (
                   <span className="text-[10px] font-black text-white bg-emerald-600 px-2 py-0.5 rounded-full border border-emerald-700 flex items-center gap-1">
                     <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse" />
@@ -373,7 +271,7 @@ export const CheckoutModal: React.FC = () => {
                   </span>
                 ) : (
                   <span className="text-[10px] font-black text-[#111111] bg-[#9FE870] px-2 py-0.5 rounded-full border border-[#111111]">
-                    TEST MODE
+                    ESCROW SECURED
                   </span>
                 )}
               </div>
@@ -391,207 +289,85 @@ export const CheckoutModal: React.FC = () => {
           </button>
         </div>
 
-        {/* Interactive Payment Confirmation / Details Panel */}
+        {/* Gateway Hosted Checkout / Status Check Panel */}
         {awaitingExternalPayment && (
           <div className="p-4 sm:p-5 bg-gradient-to-br from-emerald-50 to-teal-50/50 dark:from-emerald-950/40 dark:to-teal-950/30 border-2 border-emerald-400 dark:border-emerald-600 rounded-2xl space-y-4 shadow-sm">
             <div className="flex items-center justify-between pb-2 border-b border-emerald-200/60 dark:border-emerald-800/60">
               <span className="text-xs sm:text-sm font-black text-emerald-950 dark:text-emerald-100 flex items-center gap-2">
                 <RefreshCw className="w-4 h-4 text-emerald-600 dark:text-[#9FE870] animate-spin" />
-                <span>
-                  {paymentMethod === 'paystack_transfer'
-                    ? 'Transfer to Dedicated Escrow Account'
-                    : paymentMethod === 'ussd'
-                    ? 'Dial USSD Code on Your Registered Phone'
-                    : 'Listening for Gateway Confirmation...'}
-                </span>
+                <span>Complete Payment &amp; Verify Status</span>
               </span>
               <span className="text-[11px] font-mono font-bold px-2 py-0.5 rounded bg-emerald-100 dark:bg-emerald-900/60 text-emerald-800 dark:text-emerald-200">
                 Ref: {awaitingExternalPayment.reference.slice(-8)}
               </span>
             </div>
 
-            {/* Bank Transfer Details View */}
-            {paymentMethod === 'paystack_transfer' && (
-              <div className="bg-white dark:bg-[#15161C] p-4 rounded-xl border border-emerald-300 dark:border-emerald-800 space-y-3 shadow-xs">
-                <div className="flex items-center justify-between text-xs">
-                  <span className="text-slate-500 font-medium">Bank Name</span>
-                  <span className="font-bold text-slate-900 dark:text-white">
-                    {awaitingExternalPayment.transferDetails?.bankName || 'Wema Bank (Paystack Escrow)'}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between text-xs">
-                  <span className="text-slate-500 font-medium">Account Number</span>
-                  <div className="flex items-center gap-2">
-                    <span className="font-mono font-black text-lg tracking-wider text-[#FF6B00]">
-                      {awaitingExternalPayment.transferDetails?.accountNumber || '0129482910'}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const num = awaitingExternalPayment.transferDetails?.accountNumber || '0129482910';
-                        navigator.clipboard?.writeText(num);
-                        notify('Account number copied to clipboard!', 'success');
-                      }}
-                      className="px-2 py-1 rounded-lg bg-slate-100 dark:bg-stone-800 text-slate-800 dark:text-slate-200 hover:bg-[#FF6B00] hover:text-black font-bold text-[11px] transition-all flex items-center gap-1 border border-slate-200 dark:border-stone-700 cursor-pointer"
-                      title="Copy account number"
-                    >
-                      <Copy className="w-3 h-3" />
-                      <span>Copy</span>
-                    </button>
-                  </div>
-                </div>
-                <div className="flex items-center justify-between text-xs">
-                  <span className="text-slate-500 font-medium">Account Name</span>
-                  <span className="font-bold text-slate-800 dark:text-slate-200 text-xs">
-                    {awaitingExternalPayment.transferDetails?.accountName || 'Shop It Escrow'}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between text-xs pt-2 border-t border-slate-100 dark:border-stone-800">
-                  <span className="text-slate-500 font-medium">Exact Amount</span>
-                  <span className="font-black font-mono-numbers text-emerald-600 dark:text-[#9FE870] text-base">
-                    {formatNaira(awaitingExternalPayment.pricing?.grandTotalNaira || grandTotal)}
-                  </span>
-                </div>
+            <div className="bg-white dark:bg-[#15161C] p-4 rounded-xl border border-emerald-300 dark:border-emerald-800 space-y-2 text-xs">
+              <div className="flex items-center justify-between">
+                <span className="text-slate-500 font-medium">Order Reference</span>
+                <span className="font-mono font-bold text-slate-900 dark:text-white">{awaitingExternalPayment.assignedOrderId}</span>
               </div>
-            )}
-
-            {/* USSD Codes View */}
-            {paymentMethod === 'ussd' && (
-              <div className="bg-white dark:bg-[#15161C] p-4 rounded-xl border border-emerald-300 dark:border-emerald-800 space-y-2.5 shadow-xs">
-                <span className="text-xs font-bold text-slate-800 dark:text-slate-200 block">
-                  Tap your bank to copy or dial instant code:
+              <div className="flex items-center justify-between">
+                <span className="text-slate-500 font-medium">Server Total Due</span>
+                <span className="font-black font-mono-numbers text-emerald-600 dark:text-[#9FE870] text-base">
+                  {formatNaira(awaitingExternalPayment.pricing?.grandTotalNaira || grandTotal)}
                 </span>
-                <div className="grid grid-cols-2 gap-2">
-                  {[
-                    { bank: 'GTBank', code: awaitingExternalPayment.ussdDetails?.gtb || `*737*000*${awaitingExternalPayment.assignedOrderId.slice(-4)}#` },
-                    { bank: 'Zenith Bank', code: awaitingExternalPayment.ussdDetails?.zenith || `*966*000*${awaitingExternalPayment.assignedOrderId.slice(-4)}#` },
-                    { bank: 'Access Bank', code: awaitingExternalPayment.ussdDetails?.access || `*901*000*${awaitingExternalPayment.assignedOrderId.slice(-4)}#` },
-                    { bank: 'UBA', code: awaitingExternalPayment.ussdDetails?.uba || `*919*000*${awaitingExternalPayment.assignedOrderId.slice(-4)}#` },
-                  ].map(u => (
-                    <button
-                      key={u.bank}
-                      type="button"
-                      onClick={() => {
-                        navigator.clipboard?.writeText(u.code);
-                        notify(`${u.bank} code ${u.code} copied! Dial on your phone.`, 'success');
-                      }}
-                      className="p-2.5 border border-slate-200 dark:border-[#27272A] rounded-xl text-left hover:border-[#FF6B00] bg-slate-50 dark:bg-stone-900 transition-all cursor-pointer group"
-                    >
-                      <span className="text-[10px] text-slate-500 group-hover:text-slate-700 dark:group-hover:text-slate-300 block font-bold">{u.bank}</span>
-                      <span className="text-xs font-mono font-black text-[#FF6B00]">{u.code}</span>
-                    </button>
-                  ))}
-                </div>
               </div>
-            )}
+            </div>
 
             <p className="text-[11px] text-emerald-800 dark:text-emerald-300 leading-relaxed">
-              Funds are held in <strong>Central Bank of Nigeria & NDPA-compliant Escrow</strong>. The maker is not paid until you verify receipt.
+              Your items are reserved for 30 minutes. Complete payment securely via Flutterwave (Card, Bank Transfer, USSD, or OPay where enabled), then return here or tap Check Payment Status.
             </p>
 
             <div className="flex flex-wrap items-center gap-2 pt-1">
-              <button
-                type="button"
-                onClick={async () => {
-                  setIsProcessing(true);
-                  setProcessingStage('Confirming with Paystack Escrow...');
-                  try {
-                    const confirmRes = await fetch('/api/paystack/confirm-test-payment', {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({
-                        reference: awaitingExternalPayment.reference,
-                        orderId: awaitingExternalPayment.assignedOrderId,
-                        amountInKobo: awaitingExternalPayment.pricing?.amountInKobo || grandTotal * 100,
-                        channel: paymentMethod === 'paystack_transfer' ? 'bank_transfer' : paymentMethod,
-                      }),
-                    });
-                    const confirmData = await confirmRes.json();
-                    if (confirmData.isPaid) {
-                      finalizeOrder(
-                        awaitingExternalPayment.reference,
-                        awaitingExternalPayment.assignedOrderId,
-                        awaitingExternalPayment.pricing
-                      );
-                      return;
-                    }
-                  } catch {}
-
-                  // Fallback to verify endpoint with simulation
-                  try {
-                    const simRes = await fetch(`/api/paystack/verify/${encodeURIComponent(awaitingExternalPayment.reference)}?simulate=true`);
-                    const simData = await simRes.json();
-                    if (simData.isPaid) {
-                      finalizeOrder(
-                        awaitingExternalPayment.reference,
-                        awaitingExternalPayment.assignedOrderId,
-                        awaitingExternalPayment.pricing
-                      );
-                      return;
-                    }
-                  } catch {}
-
-                  finalizeOrder(
-                    awaitingExternalPayment.reference,
-                    awaitingExternalPayment.assignedOrderId,
-                    awaitingExternalPayment.pricing
-                  );
-                }}
-                className="px-4 py-2.5 bg-[#9FE870] hover:bg-[#AEF083] text-[#111111] font-black rounded-xl text-xs flex items-center gap-1.5 border border-[#111111] shadow-[0_2px_0_#111111] active:translate-y-0.5 cursor-pointer"
-              >
-                <CheckCircle2 className="w-4 h-4 text-[#111111]" />
-                <span>Confirm Order in Escrow</span>
-              </button>
+              {awaitingExternalPayment.authorizationUrl && (
+                <a
+                  href={awaitingExternalPayment.authorizationUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="px-4 py-2.5 bg-[#9FE870] hover:bg-[#AEF083] text-[#111111] font-black rounded-xl text-xs flex items-center gap-1.5 border border-[#111111] shadow-[0_2px_0_#111111] active:translate-y-0.5"
+                >
+                  <ExternalLink className="w-4 h-4 text-[#111111]" />
+                  <span>Open Flutterwave Checkout</span>
+                </a>
+              )}
 
               <button
                 type="button"
                 onClick={() => {
                   setIsProcessing(true);
-                  setProcessingStage('Checking Paystack API...');
+                  setProcessingStage('Checking server payment verification...');
                   pollVerification(
                     awaitingExternalPayment.reference,
                     awaitingExternalPayment.assignedOrderId,
-                    awaitingExternalPayment.pricing,
                     3
                   );
                 }}
                 className="px-3.5 py-2.5 bg-white dark:bg-stone-900 text-slate-800 dark:text-white border border-slate-300 dark:border-stone-700 font-bold rounded-xl text-xs flex items-center gap-1.5 cursor-pointer hover:bg-slate-50"
               >
                 <RefreshCw className="w-3.5 h-3.5" />
-                <span>Verify Gateway Status</span>
+                <span>Check Payment Status</span>
               </button>
-
-              {awaitingExternalPayment.authorizationUrl && (
-                <a
-                  href={awaitingExternalPayment.authorizationUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="px-3.5 py-2.5 bg-white dark:bg-stone-900 text-slate-800 dark:text-white border border-slate-300 dark:border-stone-700 font-bold rounded-xl text-xs flex items-center gap-1.5 hover:bg-slate-50"
-                >
-                  <ExternalLink className="w-3.5 h-3.5" />
-                  <span>Open Paystack Web Tab</span>
-                </a>
-              )}
             </div>
           </div>
         )}
 
-        {/* Bank-Grade Escrow Protection Card */}
+        {/* Buyer Protection Card */}
         <div className="p-4 bg-gradient-to-r from-emerald-50/90 to-teal-50/70 dark:from-[#15161C] dark:to-[#1E2028] border-2 border-emerald-500/30 dark:border-emerald-600/40 rounded-2xl text-xs space-y-2 shadow-xs">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 font-black text-emerald-950 dark:text-emerald-100">
               <ShieldCheck className="w-5 h-5 text-emerald-600 dark:text-[#9FE870] shrink-0" />
               <span className="text-xs sm:text-sm font-extrabold tracking-tight">
-                Shop It Escrow Guarantee
+                Shop It Buyer Protection
               </span>
             </div>
             <span className="text-[10px] font-black uppercase tracking-wider text-emerald-800 dark:text-[#9FE870] bg-emerald-100 dark:bg-emerald-950/80 px-2.5 py-0.5 rounded-full border border-emerald-300 dark:border-emerald-800">
-              5-Day Buyer Lock
+              5-Day Hold
             </span>
           </div>
 
           <p className="text-[11px] text-slate-600 dark:text-slate-300 leading-relaxed">
-            Your money is locked safely in Paystack Escrow. The artisan only receives funds after you meet at the campus hub, inspect the craft, and tap <strong>&quot;Item received&quot;</strong>.
+            Payments are processed by Flutterwave. Shop It holds your payment until you meet at the campus hub, inspect the craft, and tap <strong>&quot;Item received&quot;</strong>.
           </p>
 
           <div className="grid grid-cols-3 gap-2 pt-1 border-t border-emerald-200/50 dark:border-emerald-900/50 text-[10px] text-slate-600 dark:text-slate-300">
@@ -601,11 +377,11 @@ export const CheckoutModal: React.FC = () => {
             </div>
             <div className="flex items-center gap-1">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-              <span>Full Refund Guarantee</span>
+              <span>Dispute Protection</span>
             </div>
             <div className="flex items-center gap-1">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-              <span>CBN Compliant</span>
+              <span>Verified Makers</span>
             </div>
           </div>
         </div>
@@ -652,7 +428,7 @@ export const CheckoutModal: React.FC = () => {
 
           <div>
             <label className="text-[11px] font-semibold text-slate-600 dark:text-slate-300 block mb-1">
-              Your Email Address (for Paystack Receipt)
+              Your Email Address (for Payment Receipt)
             </label>
             <input
               type="email"
@@ -690,7 +466,7 @@ export const CheckoutModal: React.FC = () => {
                   type="text"
                   value={couponInput}
                   onChange={e => setCouponInput(e.target.value)}
-                  placeholder="Promo Code (try: TEEDS or FIRSTORDER)"
+                  placeholder="Enter promo code"
                   className="w-full h-9 pl-9 pr-3 rounded-xl border border-slate-200 dark:border-[#27272A] bg-white dark:bg-[#15161C] text-xs text-slate-900 dark:text-white uppercase"
                 />
               </div>
@@ -713,58 +489,74 @@ export const CheckoutModal: React.FC = () => {
             <span className="text-[11px] text-slate-500 font-medium">PCI-DSS Level 1 Certified</span>
           </div>
 
-          <div className="grid grid-cols-3 gap-2.5">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
             <button
               type="button"
-              onClick={() => setPaymentMethod('paystack_card')}
-              className={`p-3 rounded-2xl border-2 flex flex-col items-center justify-center gap-1.5 text-center transition-all cursor-pointer ${
-                paymentMethod === 'paystack_card'
+              onClick={() => setPaymentMethod('flutterwave_card')}
+              className={`p-2.5 rounded-2xl border-2 flex flex-col items-center justify-center gap-1 text-center transition-all cursor-pointer ${
+                paymentMethod === 'flutterwave_card'
                   ? 'border-[#111111] dark:border-white bg-[#111111] text-[#9FE870] shadow-[0_3px_0_#FF6B00]'
                   : 'border-slate-200 dark:border-[#27272A] bg-white dark:bg-[#15161C] text-slate-700 dark:text-[#A1A1AA] hover:border-slate-400'
               }`}
             >
-              <CreditCard className={`w-5 h-5 ${paymentMethod === 'paystack_card' ? 'text-[#9FE870]' : 'text-slate-500'}`} />
-              <span className="text-xs font-black tracking-tight">Debit Card</span>
-              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${paymentMethod === 'paystack_card' ? 'bg-[#9FE870]/20 text-[#9FE870]' : 'bg-slate-100 dark:bg-stone-800 text-slate-500'}`}>
-                Instant Gateway
+              <CreditCard className={`w-4 h-4 ${paymentMethod === 'flutterwave_card' ? 'text-[#9FE870]' : 'text-slate-500'}`} />
+              <span className="text-xs font-black tracking-tight">Card</span>
+              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${paymentMethod === 'flutterwave_card' ? 'bg-[#9FE870]/20 text-[#9FE870]' : 'bg-slate-100 dark:bg-stone-800 text-slate-500'}`}>
+                Verve / Visa / MC
               </span>
             </button>
 
             <button
               type="button"
-              onClick={() => setPaymentMethod('paystack_transfer')}
-              className={`p-3 rounded-2xl border-2 flex flex-col items-center justify-center gap-1.5 text-center transition-all cursor-pointer ${
-                paymentMethod === 'paystack_transfer'
+              onClick={() => setPaymentMethod('flutterwave_transfer')}
+              className={`p-2.5 rounded-2xl border-2 flex flex-col items-center justify-center gap-1 text-center transition-all cursor-pointer ${
+                paymentMethod === 'flutterwave_transfer'
                   ? 'border-[#111111] dark:border-white bg-[#111111] text-[#9FE870] shadow-[0_3px_0_#FF6B00]'
                   : 'border-slate-200 dark:border-[#27272A] bg-white dark:bg-[#15161C] text-slate-700 dark:text-[#A1A1AA] hover:border-slate-400'
               }`}
             >
-              <Building2 className={`w-5 h-5 ${paymentMethod === 'paystack_transfer' ? 'text-[#9FE870]' : 'text-slate-500'}`} />
+              <Building2 className={`w-4 h-4 ${paymentMethod === 'flutterwave_transfer' ? 'text-[#9FE870]' : 'text-slate-500'}`} />
               <span className="text-xs font-black tracking-tight">Bank Transfer</span>
-              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${paymentMethod === 'paystack_transfer' ? 'bg-[#9FE870]/20 text-[#9FE870]' : 'bg-slate-100 dark:bg-stone-800 text-slate-500'}`}>
-                Virtual Account
+              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${paymentMethod === 'flutterwave_transfer' ? 'bg-[#9FE870]/20 text-[#9FE870]' : 'bg-slate-100 dark:bg-stone-800 text-slate-500'}`}>
+                One-Time Account
               </span>
             </button>
 
             <button
               type="button"
-              onClick={() => setPaymentMethod('ussd')}
-              className={`p-3 rounded-2xl border-2 flex flex-col items-center justify-center gap-1.5 text-center transition-all cursor-pointer ${
-                paymentMethod === 'ussd'
+              onClick={() => setPaymentMethod('flutterwave_ussd')}
+              className={`p-2.5 rounded-2xl border-2 flex flex-col items-center justify-center gap-1 text-center transition-all cursor-pointer ${
+                paymentMethod === 'flutterwave_ussd'
                   ? 'border-[#111111] dark:border-white bg-[#111111] text-[#9FE870] shadow-[0_3px_0_#FF6B00]'
                   : 'border-slate-200 dark:border-[#27272A] bg-white dark:bg-[#15161C] text-slate-700 dark:text-[#A1A1AA] hover:border-slate-400'
               }`}
             >
-              <PhoneCall className={`w-5 h-5 ${paymentMethod === 'ussd' ? 'text-[#9FE870]' : 'text-slate-500'}`} />
-              <span className="text-xs font-black tracking-tight">USSD Dial</span>
-              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${paymentMethod === 'ussd' ? 'bg-[#9FE870]/20 text-[#9FE870]' : 'bg-slate-100 dark:bg-stone-800 text-slate-500'}`}>
-                Offline Code
+              <PhoneCall className={`w-4 h-4 ${paymentMethod === 'flutterwave_ussd' ? 'text-[#9FE870]' : 'text-slate-500'}`} />
+              <span className="text-xs font-black tracking-tight">USSD</span>
+              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${paymentMethod === 'flutterwave_ussd' ? 'bg-[#9FE870]/20 text-[#9FE870]' : 'bg-slate-100 dark:bg-stone-800 text-slate-500'}`}>
+                Dial Code
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setPaymentMethod('flutterwave_opay')}
+              className={`p-2.5 rounded-2xl border-2 flex flex-col items-center justify-center gap-1 text-center transition-all cursor-pointer ${
+                paymentMethod === 'flutterwave_opay'
+                  ? 'border-[#111111] dark:border-white bg-[#111111] text-[#9FE870] shadow-[0_3px_0_#FF6B00]'
+                  : 'border-slate-200 dark:border-[#27272A] bg-white dark:bg-[#15161C] text-slate-700 dark:text-[#A1A1AA] hover:border-slate-400'
+              }`}
+            >
+              <Wallet className={`w-4 h-4 ${paymentMethod === 'flutterwave_opay' ? 'text-[#9FE870]' : 'text-slate-500'}`} />
+              <span className="text-xs font-black tracking-tight">OPay</span>
+              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${paymentMethod === 'flutterwave_opay' ? 'bg-[#9FE870]/20 text-[#9FE870]' : 'bg-slate-100 dark:bg-stone-800 text-slate-500'}`}>
+                Wallet Checkout
               </span>
             </button>
           </div>
 
           <p className="text-[10px] text-slate-500 dark:text-[#A1A1AA] text-center pt-0.5">
-            🔒 Protected by Paystack 256-bit encryption. Zero credentials saved on our servers.
+            Payments are processed securely via Flutterwave. Zero card details are saved on our servers.
           </p>
         </div>
 
@@ -791,8 +583,8 @@ export const CheckoutModal: React.FC = () => {
 
           <div className="pt-2.5 border-t border-slate-200 dark:border-[#27272A] flex justify-between items-baseline text-slate-900 dark:text-white">
             <div>
-              <span className="text-sm font-black block">Total Payable via Paystack</span>
-              <span className="text-[10px] text-slate-400">Includes all fees & escrow security</span>
+              <span className="text-sm font-black block">Total Payable via Flutterwave</span>
+              <span className="text-[10px] text-slate-400">Includes all fees &amp; escrow security</span>
             </div>
             <span className="text-2xl font-black font-mono tracking-tight text-slate-900 dark:text-white">
               {formatNaira(grandTotal)}
@@ -834,7 +626,7 @@ export const CheckoutModal: React.FC = () => {
             <div className="flex items-center gap-2 text-[#111111]">
               <div className="w-4 h-4 border-2 border-[#111111]/30 border-t-[#111111] rounded-full animate-spin shrink-0" />
               <span className="font-extrabold text-[11px] sm:text-xs tracking-tight truncate max-w-sm">
-                {processingStage || 'Connecting to Paystack...'}
+                {processingStage || 'Connecting to Flutterwave...'}
               </span>
             </div>
           ) : (
@@ -842,7 +634,7 @@ export const CheckoutModal: React.FC = () => {
               <div className="w-5 h-5 rounded-md bg-[#9FE870] border border-[#111111] flex items-center justify-center text-[#111111]">
                 <Lock className="w-3.5 h-3.5" />
               </div>
-              <span className="font-black text-[#111111]">Authorize & Pay {formatNaira(grandTotal)}</span>
+              <span className="font-black text-[#111111]">Authorize &amp; Pay {formatNaira(grandTotal)}</span>
             </>
           )}
         </button>
