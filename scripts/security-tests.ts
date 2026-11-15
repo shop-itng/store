@@ -1192,6 +1192,56 @@ async function main() {
       assert.deepStrictEqual(hits, [], `Found forbidden env var references: ${hits.join('; ')}`);
     });
 
+    await test('CR7: /api/version, clean /api/health, 401/403 guards, GET /api/webhooks/flutterwave, and JSON 404 on unknown /api paths', async () => {
+      // 1. GET /api/version
+      const verRes = await origFetch(`${baseUrl}/api/version`);
+      assert.strictEqual(verRes.status, 200);
+      const verJson: any = await verRes.json();
+      assert.ok(typeof verJson.commit === 'string' && verJson.commit.length > 0, 'commit field required');
+      assert.ok(typeof verJson.builtAt === 'string' && !Number.isNaN(Date.parse(verJson.builtAt)), 'valid builtAt ISO timestamp required');
+
+      // 2. GET /api/health contains no Paystack mentions
+      const healthRes = await origFetch(`${baseUrl}/api/health`);
+      assert.strictEqual(healthRes.status, 200);
+      const healthText = await healthRes.text();
+      assert.ok(!/paystack/i.test(healthText), `Health payload must not mention Paystack: ${healthText}`);
+
+      // 3. Logged out -> JSON 401; Buyer -> JSON 403 on /api/admin/users, /api/admin/export-data, /api/reports
+      for (const protectedPath of ['/api/admin/users', '/api/admin/export-data', '/api/reports']) {
+        const unauthRes = await origFetch(`${baseUrl}${protectedPath}`);
+        assert.strictEqual(unauthRes.status, 401, `${protectedPath} unauthenticated must return 401`);
+        const unauthJson: any = await unauthRes.json();
+        assert.strictEqual(unauthJson.status, false);
+
+        const buyerRes = await origFetch(`${baseUrl}${protectedPath}`, {
+          headers: { Authorization: `Bearer ${buyerToken}` },
+        });
+        assert.strictEqual(buyerRes.status, 403, `${protectedPath} buyer must return 403`);
+        const buyerJson: any = await buyerRes.json();
+        assert.strictEqual(buyerJson.status, false);
+      }
+
+      // 4. GET /api/webhooks/flutterwave returns {"status":"ok","message":"POST only"} even if PAYMENTS_ENABLED=false
+      const prevPayFlag = process.env.PAYMENTS_ENABLED;
+      process.env.PAYMENTS_ENABLED = 'false';
+      try {
+        const getWh = await origFetch(`${baseUrl}/api/webhooks/flutterwave`);
+        assert.strictEqual(getWh.status, 200);
+        const getWhJson: any = await getWh.json();
+        assert.deepStrictEqual(getWhJson, { status: 'ok', message: 'POST only' });
+      } finally {
+        process.env.PAYMENTS_ENABLED = prevPayFlag;
+      }
+
+      // 5. Unknown /api paths return JSON 404 {"status":false,"message":"Not found"}, never HTML Cannot GET
+      const missingRes = await origFetch(`${baseUrl}/api/nonexistent-endpoint-12345`);
+      assert.strictEqual(missingRes.status, 404);
+      const contentType = missingRes.headers.get('content-type') || '';
+      assert.ok(contentType.includes('application/json'), `Expected application/json 404, got ${contentType}`);
+      const missingJson: any = await missingRes.json();
+      assert.deepStrictEqual(missingJson, { status: false, message: 'Not found' });
+    });
+
     console.log('\n==================================================================');
     console.log(`PHASE 4 SECURITY TEST RESULTS: ${passed} PASSED, ${failed} FAILED`);
     console.log('==================================================================');

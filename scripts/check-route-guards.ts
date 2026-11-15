@@ -19,6 +19,7 @@ const VALID_AUTH_OR_WEBHOOK_GUARDS = new Set([
 const PUBLIC_ALLOW_LIST = new Set([
   'GET /health',
   'GET /api/health',
+  'GET /version',
   'POST /auth/register',
   'POST /auth/signup',
   'POST /auth/login',
@@ -72,8 +73,11 @@ function extractStackRoutes(stack: any[], prefix = '', out: DiscoveredRoute[] = 
 function isGuardedOrAllowed(route: DiscoveredRoute): { ok: boolean; reason: string } {
   const key = `${route.method} ${route.path}`;
 
-  // Normalize all HTTP method variations of webhook (router.all('/webhooks/flutterwave'))
+  // Normalize all HTTP method variations of webhook (GET/HEAD probe returns POST-only JSON; POST checks verif-hash + requirePaymentsEnabled)
   if (route.path === '/webhooks/flutterwave') {
+    if (route.method === 'GET' || route.method === 'HEAD') {
+      return { ok: true, reason: 'Public GET webhook probe ({"status":"ok","message":"POST only"})' };
+    }
     const hasPaymentGate = route.middlewares.includes('requirePaymentsEnabled');
     return hasPaymentGate
       ? { ok: true, reason: 'Webhook verif-hash + requirePaymentsEnabled' }

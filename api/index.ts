@@ -231,6 +231,16 @@ const VALID_EMAIL_TEMPLATES = new Set<EmailTemplateKey>([
 const router = express.Router();
 router.use(marketplaceRouter);
 
+const APP_BUILT_AT = new Date().toISOString();
+
+// Deployment version check (VERCEL_GIT_COMMIT_SHA & builtAt)
+router.get('/version', (_req, res) => {
+  return res.status(200).json({
+    commit: process.env.VERCEL_GIT_COMMIT_SHA || process.env.GIT_COMMIT_SHA || 'local',
+    builtAt: process.env.VERCEL_BUILD_COMPLETED_AT || APP_BUILT_AT,
+  });
+});
+
 // Health check
 router.get(['/health', '/api/health'], async (_req, res) => {
   const pgPing = await pingPostgres();
@@ -1632,6 +1642,10 @@ router.post('/payments/initialize', requirePaymentsEnabled, requireAuth, async (
     if (code >= 500) console.error('[Payment Init Error]:', err.message);
     return res.status(code).json({ status: false, message: err.message || 'Internal server error initializing payment.' });
   }
+});
+
+router.get('/webhooks/flutterwave', (_req, res) => {
+  return res.status(200).json({ status: 'ok', message: 'POST only' });
 });
 
 router.all('/webhooks/flutterwave', requirePaymentsEnabled, async (req: any, res: any) => {
@@ -3277,8 +3291,19 @@ router.post('/coupons/validate', requireAuth, async (req: AuthenticatedRequest, 
 app.use('/api', router);
 app.use('/', router);
 
+// JSON 404 handler for unknown /api paths (never Express HTML "Cannot GET ...")
+app.use('/api', (_req, res) => {
+  return res.status(404).json({ status: false, message: 'Not found' });
+});
+
 export default function handler(req: any, res: any) {
-  return app(req, res);
+  return app(req, res, () => {
+    if (!res.headersSent) {
+      res.statusCode = 404;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ status: false, message: 'Not found' }));
+    }
+  });
 }
 
 export { app };

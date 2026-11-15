@@ -70,9 +70,8 @@ export default async function handler(req: any, res: any) {
     res.statusCode = 200;
     return res.end(
       JSON.stringify({
-        status: true,
-        message: 'Flutterwave payment webhook endpoint ready.',
-        endpoint: '/api/webhooks/flutterwave',
+        status: 'ok',
+        message: 'POST only',
       })
     );
   }

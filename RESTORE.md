@@ -88,5 +88,5 @@ If running in high-availability mode with Upstash KV (`KV_REST_API_URL` and `KV_
 
 - **Platform Admin:** Adeyinka Joseph (`joeadeyinka12@gmail.com`)
 - **Operations & Support:** `shopitverified@gmail.com`
-- **Paystack Merchant Dashboard:** [dashboard.paystack.com](https://dashboard.paystack.com)
+- **Flutterwave Merchant Dashboard:** [app.flutterwave.com](https://app.flutterwave.com)
 - **Brevo Email Dashboard:** [app.brevo.com](https://app.brevo.com)
