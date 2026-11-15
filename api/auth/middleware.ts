@@ -1,4 +1,3 @@
-import crypto from 'crypto';
 import type { Request, Response, NextFunction } from 'express';
 import { getSession, UserSession, SESSION_COOKIE_NAME, logAuditEvent } from './sessionStore.js';
 
@@ -223,27 +222,6 @@ export async function requireFinance(
     error: 'FORBIDDEN',
     message: 'Access denied. Finance sub-role required.',
   });
-}
-
-/**
- * Middleware: Requires valid CRON_SECRET Bearer token (for Vercel Crons) OR Admin session.
- */
-export async function requireCronOrAdmin(
-  req: AuthenticatedRequest,
-  res: Response,
-  next: NextFunction
-): Promise<any> {
-  const cronSecret = (process.env.CRON_SECRET || '').trim();
-  const authHeader = (req.headers.authorization || '').trim();
-  if (cronSecret && authHeader.toLowerCase().startsWith('bearer ')) {
-    const provided = authHeader.substring(7).trim();
-    const expectedDigest = crypto.createHash('sha256').update(cronSecret).digest();
-    const providedDigest = crypto.createHash('sha256').update(provided).digest();
-    if (crypto.timingSafeEqual(expectedDigest, providedDigest)) {
-      return next();
-    }
-  }
-  return requireAdmin(req, res, next);
 }
 
 /**

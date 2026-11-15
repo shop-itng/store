@@ -1,9 +1,13 @@
+import './testEnv.js';
 import http from 'http';
+import fs from 'fs';
+import path from 'path';
+import { spawnSync } from 'child_process';
 import assert from 'assert';
 import { app } from '../api/index.js';
 import { query, hashPassword, runMigration } from '../api/db/postgres.js';
 import { createSession } from '../api/auth/sessionStore.js';
-import { issueSignupVerificationToken, saveHashedOtp, hashOtp } from '../api/db/otpStore.js';
+import { issueSignupVerificationToken, saveHashedOtp, hashOtp, verifyOtpHash } from '../api/db/otpStore.js';
 import { processUnshippedOrders } from '../api/lib/payments.js';
 import { getKycProvider, IKycProvider } from '../api/lib/kycProvider.js';
 
@@ -33,8 +37,6 @@ async function main() {
   process.env.FLW_SECRET_KEY = 'FLWSECK_TEST-sec-suite-secret';
   process.env.FLW_PUBLIC_KEY = 'FLWPUBK_TEST-sec-suite-public';
   process.env.FLW_WEBHOOK_SECRET_HASH = 'flw_sec_suite_webhook_hash';
-  process.env.DOC_ENCRYPTION_KEY = 'sec-suite-doc-encryption-key-32bytes';
-  process.env.CRON_SECRET = 'sec_suite_cron_secret';
   process.env.APP_URL = 'https://shop-itng-pied.vercel.app';
 
   const server = http.createServer(app);
@@ -974,6 +976,220 @@ async function main() {
       assert.ok(verRecord.rows[0].reviewed_at !== null);
       assert.strictEqual(verRecord.rows[0].document_url, '[Deleted after review decision]');
       assert.strictEqual(verRecord.rows[0].selfie_url, '[Deleted after review decision]');
+    });
+
+    // -------------------------------------------------------------------------
+    // CHANGE REQUEST PART 3 TESTS: APP_SECRET, Salted OTP, Admin Doc Auth,
+    // Cron Idempotency (10x), Vercel Hobby Cron Limits, Zero Legacy Vars
+    // -------------------------------------------------------------------------
+
+    await test('CR1: Server refuses to start without a valid 64+ hex APP_SECRET', async () => {
+      const tsxBin = path.resolve(process.cwd(), 'node_modules', '.bin', 'tsx');
+      const envMissing = { ...process.env };
+      delete envMissing.APP_SECRET;
+      const missingRes = spawnSync(tsxBin, ['api/index.ts'], {
+        env: envMissing,
+        encoding: 'utf8',
+        timeout: 15000,
+      });
+      assert.notStrictEqual(missingRes.status, 0, 'Server must exit non-zero when APP_SECRET is missing');
+      assert.ok(
+        `${missingRes.stderr}${missingRes.stdout}`.includes('APP_SECRET'),
+        'Failure output should clearly identify missing APP_SECRET'
+      );
+
+      const envShort = { ...process.env, APP_SECRET: 'short_not_64_hex_chars' };
+      const shortRes = spawnSync(tsxBin, ['api/index.ts'], {
+        env: envShort,
+        encoding: 'utf8',
+        timeout: 15000,
+      });
+      assert.notStrictEqual(shortRes.status, 0, 'Server must exit non-zero when APP_SECRET is < 64 hex chars');
+    });
+
+    await test('CR2: Two OTPs for the same code produce different stored hashes (random per-record salt + HKDF)', async () => {
+      const h1 = hashOtp('654321');
+      const h2 = hashOtp('654321');
+      assert.notStrictEqual(h1, h2, 'Two calls to hashOtp("654321") must produce distinct stored hashes');
+      assert.strictEqual(verifyOtpHash('654321', h1), true);
+      assert.strictEqual(verifyOtpHash('654321', h2), true);
+      assert.strictEqual(verifyOtpHash('000000', h1), false);
+    });
+
+    await test('CR3: Document endpoint returns 401 without a session and 403 for non-admins', async () => {
+      const docSellerEmail = `doc_sec_${ts}@shopit.ng`;
+      const docReg: any = await (
+        await origFetch(`${baseUrl}/api/auth/register`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: docSellerEmail,
+            password: 'SellerPass123!',
+            name: 'Pending Doc Seller',
+            role: 'seller',
+            age: 22,
+            shopName: 'Doc Check Shop',
+            signupVerificationToken: await issueSignupVerificationToken(docSellerEmail),
+          }),
+        })
+      ).json();
+      const docSellerToken = docReg.sessionToken;
+      const docSellerId = docReg.user.sellerId || docReg.user.id;
+
+      const subRes: any = await (
+        await origFetch(`${baseUrl}/api/verification/submit`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${docSellerToken}` },
+          body: JSON.stringify({
+            sellerId: docSellerId,
+            shopName: 'Doc Check Shop',
+            fullName: 'Pending Doc Seller',
+            nin: '55443322110',
+            idDocumentType: 'nin_slip',
+            idDocumentPhoto: validPngDataUrl,
+            selfiePhoto: validPngDataUrl,
+            livenessScore: 95,
+            ndpaConsentSigned: true,
+          }),
+        })
+      ).json();
+      assert.strictEqual(subRes.verificationStatus, 'pending');
+
+      const vRow = await query('SELECT document_url FROM shopit_verifications WHERE id = $1', [subRes.verificationId]);
+      const docUrl: string = vRow.rows[0].document_url;
+      assert.ok(docUrl.startsWith('/api/verification/document/'));
+      assert.ok(!docUrl.includes('token='));
+
+      const unauthRes = await origFetch(`${baseUrl}${docUrl}`);
+      assert.strictEqual(unauthRes.status, 401, 'Document endpoint must return 401 without session');
+
+      const buyerRes = await origFetch(`${baseUrl}${docUrl}`, {
+        headers: { Authorization: `Bearer ${buyerToken}` },
+      });
+      assert.strictEqual(buyerRes.status, 403, 'Document endpoint must return 403 for buyer');
+
+      const ownerRes = await origFetch(`${baseUrl}${docUrl}`, {
+        headers: { Authorization: `Bearer ${docSellerToken}` },
+      });
+      assert.strictEqual(ownerRes.status, 403, 'Document endpoint must return 403 for non-admin seller owner');
+
+      const adminDocRes = await origFetch(`${baseUrl}${docUrl}`, {
+        headers: { Authorization: `Bearer ${adminSess.token}` },
+      });
+      assert.strictEqual(adminDocRes.status, 200, 'Moderator admin session should stream decrypted image (200)');
+    });
+
+    await test('CR4: Calling /api/cron/daily 10 times in a row changes nothing after the first run', async () => {
+      // Seed one overdue pending_payment order with reserved stock to verify run 1 processes it and runs 2-10 are zero-ops
+      const cronProdId = `prod_cron_${ts}`;
+      await query(
+        `INSERT INTO shopit_products (
+           id, seller_id, seller_shop_name, title, description, category,
+           seller_price, service_fee, display_price, stock, is_sold_out, created_at, updated_at
+         ) VALUES ($1, $2, 'Adult Bead Craft', 'Cron Test Item', 'Item', 'crafts', 2000, 500, 2500, 4, false, NOW(), NOW())`,
+        [cronProdId, sellerId]
+      );
+      const cronOrdId = `ORD_CRON10_${ts}`;
+      await query(
+        `INSERT INTO shopit_orders (
+           id, buyer_id, buyer_name, buyer_email, items,
+           subtotal, service_fee_total, delivery_total, discount_total, grand_total,
+           subtotal_kobo, service_fee_kobo, delivery_fee_kobo, discount_total_kobo, grand_total_kobo,
+           payment_method, payment_reference, status, stock_reserved, expires_at, created_at, updated_at
+         ) VALUES (
+           $1, $2, 'Ada Buyer', $3, $4,
+           2000, 500, 0, 0, 2500,
+           200000, 50000, 0, 0, 250000,
+           'flutterwave_card', $5, 'pending_payment', true, NOW() - INTERVAL '2 minutes', NOW() - INTERVAL '2 hours', NOW()
+         )`,
+        [
+          cronOrdId,
+          buyerId,
+          buyerEmail,
+          JSON.stringify([{ productId: cronProdId, sellerId, sellerPrice: 2000, quantity: 1 }]),
+          `REF_CRON10_${ts}`,
+        ]
+      );
+
+      const firstRes = await origFetch(`${baseUrl}/api/cron/daily`, { method: 'GET' });
+      assert.strictEqual(firstRes.status, 200);
+      const firstBody: any = await firstRes.json();
+      assert.strictEqual(firstBody.ok, true);
+      assert.strictEqual(firstBody.processed.expiredOrdersCount, 1);
+
+      const stockAfterFirst = Number((await query('SELECT stock FROM shopit_products WHERE id = $1', [cronProdId])).rows[0].stock);
+      assert.strictEqual(stockAfterFirst, 5);
+
+      for (let i = 2; i <= 10; i++) {
+        const res = await origFetch(`${baseUrl}/api/cron/daily`, { method: 'GET' });
+        assert.strictEqual(res.status, 200, `Cron run #${i} failed with ${res.status}`);
+        const body: any = await res.json();
+        assert.strictEqual(body.ok, true);
+        assert.strictEqual(body.processed.expiredOrdersCount, 0, `Run #${i} expiredOrdersCount must be 0`);
+        assert.strictEqual(body.processed.escrowReleasedCount, 0, `Run #${i} escrowReleasedCount must be 0`);
+        assert.strictEqual(body.processed.unshippedRemindedCount, 0, `Run #${i} unshippedRemindedCount must be 0`);
+        assert.strictEqual(body.processed.unshippedRefundedCount, 0, `Run #${i} unshippedRefundedCount must be 0`);
+        assert.strictEqual(body.processed.purgedDocsCount, 0, `Run #${i} purgedDocsCount must be 0`);
+        assert.strictEqual(JSON.stringify(body).includes(buyerEmail), false, 'Cron response must contain zero PII');
+      }
+
+      const stockAfterTen = Number((await query('SELECT stock FROM shopit_products WHERE id = $1', [cronProdId])).rows[0].stock);
+      assert.strictEqual(stockAfterTen, 5, 'Stock must remain identical across runs 2-10');
+    });
+
+    await test('CR5: vercel.json contains no cron that runs more than once per day', async () => {
+      const rawVercel = fs.readFileSync(path.resolve(process.cwd(), 'vercel.json'), 'utf8');
+      const parsed = JSON.parse(rawVercel);
+      assert.ok(Array.isArray(parsed.crons) && parsed.crons.length === 1, 'vercel.json must configure strictly 1 cron job');
+      for (const job of parsed.crons) {
+        const fields = String(job.schedule || '').trim().split(/\s+/);
+        assert.strictEqual(fields.length, 5, `Cron schedule must have 5 fields: ${job.schedule}`);
+        const [min, hour] = fields;
+        assert.ok(/^\d{1,2}$/.test(min) && Number(min) >= 0 && Number(min) <= 59, `Minute field must be a single fixed integer: ${min}`);
+        assert.ok(/^\d{1,2}$/.test(hour) && Number(hour) >= 0 && Number(hour) <= 23, `Hour field must be a single fixed integer (max 1x/day): ${hour}`);
+      }
+    });
+
+    await test('CR6: Five removed legacy env var names no longer appear anywhere in codebase', async () => {
+      const forbiddenNames = [
+        ['OTP', 'HASH', 'SALT'].join('_'),
+        ['NIN', 'HASH', 'SALT'].join('_'),
+        ['DOC', 'TOKEN', 'SECRET'].join('_'),
+        ['DOC', 'ENCRYPTION', 'KEY'].join('_'),
+        ['CRON', 'SECRET'].join('_'),
+      ];
+
+      const filesToScan: string[] = [];
+      const walk = (dir: string) => {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          const full = path.join(dir, entry.name);
+          if (entry.isDirectory()) {
+            if (['node_modules', 'dist', '.git'].includes(entry.name)) continue;
+            walk(full);
+          } else if (/\.(ts|tsx|js|jsx|json|md|example)$/.test(entry.name)) {
+            filesToScan.push(full);
+          }
+        }
+      };
+
+      for (const topDir of ['api', 'src', 'scripts']) {
+        walk(path.resolve(process.cwd(), topDir));
+      }
+      for (const rootFile of ['.env.example', 'README.md', 'vercel.json', 'server.ts', 'package.json', 'index.html']) {
+        const p = path.resolve(process.cwd(), rootFile);
+        if (fs.existsSync(p)) filesToScan.push(p);
+      }
+
+      const hits: string[] = [];
+      for (const filePath of filesToScan) {
+        const content = fs.readFileSync(filePath, 'utf8');
+        for (const name of forbiddenNames) {
+          if (content.includes(name)) {
+            hits.push(`${path.relative(process.cwd(), filePath)} -> ${name}`);
+          }
+        }
+      }
+      assert.deepStrictEqual(hits, [], `Found forbidden env var references: ${hits.join('; ')}`);
     });
 
     console.log('\n==================================================================');

@@ -1,3 +1,4 @@
+import './testEnv.js';
 import http from 'http';
 import assert from 'assert';
 import { app } from '../api/index.js';
@@ -28,8 +29,6 @@ async function main() {
   process.env.FLW_SECRET_KEY = 'FLWSECK_TEST-mock-secret-phase3-sweep';
   process.env.FLW_PUBLIC_KEY = 'FLWPUBK_TEST-mock-public-phase3-sweep';
   process.env.FLW_WEBHOOK_SECRET_HASH = 'flw_webhook_hash_phase3_sweep';
-  process.env.DOC_ENCRYPTION_KEY = 'phase3-sweep-test-doc-encryption-key';
-  process.env.CRON_SECRET = 'cron_secret_phase3_sweep';
   process.env.APP_URL = 'https://shop-itng-pied.vercel.app';
 
   const server = http.createServer(app);
@@ -515,7 +514,7 @@ async function main() {
 
     let recentDocId = '';
     let recentDocUrl = '';
-    await test('6b. GET /verification/document/:docId blocks finance-only admin & bystanders (403), allows owner & moderator (200)', async () => {
+    await test('6b. GET /verification/document/:docId returns 401 without session, 403 for non-admins/finance, allows moderator (200)', async () => {
       const submitRes = await origFetch(`${baseUrl}/api/verification/submit`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${sellerToken}` },
@@ -536,7 +535,11 @@ async function main() {
 
       const verRow = await query('SELECT document_url FROM shopit_verifications WHERE id = $1', [submitJson.verificationId]);
       recentDocUrl = verRow.rows[0].document_url;
-      recentDocId = decodeURIComponent(recentDocUrl.split('/verification/document/')[1].split('?')[0]);
+      assert.ok(!recentDocUrl.includes('?token='), 'Signed URLs with ?token= must not exist');
+      recentDocId = decodeURIComponent(recentDocUrl.split('/verification/document/')[1]);
+
+      const unauthRes = await origFetch(`${baseUrl}${recentDocUrl}`);
+      assert.strictEqual(unauthRes.status, 401);
 
       const finRes = await origFetch(`${baseUrl}${recentDocUrl}`, {
         headers: { Authorization: `Bearer ${finSess.token}` },
@@ -551,12 +554,18 @@ async function main() {
       const ownerRes = await origFetch(`${baseUrl}${recentDocUrl}`, {
         headers: { Authorization: `Bearer ${sellerToken}` },
       });
-      assert.strictEqual(ownerRes.status, 200);
+      assert.strictEqual(ownerRes.status, 403);
 
       const modRes = await origFetch(`${baseUrl}${recentDocUrl}`, {
         headers: { Authorization: `Bearer ${modSess.token}` },
       });
       assert.strictEqual(modRes.status, 200);
+
+      const auditRes = await query(
+        `SELECT action FROM shopit_audit_logs WHERE action = 'KYC_DOCUMENT_ACCESSED' AND target_id = $1`,
+        [recentDocId]
+      );
+      assert.ok(auditRes.rows.length >= 1, 'Document access must be logged in shopit_audit_logs');
     });
 
     await test('6c. Legacy POST /sellers/verify/submit enforces ownerName + 11-digit NIN', async () => {

@@ -1,3 +1,4 @@
+import './testEnv.js';
 import http from 'http';
 import crypto from 'crypto';
 import assert from 'assert';
@@ -176,8 +177,6 @@ async function main() {
         ['GET', `/api/verification/status/${sellerId}`],
         ['POST', '/api/verification/submit'],
         ['POST', '/api/escrow/auto-release'],
-        ['POST', '/api/cron/escrow'],
-        ['POST', '/api/cron/expire-orders'],
         ['POST', '/api/email/send'],
       ];
       for (const [method, path] of targets) {
@@ -415,19 +414,14 @@ async function main() {
       assert.strictEqual(otpRes.status, 400);
     });
 
-    // Cron secret guard check
-    await test('C8: /api/cron/escrow & /api/cron/expire-orders accept valid CRON_SECRET Bearer', async () => {
-      process.env.CRON_SECRET = 'test_cron_secret_12345';
-      const r1 = await fetch(`${baseUrl}/api/cron/escrow`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${process.env.CRON_SECRET}` },
-      });
-      const r2 = await fetch(`${baseUrl}/api/cron/expire-orders`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${process.env.CRON_SECRET}` },
-      });
+    // Unified idempotent public-safe daily cron endpoint check
+    await test('C8: /api/cron/daily is public-safe, idempotent, and returns zero sensitive data', async () => {
+      const r1 = await fetch(`${baseUrl}/api/cron/daily`, { method: 'GET' });
       assert.strictEqual(r1.status, 200);
-      assert.strictEqual(r2.status, 200);
+      const body1: any = await r1.json();
+      assert.strictEqual(body1.ok, true);
+      assert.strictEqual(body1.processed?.reconciliationOk, true);
+      assert.strictEqual(body1.orderIds, undefined);
     });
 
     // C2: Admin token accesses /api/admin/metrics

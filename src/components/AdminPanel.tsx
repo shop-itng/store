@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
 import {
   ShieldCheck,
@@ -48,6 +48,40 @@ import { formatNaira, calculateServiceFee, getPricingBreakdown } from '../utils/
 import { AdminSubRole, LedgerEntryType, Order } from '../types';
 import { PAYMENT_CONFIG } from '../utils/paymentService';
 import { EscrowReceiptModal } from './EscrowReceiptModal';
+
+const AdminProtectedDocImage: React.FC<{ src: string; alt: string; className?: string }> = ({ src, alt, className }) => {
+  const [resolvedUrl, setResolvedUrl] = useState<string>(src.startsWith('/api/verification/document/') ? '' : src);
+
+  useEffect(() => {
+    if (!src || !src.startsWith('/api/verification/document/')) {
+      setResolvedUrl(src);
+      return;
+    }
+    let active = true;
+    let objectUrl = '';
+    const token = typeof localStorage !== 'undefined' ? localStorage.getItem('shopit_session_token') : null;
+    fetch(src, {
+      credentials: 'include',
+      headers: token ? { Authorization: `Bearer ${token}`, 'x-session-token': token } : {},
+    })
+      .then(res => (res.ok ? res.blob() : null))
+      .then(blob => {
+        if (!active || !blob) return;
+        objectUrl = URL.createObjectURL(blob);
+        setResolvedUrl(objectUrl);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [src]);
+
+  if (!resolvedUrl) {
+    return <div className="text-stone-400 text-xs p-4 text-center">Loading encrypted document...</div>;
+  }
+  return <img src={resolvedUrl} alt={alt} className={className} />;
+};
 
 export const AdminPanel: React.FC = () => {
   const {
@@ -3105,7 +3139,7 @@ export const AdminPanel: React.FC = () => {
                 ✕
               </button>
             </div>
-            <img
+            <AdminProtectedDocImage
               src={selectedVerificationDoc}
               alt="Verification document preview"
               className="w-full max-h-[70vh] object-contain rounded-lg border border-stone-200"
@@ -3498,7 +3532,7 @@ export const AdminPanel: React.FC = () => {
                   </div>
                   <div className="h-64 sm:h-72 rounded-xl bg-white border border-stone-200 overflow-hidden flex items-center justify-center relative group">
                     {inspectRequest.idCardPhotoUrl ? (
-                      <img
+                      <AdminProtectedDocImage
                         src={inspectRequest.idCardPhotoUrl}
                         alt="ID Document"
                         className="w-full h-full object-contain"
@@ -3535,7 +3569,7 @@ export const AdminPanel: React.FC = () => {
                   </div>
                   <div className="h-64 sm:h-72 rounded-xl bg-white border border-stone-200 overflow-hidden flex items-center justify-center relative group">
                     {inspectRequest.selfiePhotoUrl ? (
-                      <img
+                      <AdminProtectedDocImage
                         src={inspectRequest.selfiePhotoUrl}
                         alt="Live Selfie"
                         className="w-full h-full object-contain"

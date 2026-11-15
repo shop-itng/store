@@ -1,3 +1,4 @@
+import './testEnv.js';
 import { app } from '../api/index.js';
 
 interface DiscoveredRoute {
@@ -13,7 +14,6 @@ const VALID_AUTH_OR_WEBHOOK_GUARDS = new Set([
   'requireFinance',
   'requireSeller',
   'requireOwnershipOrAdmin',
-  'requireCronOrAdmin',
 ]);
 
 const PUBLIC_ALLOW_LIST = new Set([
@@ -78,6 +78,11 @@ function isGuardedOrAllowed(route: DiscoveredRoute): { ok: boolean; reason: stri
     return hasPaymentGate
       ? { ok: true, reason: 'Webhook verif-hash + requirePaymentsEnabled' }
       : { ok: false, reason: 'Webhook missing requirePaymentsEnabled gate' };
+  }
+
+  // Public-safe, rate-limited, idempotent daily cron endpoint
+  if (route.path === '/cron/daily') {
+    return { ok: true, reason: 'Public-safe rate-limited & idempotent daily cron endpoint' };
   }
 
   const matchedGuards = route.middlewares.filter(

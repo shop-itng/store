@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { query as dbQuery, withTransaction } from '../db/postgres.js';
+import { deriveSubKey } from './secrets.js';
 import { renderTransactionalEmail } from '../../src/utils/transactionalEmails.js';
 
 export function nairaToKobo(naira: number | string): number {
@@ -45,22 +46,12 @@ export function calculatePricingInKobo(sellerPriceKobo: number) {
 
 // ============================================================================
 // AES-256-GCM Encryption for Sensitive Identity Documents (NDPA 2023)
+// Derived strictly via HKDF from APP_SECRET with label 'doc-encryption'
 // ============================================================================
 const IS_PROD = process.env.NODE_ENV === 'production' || Boolean(process.env.VERCEL);
-const ENV_DOC_ENC_KEY = (process.env.DOC_ENCRYPTION_KEY || '').trim();
-if (IS_PROD && !ENV_DOC_ENC_KEY) {
-  console.error('[SECURITY CRITICAL] DOC_ENCRYPTION_KEY environment variable is missing in production.');
-}
-const EPHEMERAL_DEV_DOC_KEY = crypto.randomBytes(32);
 
 function getDocAesKey(): Buffer {
-  if (ENV_DOC_ENC_KEY) {
-    return crypto.createHash('sha256').update(ENV_DOC_ENC_KEY).digest();
-  }
-  if (IS_PROD) {
-    throw new Error('DOC_ENCRYPTION_KEY must be configured in production.');
-  }
-  return EPHEMERAL_DEV_DOC_KEY;
+  return deriveSubKey('doc-encryption', 32);
 }
 
 export function encryptSensitiveData(plaintext: string): string {
@@ -205,11 +196,12 @@ export async function restoreOrderStockInTx(client: any, order: any): Promise<vo
   await client.query('UPDATE shopit_orders SET stock_reserved = false, updated_at = NOW() WHERE id = $1', [order.id]);
 }
 
-export async function expireStalePendingOrders(): Promise<{
+export async function expireStalePendingOrders(batchLimit = 50): Promise<{
   expiredCount: number;
   orderIds: string[];
   purgedDocsCount: number;
 }> {
+  const safeLimit = Math.max(1, Math.min(100, Math.floor(batchLimit)));
   const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
   const result = await withTransaction(async client => {
     const staleRes = await client.query(
@@ -218,9 +210,12 @@ export async function expireStalePendingOrders(): Promise<{
        WHERE status = 'pending_payment'
          AND (
            (expires_at IS NOT NULL AND expires_at <= NOW())
-           OR (expires_at IS NULL AND created_at < NOW() - INTERVAL '30 minutes')
+           OR (expires_at IS NULL AND created_at < NOW() - INTERVAL '60 minutes')
          )
-       FOR UPDATE`
+       ORDER BY created_at ASC
+       LIMIT $1
+       FOR UPDATE`,
+      [safeLimit]
     );
 
     const expiredIds: string[] = [];
@@ -243,13 +238,13 @@ export async function expireStalePendingOrders(): Promise<{
       );
       await client.query(
         `INSERT INTO shopit_order_status_history (id, order_id, previous_status, new_status, changed_by, notes, created_at)
-         VALUES ($1, $2, 'pending_payment', 'cancelled', 'expire_orders_cron', 'Pending order expired and reserved stock restored.', NOW())`,
+         VALUES ($1, $2, 'pending_payment', 'cancelled', 'expire_orders_cron', 'Pending order expired (60m window) and reserved stock restored.', NOW())`,
         [`osh_exp_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`, row.id]
       );
       expiredIds.push(row.id);
     }
 
-    // NDPA 2023 automated 30-day purge of completed KYC identity documents
+    // Safety fallback purge of any orphaned completed KYC docs older than 30 days
     const purgedRes = await client.query(
       `DELETE FROM shopit_verification_documents
        WHERE created_at < $1
@@ -281,6 +276,30 @@ export async function expireStalePendingOrders(): Promise<{
     };
   });
   return result;
+}
+
+/**
+ * Lazy pending-order expiration executed inline when checkout, order, or wallet traffic arrives.
+ * Fast existence probe avoids transaction overhead when nothing is due.
+ */
+export async function runLazyPendingOrderExpiry(): Promise<number> {
+  try {
+    const dueCheck = await dbQuery(
+      `SELECT id
+       FROM shopit_orders
+       WHERE status = 'pending_payment'
+         AND (
+           (expires_at IS NOT NULL AND expires_at <= NOW())
+           OR (expires_at IS NULL AND created_at < NOW() - INTERVAL '60 minutes')
+         )
+       LIMIT 1`
+    );
+    if (dueCheck.rows.length === 0) return 0;
+    const res = await expireStalePendingOrders(50);
+    return res.expiredCount;
+  } catch {
+    return 0;
+  }
 }
 
 // ============================================================================
@@ -655,12 +674,13 @@ export async function commitPaidOrderTransaction(params: {
 // - Day 5: Auto-cancel & full buyer refund via Flutterwave (skips open disputes & admin holds)
 // ============================================================================
 
-export async function processUnshippedOrders(): Promise<{
+export async function processUnshippedOrders(batchLimit = 50): Promise<{
   remindedCount: number;
   remindedOrderIds: string[];
   refundedCount: number;
   refundedOrderIds: string[];
 }> {
+  const safeLimit = Math.max(1, Math.min(100, Math.floor(batchLimit)));
   const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
   const fiveDaysAgo = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString();
 
@@ -678,8 +698,10 @@ export async function processUnshippedOrders(): Promise<{
          AND o.unshipped_reminder_sent_at IS NULL
          AND COALESCE(o.paid_at, o.created_at) <= $1
          AND COALESCE(o.paid_at, o.created_at) > $2
-         AND d.id IS NULL`,
-      [threeDaysAgo, fiveDaysAgo]
+         AND d.id IS NULL
+       ORDER BY COALESCE(o.paid_at, o.created_at) ASC
+       LIMIT $3`,
+      [threeDaysAgo, fiveDaysAgo, safeLimit]
     );
 
     for (const row of remindCandidates.rows) {
@@ -742,7 +764,7 @@ export async function processUnshippedOrders(): Promise<{
       }
     }
 
-    // 2. Day 5+ Auto-Cancel & Full Buyer Refund (never shipped, no open dispute, no admin hold)
+    // 2. Day 5+ Auto-Cancel & Full Buyer Refund (never shipped, no open dispute, no admin hold, batch-limited)
     const refundCandidates = await dbQuery(
       `SELECT o.*
        FROM shopit_orders o
@@ -750,8 +772,10 @@ export async function processUnshippedOrders(): Promise<{
        WHERE o.status IN ('paid', 'packed')
          AND COALESCE(o.admin_hold, false) = false
          AND COALESCE(o.paid_at, o.created_at) <= $1
-         AND d.id IS NULL`,
-      [fiveDaysAgo]
+         AND d.id IS NULL
+       ORDER BY COALESCE(o.paid_at, o.created_at) ASC
+       LIMIT $2`,
+      [fiveDaysAgo, safeLimit]
     );
 
     const flwSecret = (process.env.FLW_SECRET_KEY || '').trim().replace(/^["']|["']$/g, '');
@@ -951,3 +975,85 @@ export async function processUnshippedOrders(): Promise<{
     refundedOrderIds,
   };
 }
+
+/**
+ * Daily Ledger & Wallet Reconciliation Check:
+ * Verifies zero negative balances and double-entry conservation between wallets and ledger entries.
+ * Returns only non-sensitive pass/fail status & count; alerts admin via email if drift occurs.
+ */
+export async function runDailyReconciliationCheck(): Promise<{
+  ok: boolean;
+  discrepancyCount: number;
+}> {
+  let discrepancyCount = 0;
+  try {
+    const negRes = await dbQuery(
+      `SELECT seller_id
+       FROM shopit_wallets
+       WHERE pending_balance_kobo < 0 OR available_balance_kobo < 0
+       LIMIT 50`
+    );
+    discrepancyCount += negRes.rows.length;
+
+    const walletsRes = await dbQuery(
+      `SELECT seller_id, pending_balance_kobo, pending_balance, available_balance_kobo, available_balance
+       FROM shopit_wallets
+       LIMIT 500`
+    );
+
+    const fieldKobo = (koboVal: any, nairaVal: any) =>
+      koboVal !== null && koboVal !== undefined && Number(koboVal) !== 0
+        ? Number(koboVal)
+        : Math.round(Number(nairaVal || 0) * 100);
+
+    for (const w of walletsRes.rows) {
+      const ledRes = await dbQuery(
+        `SELECT type, balance_type, amount_kobo, amount, fee_kobo, fee
+         FROM shopit_ledger_entries
+         WHERE wallet_id = $1`,
+        [w.seller_id]
+      );
+
+      let derivedPending = 0;
+      let derivedAvailable = 0;
+      for (const l of ledRes.rows) {
+        const amt = fieldKobo(l.amount_kobo, l.amount);
+        const fee = fieldKobo(l.fee_kobo, l.fee);
+        if (l.type === 'sale_pending') {
+          derivedPending += amt;
+        } else if (l.type === 'escrow_release') {
+          derivedPending -= amt;
+          derivedAvailable += amt;
+        } else if (l.type === 'withdrawal') {
+          derivedAvailable -= amt + fee;
+        } else if (l.type === 'refund' || l.type === 'reversal') {
+          if (l.balance_type === 'pending') derivedPending -= amt;
+          else derivedAvailable += amt;
+        }
+      }
+
+      const wPending = fieldKobo(w.pending_balance_kobo, w.pending_balance);
+      const wAvail = fieldKobo(w.available_balance_kobo, w.available_balance);
+      if (wPending !== derivedPending || wAvail !== derivedAvailable) {
+        discrepancyCount++;
+      }
+    }
+
+    if (discrepancyCount > 0) {
+      const dayKey = new Date().toISOString().slice(0, 10);
+      await sendAdminAlert(
+        `daily_reconcile_${dayKey}`,
+        `Daily Ledger Reconciliation Discrepancy Detected (${discrepancyCount})`,
+        `The automated daily reconciliation check detected <strong>${discrepancyCount}</strong> wallet/ledger discrepancy count(s). Run <code>npx tsx scripts/reconcile-ledger.ts</code> to inspect.`
+      );
+    }
+  } catch (err: any) {
+    console.warn('[Daily Reconciliation Warning]:', err.message);
+  }
+
+  return {
+    ok: discrepancyCount === 0,
+    discrepancyCount,
+  };
+}
+

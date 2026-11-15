@@ -1,3 +1,4 @@
+import './testEnv.js';
 import { runMigration, query as dbQuery } from '../api/db/postgres.js';
 import { processEscrowAutoRelease } from '../api/routes/marketplace.js';
 import { hashOtp, saveHashedOtp, getOtpRecord, verifyOtpHash } from '../api/db/otpStore.js';

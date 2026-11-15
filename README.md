@@ -16,13 +16,14 @@ In the Vercel project deployment screen, open **Environment Variables** and add 
 
 | Variable Name | Description | Value / Example |
 | :--- | :--- | :--- |
+| `APP_SECRET` | Master 64-hex-character secret for HKDF key derivation (OTP hashing, NIN hash, AES-256-GCM KYC docs) | Generate with `openssl rand -hex 32` |
 | `FLW_PUBLIC_KEY` | Flutterwave public key | `FLWPUBK_TEST-...` (from Flutterwave Dashboard) |
 | `FLW_SECRET_KEY` | Server-only secret key for API calls & verification | `FLWSECK_TEST-...` (from Flutterwave Dashboard) |
 | `FLW_WEBHOOK_SECRET_HASH` | Secret hash matched against `verif-hash` header | Unique 32+ char secret set in Flutterwave Dashboard |
 | `VITE_FLW_PUBLIC_KEY` | Optional client test-mode indicator | `FLWPUBK_TEST-...` |
 | `APP_URL` | Your live Vercel URL | `https://shop-itng-pied.vercel.app` |
 
-Click **Deploy**.
+Click **Deploy**. Daily maintenance runs automatically via `/api/cron/daily` (`0 3 * * *` UTC / 4:00 AM WAT).
 
 ---
 

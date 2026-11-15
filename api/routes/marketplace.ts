@@ -4,11 +4,17 @@ import { query as dbQuery, withTransaction } from '../db/postgres.js';
 import { verifyAndConsumeOtp } from '../db/otpStore.js';
 import {
   requireAuth,
-  requireCronOrAdmin,
+  requireAdmin,
   AuthenticatedRequest,
 } from '../auth/middleware.js';
 import { logAuditEvent } from '../auth/sessionStore.js';
-import { nairaToKobo, koboToNaira, calculatePricingInKobo, processUnshippedOrders } from '../lib/payments.js';
+import {
+  nairaToKobo,
+  koboToNaira,
+  calculatePricingInKobo,
+  processUnshippedOrders,
+  runLazyPendingOrderExpiry,
+} from '../lib/payments.js';
 
 const router = express.Router();
 
@@ -684,6 +690,7 @@ router.put('/wishlist', requireAuth, async (req: AuthenticatedRequest, res: Resp
 // GET /api/orders - List user orders (handshakeOtp hidden from sellers; PII hidden from non-admins)
 router.get('/orders', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
+    await runLazyPendingOrderExpiry();
     const user = req.user!;
     const page = Math.max(1, parseInt(String(req.query.page || '1'), 10) || 1);
     const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit || '50'), 10) || 50));
@@ -774,6 +781,7 @@ router.post('/orders', requirePaymentsEnabled, requireAuth, async (_req: Authent
 // PATCH /api/orders/:id/status - C8 Strict role-enforced state machine & atomic escrow release
 router.patch('/orders/:id/status', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
+    await runLazyPendingOrderExpiry();
     const user = req.user!;
     const { id } = req.params;
     const { status: newStatus, notes, handshakeOtp, packedPhotoUrl } = req.body;
@@ -998,16 +1006,20 @@ router.patch('/orders/:id/status', requireAuth, async (req: AuthenticatedRequest
  * when auto_release_at <= NOW() and no dispute is open.
  * Every order release executes in a single atomic transaction with an idempotent ledger key.
  */
-export async function processEscrowAutoRelease(): Promise<{ releasedCount: number; orderIds: string[] }> {
+export async function processEscrowAutoRelease(batchLimit = 50): Promise<{ releasedCount: number; orderIds: string[] }> {
+  const safeLimit = Math.max(1, Math.min(100, Math.floor(batchLimit)));
   try {
-    const candidateRes = await dbQuery(`
-      SELECT o.id FROM shopit_orders o
-      LEFT JOIN shopit_disputes d ON d.order_id = o.id AND d.status IN ('open', 'investigating')
-      WHERE o.status IN ('shipped', 'delivered')
-        AND o.auto_release_at IS NOT NULL
-        AND o.auto_release_at <= NOW()
-        AND d.id IS NULL
-    `);
+    const candidateRes = await dbQuery(
+      `SELECT o.id FROM shopit_orders o
+       LEFT JOIN shopit_disputes d ON d.order_id = o.id AND d.status IN ('open', 'investigating')
+       WHERE o.status IN ('shipped', 'delivered')
+         AND o.auto_release_at IS NOT NULL
+         AND o.auto_release_at <= NOW()
+         AND d.id IS NULL
+       ORDER BY o.auto_release_at ASC
+       LIMIT $1`,
+      [safeLimit]
+    );
 
     const releasedIds: string[] = [];
 
@@ -1116,10 +1128,10 @@ export async function processEscrowAutoRelease(): Promise<{ releasedCount: numbe
   }
 }
 
-// POST /api/escrow/auto-release - Strictly guarded by Cron Secret or Admin Session (C2 & C8)
-router.post('/escrow/auto-release', requireCronOrAdmin, async (_req, res) => {
-  const result = await processEscrowAutoRelease();
-  const unshipped = await processUnshippedOrders();
+// POST /api/escrow/auto-release - Strictly Admin-authenticated manual trigger (cron runs via /api/cron/daily)
+router.post('/escrow/auto-release', requireAdmin, async (_req, res) => {
+  const result = await processEscrowAutoRelease(50);
+  const unshipped = await processUnshippedOrders(50);
   return res.json({
     status: true,
     message: `Escrow scan completed. ${result.releasedCount} orders auto-released; ${unshipped.remindedCount} unshipped reminders; ${unshipped.refundedCount} Day-5 auto-refunds.`,
@@ -1134,6 +1146,7 @@ router.post('/escrow/auto-release', requireCronOrAdmin, async (_req, res) => {
 
 router.get('/wallet', requirePaymentsEnabled, requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
+    await runLazyPendingOrderExpiry();
     const user = req.user!;
     const requestedSellerId = req.query.sellerId ? String(req.query.sellerId).trim() : (user.sellerId || user.userId);
 
@@ -1215,6 +1228,7 @@ router.get('/wallet', requirePaymentsEnabled, requireAuth, async (req: Authentic
 // POST /api/wallet/payout-account - Add payout bank account with OTP verification, Flutterwave name resolve, and 24-hr cooling
 router.post('/wallet/payout-account', requirePaymentsEnabled, requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
+    await runLazyPendingOrderExpiry();
     const user = req.user!;
     const { bankCode, bankName, accountNumber, accountName, otpCode } = req.body;
 

@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { getPool, withTransaction } from './postgres.js';
+import { deriveSubKey } from '../lib/secrets.js';
 
 export interface StoredOtpRecord {
   email: string;
@@ -19,32 +20,31 @@ const MAX_EMAIL_REQUESTS = 5; // 5 per email per 15 mins
 const MAX_DEVICE_REQUESTS = 10; // 10 per device per 15 mins
 const SIGNUP_PROOF_TTL_MS = 30 * 60 * 1000; // 30 minutes
 
-const IS_PROD = process.env.NODE_ENV === 'production' || Boolean(process.env.VERCEL);
-const ENV_OTP_SALT = (process.env.OTP_HASH_SALT || '').trim();
-if (IS_PROD && !ENV_OTP_SALT) {
-  console.error('[SECURITY CRITICAL] OTP_HASH_SALT environment variable is missing in production.');
-}
-// In non-production dev/test environments, generate a random per-process salt (never a hardcoded string)
-const EPHEMERAL_DEV_SALT = crypto.randomBytes(32).toString('hex');
-
-function getOtpSalt(): string {
-  if (ENV_OTP_SALT) return ENV_OTP_SALT;
-  if (IS_PROD) {
-    throw new Error('OTP_HASH_SALT must be configured in production.');
-  }
-  return EPHEMERAL_DEV_SALT;
-}
-
 export function hashOtp(code: string): string {
-  const salt = getOtpSalt();
-  return crypto.createHash('sha256').update(`${code.trim()}:${salt}`).digest('hex');
+  const perRecordSalt = crypto.randomBytes(16).toString('hex');
+  const otpKey = deriveSubKey('otp-hash', 32);
+  const digest = crypto.createHmac('sha256', otpKey).update(`${perRecordSalt}:${code.trim()}`).digest('hex');
+  return `${perRecordSalt}:${digest}`;
 }
 
 export function verifyOtpHash(enteredCode: string, storedHash: string): boolean {
   try {
-    const computed = hashOtp(enteredCode);
-    if (!storedHash || computed.length !== storedHash.length) return false;
-    return crypto.timingSafeEqual(Buffer.from(computed), Buffer.from(storedHash));
+    if (!storedHash || typeof storedHash !== 'string') return false;
+    const parts = storedHash.split(':');
+    if (parts.length !== 2) return false;
+    const [perRecordSalt, storedDigest] = parts;
+    if (!perRecordSalt || !storedDigest) return false;
+
+    const otpKey = deriveSubKey('otp-hash', 32);
+    const computedDigest = crypto
+      .createHmac('sha256', otpKey)
+      .update(`${perRecordSalt}:${enteredCode.trim()}`)
+      .digest('hex');
+
+    const computedBuf = Buffer.from(computedDigest, 'utf8');
+    const storedBuf = Buffer.from(storedDigest, 'utf8');
+    if (computedBuf.length !== storedBuf.length) return false;
+    return crypto.timingSafeEqual(computedBuf, storedBuf);
   } catch {
     return false;
   }
@@ -412,9 +412,10 @@ export async function verifyAndConsumeOtp(
 export async function issueSignupVerificationToken(email: string): Promise<string> {
   const cleanEmail = email.trim().toLowerCase();
   const rawToken = 'sproof_' + crypto.randomBytes(32).toString('hex');
+  const signupKey = deriveSubKey('signup-proof', 32);
   const tokenHash = crypto
-    .createHash('sha256')
-    .update(`${cleanEmail}:${rawToken}:${getOtpSalt()}`)
+    .createHmac('sha256', signupKey)
+    .update(`${cleanEmail}:${rawToken}`)
     .digest('hex');
   const expiresAt = Date.now() + SIGNUP_PROOF_TTL_MS;
 
@@ -435,9 +436,10 @@ export async function consumeSignupVerificationToken(email: string, rawToken: st
   const cleanEmail = email.trim().toLowerCase();
   if (!rawToken || typeof rawToken !== 'string') return false;
 
+  const signupKey = deriveSubKey('signup-proof', 32);
   const expectedHash = crypto
-    .createHash('sha256')
-    .update(`${cleanEmail}:${rawToken.trim()}:${getOtpSalt()}`)
+    .createHmac('sha256', signupKey)
+    .update(`${cleanEmail}:${rawToken.trim()}`)
     .digest('hex');
 
   return withTransaction(async client => {

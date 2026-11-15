@@ -1,3 +1,4 @@
+import './testEnv.js';
 import { query, withTransaction, runMigration } from '../api/db/postgres.js';
 import { commitPaidOrderTransaction, calculatePricingInKobo } from '../api/lib/payments.js';
 

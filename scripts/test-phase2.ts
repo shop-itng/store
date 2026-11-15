@@ -1,3 +1,4 @@
+import './testEnv.js';
 import http from 'http';
 import assert from 'assert';
 import { app } from '../api/index.js';
@@ -29,7 +30,6 @@ async function main() {
   process.env.FLW_SECRET_KEY = 'FLWSECK_TEST-mock-secret-phase2';
   process.env.FLW_PUBLIC_KEY = 'FLWPUBK_TEST-mock-public-phase2';
   process.env.FLW_WEBHOOK_SECRET_HASH = 'flw_webhook_hash_phase2_test';
-  process.env.CRON_SECRET = 'cron_secret_phase2_test';
   process.env.APP_URL = 'https://shop-itng-pied.vercel.app';
 
   const server = http.createServer(app);
@@ -569,7 +569,7 @@ async function main() {
       assert.strictEqual(Number(afterProd.rows[0].stock), stockBefore);
     });
 
-    await test('9b. 30-minute pending expiry restores reserved stock and rejects late payment with late_after_expiry', async () => {
+    await test('9b. 60-minute pending expiry restores reserved stock and rejects late payment with late_after_expiry', async () => {
       const prodSnap = await query('SELECT stock FROM shopit_products WHERE id = $1', [productId]);
       const stockBeforeInit = Number(prodSnap.rows[0].stock);
 
@@ -586,7 +586,7 @@ async function main() {
       const lateRef = initJson.data.reference;
       const lateOid = initJson.data.orderId;
 
-      // Move expires_at to the past to simulate 30 minutes passing
+      // Move expires_at to the past to simulate 60 minutes passing
       await query(`UPDATE shopit_orders SET expires_at = NOW() - INTERVAL '1 minute' WHERE id = $1`, [lateOid]);
       const expired = await expireStalePendingOrders();
       assert.ok(expired.orderIds.includes(lateOid));

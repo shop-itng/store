@@ -48,7 +48,6 @@ import {
   requireFinance,
   requirePaymentsEnabled,
   requirePayoutsEnabled,
-  requireCronOrAdmin,
   requireOwnershipOrAdmin,
   optionalAuth,
   extractToken,
@@ -64,11 +63,17 @@ import {
   sendAdminAlert as dispatchAdminAlert,
   commitPaidOrderTransaction,
   expireStalePendingOrders,
+  runLazyPendingOrderExpiry,
   processUnshippedOrders,
+  runDailyReconciliationCheck,
   restoreOrderStockInTx,
 } from './lib/payments.js';
+import { validateAppSecret, deriveSubKey } from './lib/secrets.js';
 import { getKycProvider } from './lib/kycProvider.js';
 import marketplaceRouter, { processEscrowAutoRelease } from './routes/marketplace.js';
+
+// Fail-closed startup guard: refuse to boot unless APP_SECRET is valid (64+ hex chars)
+validateAppSecret();
 
 export const sendAdminAlert = dispatchAdminAlert;
 
@@ -200,50 +205,9 @@ function getFlwPublicKey(): string {
   return (process.env.FLW_PUBLIC_KEY || process.env.VITE_FLW_PUBLIC_KEY || '').trim().replace(/^["']|["']$/g, '');
 }
 
-const ENV_NIN_HASH_SALT = (process.env.NIN_HASH_SALT || '').trim();
-const ENV_DOC_TOKEN_SECRET = (process.env.DOC_TOKEN_SECRET || '').trim();
-const DEV_EPHEMERAL_NIN_SALT = crypto.randomBytes(32).toString('hex');
-const DEV_EPHEMERAL_DOC_SECRET = crypto.randomBytes(32).toString('hex');
-
-if (IS_PROD && (!ENV_NIN_HASH_SALT || !ENV_DOC_TOKEN_SECRET)) {
-  console.error('[SECURITY CRITICAL] NIN_HASH_SALT or DOC_TOKEN_SECRET missing in production.');
-}
-
-function getNinSalt(): string {
-  if (ENV_NIN_HASH_SALT) return ENV_NIN_HASH_SALT;
-  if (IS_PROD) throw new Error('NIN_HASH_SALT must be configured in production.');
-  return DEV_EPHEMERAL_NIN_SALT;
-}
-
-function getDocSecret(): string {
-  if (ENV_DOC_TOKEN_SECRET) return ENV_DOC_TOKEN_SECRET;
-  if (IS_PROD) throw new Error('DOC_TOKEN_SECRET must be configured in production.');
-  return DEV_EPHEMERAL_DOC_SECRET;
-}
-
 function hashNin(nin: string): string {
-  return crypto.createHmac('sha256', getNinSalt()).update(nin.trim()).digest('hex');
-}
-
-function generateDocToken(docId: string, expiresInMs = 60 * 60 * 1000): { token: string; expires: number; url: string } {
-  const expires = Date.now() + expiresInMs;
-  const signature = crypto.createHmac('sha256', getDocSecret()).update(`${docId}:${expires}`).digest('hex');
-  const token = `${signature}.${expires}`;
-  return { token, expires, url: `/api/verification/document/${encodeURIComponent(docId)}?token=${encodeURIComponent(token)}` };
-}
-
-function verifyDocToken(docId: string, token: string): boolean {
-  try {
-    const [sig, expStr] = token.split('.');
-    const expires = Number(expStr);
-    if (!sig || !expires || Date.now() > expires) return false;
-    const expectedSig = crypto.createHmac('sha256', getDocSecret()).update(`${docId}:${expires}`).digest('hex');
-    const sigBuf = Buffer.from(sig, 'utf8');
-    const expBuf = Buffer.from(expectedSig, 'utf8');
-    return sigBuf.length === expBuf.length && crypto.timingSafeEqual(sigBuf, expBuf);
-  } catch {
-    return false;
-  }
+  const ninKey = deriveSubKey('nin-hash', 32);
+  return crypto.createHmac('sha256', ninKey).update(nin.trim()).digest('hex');
 }
 
 const VALID_EMAIL_TEMPLATES = new Set<EmailTemplateKey>([
@@ -1398,6 +1362,9 @@ router.post('/payments/initialize', requirePaymentsEnabled, requireAuth, async (
       return res.status(400).json({ status: false, message: 'Valid cart items are required.' });
     }
 
+    // Lazily expire stale 60-minute pending orders & restore reserved stock before inventory checks
+    await runLazyPendingOrderExpiry();
+
     const initializedOrder = await withTransaction(async client => {
       const resolvedItems: any[] = [];
       const sellerGroups = new Map<string, { deliveryFeeKobo: number }>();
@@ -1529,7 +1496,7 @@ router.post('/payments/initialize', requirePaymentsEnabled, requireAuth, async (
           $7, $8, $9, $10,
           $11, $12, $13, $14, $15,
           $16, $17, $18, $19,
-          $20, false, 'pending_payment', true, NOW() + INTERVAL '30 minutes',
+          $20, false, 'pending_payment', true, NOW() + INTERVAL '60 minutes',
           $21, $22, $23, NOW(), NOW()
         )`,
         [
@@ -2090,6 +2057,7 @@ router.post('/payments/transfer', requirePayoutsEnabled, requireAuth, async (req
   }
 
   try {
+    await runLazyPendingOrderExpiry();
     // 1. Verify OTP atomically via SELECT ... FOR UPDATE (zero test code backdoors)
     const otpCheck = await verifyAndConsumeOtp(user.email, 'withdrawal', String(otpCode).trim());
     if (!otpCheck.success) {
@@ -2841,8 +2809,8 @@ router.post(
       const selfieDocId = `doc_selfie_${resolvedSellerId}_${Date.now()}`;
       const guardianDocId = under18 ? `doc_guardian_${resolvedSellerId}_${Date.now()}` : undefined;
 
-      const idDocSigned = generateDocToken(idDocId);
-      const selfieDocSigned = generateDocToken(selfieDocId);
+      const idDocUrl = `/api/verification/document/${encodeURIComponent(idDocId)}`;
+      const selfieDocUrl = `/api/verification/document/${encodeURIComponent(selfieDocId)}`;
 
       const apiResult = await verifyWithNigerianIdentityApi(cleanNin, fullName, dateOfBirth);
       const finalStatus: 'pending' | 'verified' =
@@ -2893,8 +2861,8 @@ router.post(
             fullNinLast4,
             fullNinLast4,
             ninDigest,
-            finalStatus === 'pending' ? idDocSigned.url : '[Deleted after automated verification]',
-            finalStatus === 'pending' ? selfieDocSigned.url : '[Deleted after automated verification]',
+            finalStatus === 'pending' ? idDocUrl : '[Deleted after automated verification]',
+            finalStatus === 'pending' ? selfieDocUrl : '[Deleted after automated verification]',
             Boolean(under18),
             guardianFullName ? String(guardianFullName).trim() : null,
             guardianNin ? String(guardianNin).slice(-4) : null,
@@ -3148,29 +3116,28 @@ router.post('/verification/admin/review', requireModerator, async (req: Authenti
   }
 });
 
-router.get('/verification/document/:docId', requireAuth, async (req: AuthenticatedRequest, res) => {
+router.get('/verification/document/:docId', requireModerator, async (req: AuthenticatedRequest, res) => {
   try {
     const user = req.user!;
     const { docId } = req.params;
-    const token = String(req.query.token || '');
 
-    if (!token || !verifyDocToken(docId, token)) {
-      return res.status(403).json({ status: false, message: 'Access denied: invalid or expired document token.' });
-    }
-
-    const docRes = await dbQuery('SELECT seller_id, encrypted_data FROM shopit_verification_documents WHERE id = $1', [docId]);
+    const docRes = await dbQuery('SELECT seller_id, doc_type, encrypted_data FROM shopit_verification_documents WHERE id = $1', [docId]);
     if (docRes.rows.length === 0) {
       return res.status(404).json({ status: false, message: 'Requested identity document was not found or was purged.' });
     }
 
     const doc = docRes.rows[0];
-    const isOwner = doc.seller_id === user.userId || (user.sellerId && doc.seller_id === user.sellerId);
-    const isModeratorAdmin = user.role === 'admin' && ['superadmin', 'moderator'].includes(user.subRole || '');
-    if (!isOwner && !isModeratorAdmin) {
-      return res.status(403).json({ status: false, message: 'Forbidden: only the document owner or a Trust & Safety moderator may view identity documents.' });
-    }
-
     const plainData = decryptSensitiveData(doc.encrypted_data);
+
+    await logAuditEvent({
+      action: 'KYC_DOCUMENT_ACCESSED',
+      actor: { id: user.userId, email: user.email, role: user.role },
+      target: { type: 'verification_document', id: docId },
+      details: { sellerId: doc.seller_id, docType: doc.doc_type },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
+
     if (plainData.startsWith('data:image/')) {
       const matches = plainData.match(/^data:(image\/[a-zA-Z0-9+.-]+);base64,(.+)$/);
       if (matches) {
@@ -3180,6 +3147,7 @@ router.get('/verification/document/:docId', requireAuth, async (req: Authenticat
       }
     }
 
+    res.setHeader('Cache-Control', 'no-store');
     return res.json({ status: true, docId, data: plainData });
   } catch (err: any) {
     return res.status(500).json({ status: false, message: 'Unable to retrieve document.' });
@@ -3226,25 +3194,34 @@ router.post(
 );
 
 // ============================================================================
-// CRON JOBS (Guarded by CRON_SECRET Bearer token or Admin Session)
+// DAILY CRON ENDPOINT (Public-safe, Idempotent, Rate-Limited, Batch-Limited)
 // ============================================================================
 
-// expireStalePendingOrders imported from ./lib/payments.js (30-min pending expiry + atomic stock restore)
+router.all('/cron/daily', async (req, res) => {
+  const rl = await checkAndRecordRateLimit(`cron_daily:${req.ip || 'unknown'}`, 30, 60 * 1000);
+  if (!rl.allowed) {
+    res.setHeader('Retry-After', String(rl.retryAfterSeconds || 60));
+    return res.status(429).json({ status: false, error: 'RATE_LIMITED', message: 'Too many cron triggers.' });
+  }
 
-router.all('/cron/escrow', requireCronOrAdmin, async (_req, res) => {
-  const result = await processEscrowAutoRelease();
-  const unshipped = await processUnshippedOrders();
-  return res.json({ status: true, ...result, unshipped });
-});
+  const expired = await expireStalePendingOrders(50);
+  const escrow = await processEscrowAutoRelease(50);
+  const unshipped = await processUnshippedOrders(50);
+  const reconciliation = await runDailyReconciliationCheck();
 
-router.all('/cron/unshipped', requireCronOrAdmin, async (_req, res) => {
-  const result = await processUnshippedOrders();
-  return res.json({ status: true, ...result });
-});
-
-router.all('/cron/expire-orders', requireCronOrAdmin, async (_req, res) => {
-  const result = await expireStalePendingOrders();
-  return res.json({ status: true, ...result });
+  return res.json({
+    status: true,
+    ok: true,
+    processed: {
+      expiredOrdersCount: expired.expiredCount,
+      escrowReleasedCount: escrow.releasedCount,
+      unshippedRemindedCount: unshipped.remindedCount,
+      unshippedRefundedCount: unshipped.refundedCount,
+      purgedDocsCount: expired.purgedDocsCount,
+      reconciliationOk: reconciliation.ok,
+    },
+    timestamp: new Date().toISOString(),
+  });
 });
 
 router.post('/coupons/validate', requireAuth, async (req: AuthenticatedRequest, res) => {

@@ -1019,7 +1019,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     localStorage.setItem('shopit_referral_rewards', JSON.stringify(referralRewards));
   }, [referralRewards]);
 
-  // Escrow auto-release is executed authoritatively on the server via /api/cron/escrow.
+  // Escrow auto-release is executed authoritatively on the server via /api/cron/daily.
 
   // NDPA Compliance: 30-day automated purge for verification ID photos and selfies
   useEffect(() => {

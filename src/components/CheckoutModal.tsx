@@ -316,7 +316,7 @@ export const CheckoutModal: React.FC = () => {
             </div>
 
             <p className="text-[11px] text-emerald-800 dark:text-emerald-300 leading-relaxed">
-              Your items are reserved for 30 minutes. Complete payment securely via Flutterwave (Card, Bank Transfer, USSD, or OPay where enabled), then return here or tap Check Payment Status.
+              Your items are reserved for 60 minutes. Complete payment securely via Flutterwave (Card, Bank Transfer, USSD, or OPay where enabled), then return here or tap Check Payment Status.
             </p>
 
             <div className="flex flex-wrap items-center gap-2 pt-1">
