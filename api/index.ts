@@ -1123,7 +1123,8 @@ router.get('/admin/metrics', requireModerator, async (_req: AuthenticatedRequest
           COUNT(*) as total_users,
           COUNT(CASE WHEN created_at >= $1 THEN 1 END) as new_today,
           COUNT(CASE WHEN role = 'seller' THEN 1 END) as total_sellers,
-          COUNT(CASE WHEN role = 'buyer' THEN 1 END) as total_buyers
+          COUNT(CASE WHEN role = 'buyer' THEN 1 END) as total_buyers,
+          COUNT(CASE WHEN is_banned = true THEN 1 END) as suspended_users
         FROM shopit_users`,
         [todayStart.toISOString()]
       ),
@@ -1141,6 +1142,7 @@ router.get('/admin/metrics', requireModerator, async (_req: AuthenticatedRequest
         newToday: parseInt(userStats.rows[0].new_today || '0', 10),
         totalSellers: parseInt(userStats.rows[0].total_sellers || '0', 10),
         totalBuyers: parseInt(userStats.rows[0].total_buyers || '0', 10),
+        suspendedUsers: parseInt(userStats.rows[0].suspended_users || '0', 10),
         verifiedSellers: parseInt(sellerStats.rows[0].verified_sellers || '0', 10),
         pendingVerifications: parseInt(verifStats.rows[0].pending_verifications || '0', 10),
       },
@@ -3197,7 +3199,7 @@ router.post(
 // DAILY CRON ENDPOINT (Public-safe, Idempotent, Rate-Limited, Batch-Limited)
 // ============================================================================
 
-router.all('/cron/daily', async (req, res) => {
+router.all(['/cron/daily', '/cron/escrow'], async (req, res) => {
   const rl = await checkAndRecordRateLimit(`cron_daily:${req.ip || 'unknown'}`, 30, 60 * 1000);
   if (!rl.allowed) {
     res.setHeader('Retry-After', String(rl.retryAfterSeconds || 60));

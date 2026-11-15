@@ -81,7 +81,7 @@ function isGuardedOrAllowed(route: DiscoveredRoute): { ok: boolean; reason: stri
   }
 
   // Public-safe, rate-limited, idempotent daily cron endpoint
-  if (route.path === '/cron/daily') {
+  if (route.path === '/cron/daily' || route.path === '/cron/escrow') {
     return { ok: true, reason: 'Public-safe rate-limited & idempotent daily cron endpoint' };
   }
 

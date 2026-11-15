@@ -262,11 +262,6 @@ export const AuthModal: React.FC = () => {
     }
 
     // Known device - complete login
-    if (matchedUser.role === 'admin') {
-      localStorage.setItem('shopit_admin_session_active', 'true');
-    } else {
-      localStorage.removeItem('shopit_admin_session_active');
-    }
     login({ ...matchedUser, sessionToken } as any);
     closeAuthModal();
     notify(`Welcome back, ${matchedUser.name}!`, 'success');
@@ -283,11 +278,6 @@ export const AuthModal: React.FC = () => {
     }
 
     recordKnownDevice(cleanEmail, getDeviceId());
-    if (pendingNewDeviceUser.role === 'admin') {
-      localStorage.setItem('shopit_admin_session_active', 'true');
-    } else {
-      localStorage.removeItem('shopit_admin_session_active');
-    }
     login(pendingNewDeviceUser);
     closeAuthModal();
     setPendingNewDeviceUser(null);

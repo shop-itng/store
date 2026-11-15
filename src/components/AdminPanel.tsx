@@ -107,8 +107,8 @@ export const AdminPanel: React.FC = () => {
     toggleProductStock,
     openChat,
     notify,
-    // Moderator Super-Powers & Account Governance
-    registeredUsers,
+    // Moderator Super-Powers & Account Governance (from server DB)
+    refreshAdminData,
     deleteUserAccount,
     banUserAccount,
     adminResetUserPassword,
@@ -218,6 +218,7 @@ export const AdminPanel: React.FC = () => {
   };
 
   const fetchPayments = async () => {
+    if (currentUser?.role !== 'admin') return;
     setLoadingPayments(true);
     try {
       const res = await fetch('/api/payments/payments', {
@@ -236,6 +237,7 @@ export const AdminPanel: React.FC = () => {
   };
 
   const fetchReports = async () => {
+    if (currentUser?.role !== 'admin') return;
     setLoadingReports(true);
     try {
       const res = await fetch('/api/reports', {
@@ -325,6 +327,7 @@ export const AdminPanel: React.FC = () => {
       newToday: number;
       totalSellers: number;
       totalBuyers: number;
+      suspendedUsers?: number;
       verifiedSellers: number;
       pendingVerifications: number;
     };
@@ -348,6 +351,7 @@ export const AdminPanel: React.FC = () => {
   const [loadingDbUsers, setLoadingDbUsers] = useState(false);
 
   const fetchMetrics = async () => {
+    if (currentUser?.role !== 'admin') return;
     setLoadingMetrics(true);
     try {
       const res = await fetch('/api/admin/metrics', {
@@ -366,6 +370,7 @@ export const AdminPanel: React.FC = () => {
   };
 
   const fetchDbUsers = async (page = 1, q = searchUserQuery, role = filterUserRole) => {
+    if (currentUser?.role !== 'admin') return;
     setLoadingDbUsers(true);
     try {
       const params = new URLSearchParams({
@@ -393,6 +398,7 @@ export const AdminPanel: React.FC = () => {
   };
 
   const fetchPendingGuardianPayouts = async () => {
+    if (currentUser?.role !== 'admin') return;
     setLoadingGuardianPayouts(true);
     try {
       const res = await fetch('/api/admin/payout-accounts/pending', {
@@ -465,13 +471,26 @@ export const AdminPanel: React.FC = () => {
   };
 
   React.useEffect(() => {
-    if (currentUser?.role !== 'admin') return;
+    if (currentUser?.role !== 'admin') {
+      setDbUsers([]);
+      setDbUsersTotal(0);
+      setMetricsData(null);
+      setPaymentsList([]);
+      setReportsList([]);
+      setPendingGuardianPayouts([]);
+      return;
+    }
+    refreshAdminData('admin');
     fetchPayments();
     fetchReports();
     fetchMetrics();
     fetchDbUsers(1);
     fetchPendingGuardianPayouts();
-  }, [currentUser?.role]);
+  }, [currentUser?.id, currentUser?.role, refreshAdminData]);
+
+  if (currentUser?.role !== 'admin') {
+    return null;
+  }
 
   // Calculate live financial figures
   const pendingOrders = orders.filter(o => o.status === 'paid' || o.status === 'packed' || o.status === 'shipped' || o.status === 'delivered');
@@ -512,7 +531,7 @@ export const AdminPanel: React.FC = () => {
               { id: 'moderator', label: 'NIN & Safety', icon: ShieldCheck, badge: verificationRequests.filter(r => r.status === 'pending').length },
               { id: 'payments', label: 'Payments & Gateway', icon: CreditCard, badge: undefined },
               { id: 'reports', label: 'Reports Queue', icon: Flag, badge: reportsList.filter(r => r.status === 'open').length },
-              { id: 'accounts', label: 'All Accounts & Powers', icon: Users, badge: registeredUsers.length },
+              { id: 'accounts', label: 'All Accounts & Powers', icon: Users, badge: metricsData?.metrics?.totalUsers ?? dbUsersTotal },
               { id: 'finance', label: 'Finance & Escrow', icon: DollarSign, badge: undefined },
               { id: 'support', label: 'Support & Disputes', icon: Headphones, badge: disputes.filter(d => d.status === 'open').length },
               { id: 'emergency', label: 'Broadcast & Killswitches', icon: Megaphone, badge: broadcastAnnouncement.isActive ? 1 : undefined },
@@ -525,6 +544,11 @@ export const AdminPanel: React.FC = () => {
                   onClick={() => {
                     setActiveTab(tab.id as AdminSubRole);
                     setAdminSubRole(tab.id as AdminSubRole);
+                    if (tab.id === 'moderator') refreshAdminData('admin');
+                    if (tab.id === 'accounts') {
+                      fetchDbUsers(dbUsersPage);
+                      fetchMetrics();
+                    }
                     if (tab.id === 'payments') fetchPayments();
                     if (tab.id === 'reports') fetchReports();
                     if (tab.id === 'finance') fetchPendingGuardianPayouts();
@@ -610,6 +634,7 @@ export const AdminPanel: React.FC = () => {
           <button
             type="button"
             onClick={() => {
+              refreshAdminData('admin');
               fetchMetrics();
               fetchDbUsers(dbUsersPage);
             }}
@@ -626,7 +651,7 @@ export const AdminPanel: React.FC = () => {
           <div className="bg-stone-50 rounded-xl p-3 border border-stone-200">
             <span className="text-[11px] font-bold text-stone-500 uppercase tracking-wider">Total Users</span>
             <p className="text-xl sm:text-2xl font-black text-stone-900 mt-0.5">
-              {metricsData ? metricsData.metrics.totalUsers : registeredUsers.length}
+              {metricsData ? metricsData.metrics.totalUsers : dbUsersTotal}
             </p>
             <span className="text-[10px] text-stone-500">In PostgreSQL</span>
           </div>
@@ -1009,7 +1034,7 @@ export const AdminPanel: React.FC = () => {
             <div className="p-4 bg-white rounded-xl border border-stone-200 shadow-2xs">
               <span className="text-xs text-stone-500 font-medium">Registered Accounts</span>
               <p className="text-xl sm:text-2xl font-bold font-mono-numbers text-stone-900 mt-1">
-                {metricsData ? metricsData.metrics.totalUsers : (dbUsersTotal || registeredUsers.length)}
+                {metricsData ? metricsData.metrics.totalUsers : dbUsersTotal}
               </p>
               <span className="text-[11px] text-stone-500">Live platform accounts in Neon</span>
             </div>
@@ -1017,7 +1042,7 @@ export const AdminPanel: React.FC = () => {
             <div className="p-4 bg-white rounded-xl border border-stone-200 shadow-2xs">
               <span className="text-xs text-stone-500 font-medium">Youth Sellers</span>
               <p className="text-xl sm:text-2xl font-bold font-mono-numbers text-[#f95700] mt-1">
-                {metricsData ? metricsData.metrics.totalSellers : registeredUsers.filter(u => u.role === 'seller').length}
+                {metricsData ? metricsData.metrics.totalSellers : dbUsers.filter(u => u.role === 'seller').length}
               </p>
               <span className="text-[11px] text-stone-500">Store owners</span>
             </div>
@@ -1025,7 +1050,7 @@ export const AdminPanel: React.FC = () => {
             <div className="p-4 bg-white rounded-xl border border-stone-200 shadow-2xs">
               <span className="text-xs text-stone-500 font-medium">Campus Shoppers</span>
               <p className="text-xl sm:text-2xl font-bold font-mono-numbers text-blue-600 mt-1">
-                {metricsData ? metricsData.metrics.totalBuyers : registeredUsers.filter(u => u.role === 'buyer').length}
+                {metricsData ? metricsData.metrics.totalBuyers : dbUsers.filter(u => u.role === 'buyer').length}
               </p>
               <span className="text-[11px] text-stone-500">Buyer profiles</span>
             </div>
@@ -1033,7 +1058,7 @@ export const AdminPanel: React.FC = () => {
             <div className="p-4 bg-white rounded-xl border border-stone-200 shadow-2xs">
               <span className="text-xs text-stone-500 font-medium">Suspended Accounts</span>
               <p className="text-xl sm:text-2xl font-bold font-mono-numbers text-red-600 mt-1">
-                {registeredUsers.filter(u => u.isBanned).length}
+                {metricsData?.metrics?.suspendedUsers ?? dbUsers.filter(u => u.isBanned).length}
               </p>
               <span className="text-[11px] text-red-500 font-medium">Moderator restricted</span>
             </div>

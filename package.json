@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "tsx server.ts",
+    "dev": "APP_SECRET=${APP_SECRET:-$(node -e \"process.stdout.write(require('crypto').randomBytes(32).toString('hex'))\")} tsx server.ts",
     "start": "tsx server.ts",
     "build": "vite build",
     "migrate": "tsx scripts/migrate.ts",

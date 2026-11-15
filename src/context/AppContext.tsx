@@ -47,7 +47,6 @@ import {
   INITIAL_SECURITY_PROFILES,
   INITIAL_CONVERSATIONS,
   INITIAL_MESSAGES,
-  INITIAL_VERIFICATION_REQUESTS,
   INITIAL_DISPUTES,
   INITIAL_ANTI_BYPASS_FLAGS,
   INITIAL_SAFE_SPOTS,
@@ -272,6 +271,7 @@ interface AppContextType {
 
   // Moderator Super-Powers & Account Governance
   registeredUsers: User[];
+  refreshAdminData: (roleOverride?: UserRole) => Promise<void>;
   deleteUserAccount: (userId: string) => boolean;
   banUserAccount: (userId: string, isBanned: boolean, reason?: string) => void;
   adminResetUserPassword: (userId: string, newPass: string) => boolean;
@@ -340,59 +340,8 @@ interface AppContextType {
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  // One-time fix: Clear forced automatic moderator session so public visitors are not logged in as admin
-  if (typeof window !== 'undefined' && !localStorage.getItem('shopit_fix_auto_moderator_login_v2')) {
-    localStorage.removeItem('shopit_current_user');
-    localStorage.removeItem('shopit_admin_session_active');
-    localStorage.setItem('shopit_fix_auto_moderator_login_v2', 'true');
-  }
-
-  // Automatic Database Purge Migration:
-  // Completely wipes all sellers, products, businesses, orders, chats, and accounts, retaining ONLY moderator Adeyinka Joseph in registered users.
-  if (typeof window !== 'undefined' && !localStorage.getItem('shopit_db_purged_moderator_only_v4')) {
-    localStorage.setItem('shopit_sellers', '[]');
-    localStorage.setItem('shopit_products_ready_made', '[]');
-    localStorage.removeItem('shopit_products');
-    localStorage.setItem('shopit_orders', '[]');
-    localStorage.setItem('shopit_conversations', '[]');
-    localStorage.setItem('shopit_messages', '{}');
-    localStorage.setItem('shopit_wallets', '{}');
-    localStorage.setItem('shopit_cart', '[]');
-    localStorage.setItem('shopit_wishlist', '[]');
-    localStorage.setItem('shopit_ledger_entries_v5', '[]');
-    localStorage.setItem('shopit_payment_webhooks_v5', '[]');
-    localStorage.setItem('shopit_disputes', '[]');
-    localStorage.setItem('shopit_verification_requests', '[]');
-    localStorage.setItem('shopit_anti_bypass_flags', '[]');
-    localStorage.setItem('shopit_commissions', '[]');
-    localStorage.setItem('shopit_campus_drops', '[]');
-    localStorage.setItem('shopit_style_posts', '[]');
-    localStorage.setItem('shopit_db_purged_moderator_only_v4', 'true');
-  }
-
-  // Persistence helpers: Public visitors start as guest (null), NEVER forced to moderator!
-  const [currentUser, setCurrentUser] = useState<User | null>(() => {
-    try {
-      const saved = localStorage.getItem('shopit_current_user');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (parsed && typeof parsed === 'object' && parsed.id && parsed.email) {
-          const isAdmin = parsed.role === 'admin';
-          if (isAdmin) {
-            const hasExplicitAdminSession = localStorage.getItem('shopit_admin_session_active') === 'true';
-            if (hasExplicitAdminSession) {
-              return parsed;
-            }
-            // Clear auto-assigned or stale admin session without explicit credentials login
-            localStorage.removeItem('shopit_current_user');
-            return null;
-          }
-          return parsed;
-        }
-      }
-    } catch {}
-    return null;
-  });
+  // User identity is hydrated strictly from server DB (/api/auth/me), never from localStorage.
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
 
   const [products, setProducts] = useState<Product[]>(() => {
     try {
@@ -468,10 +417,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     amount: number;
   } | null>(null);
 
-  const [securityProfiles, setSecurityProfiles] = useState<Record<string, SecurityProfile>>(() => {
-    const saved = localStorage.getItem('shopit_security_profiles');
-    return saved ? JSON.parse(saved) : INITIAL_SECURITY_PROFILES;
-  });
+  const [securityProfiles, setSecurityProfiles] = useState<Record<string, SecurityProfile>>(INITIAL_SECURITY_PROFILES);
 
   const [lowDataMode, setLowDataMode] = useState<boolean>(() => {
     return localStorage.getItem('shopit_low_data') === 'true';
@@ -693,12 +639,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   });
   const [activeConversationId, setActiveConversationId] = useState<string | null>('conv_1');
 
-  // Phase 3: Admin & Moderation States
+  // Phase 3: Admin & Moderation States (populated strictly from server DB for admins)
   const [adminSubRole, setAdminSubRole] = useState<AdminSubRole>('moderator');
-  const [verificationRequests, setVerificationRequests] = useState<SellerVerificationRequest[]>(() => {
-    const saved = localStorage.getItem('shopit_verification_requests');
-    return saved ? JSON.parse(saved) : INITIAL_VERIFICATION_REQUESTS;
-  });
+  const [verificationRequests, setVerificationRequests] = useState<SellerVerificationRequest[]>([]);
   const [disputes, setDisputes] = useState<DisputeTicket[]>(() => {
     const saved = localStorage.getItem('shopit_disputes');
     return saved ? JSON.parse(saved) : INITIAL_DISPUTES;
@@ -712,19 +655,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return saved ? JSON.parse(saved) : DEFAULT_FEE_SETTINGS;
   });
 
-  // Registered users repository (buyers, sellers, and system accounts)
-  const [registeredUsers, setRegisteredUsers] = useState<User[]>(() => {
-    try {
-      const saved = localStorage.getItem('shopit_registered_users');
-      if (saved) {
-        const parsed: User[] = JSON.parse(saved);
-        if (Array.isArray(parsed)) {
-          return parsed;
-        }
-      }
-    } catch {}
-    return [];
-  });
+  // Registered users repository (loaded exclusively from server database for admins)
+  const [registeredUsers, setRegisteredUsers] = useState<User[]>([]);
 
   // Site-wide Broadcast, Platform Killswitches & Audit Trail
   const [broadcastAnnouncement, setBroadcastAnnouncement] = useState<BroadcastAnnouncement>(() => {
@@ -804,29 +736,70 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Notifications
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
 
-  // Sync state to LocalStorage
+  // Hydrate authenticated user strictly from server session (/api/auth/me) on initial mount
   useEffect(() => {
-    if (currentUser) {
-      localStorage.setItem('shopit_current_user', JSON.stringify(currentUser));
-    } else {
-      localStorage.removeItem('shopit_current_user');
-      localStorage.removeItem('shopit_admin_session_active');
-    }
-  }, [currentUser]);
+    let active = true;
+    fetch('/api/auth/me', { headers: getAuthHeaders(), credentials: 'include' })
+      .then(async res => {
+        if (!active) return;
+        if (res.status === 401) {
+          localStorage.removeItem('shopit_session_token');
+          setCurrentUser(null);
+          return;
+        }
+        if (!res.ok) return;
+        const data = await res.json();
+        if (active && data.status && data.user) {
+          setCurrentUser(data.user);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, []);
 
-  // Neon PostgreSQL Single Source of Truth: Fetch products, sellers, and (for admins) verification queue and accounts
+  // Admin-only data loader: non-admins never request admin endpoints
+  const refreshAdminData = useCallback(
+    async (roleOverride?: UserRole) => {
+      const effectiveRole = roleOverride ?? currentUser?.role;
+      if (effectiveRole !== 'admin') {
+        setRegisteredUsers([]);
+        setVerificationRequests([]);
+        return;
+      }
+      try {
+        const [verifRes, usersRes] = await Promise.all([
+          fetch('/api/verification/admin/queue', { headers: getAuthHeaders(), credentials: 'include' }).catch(() => null),
+          fetch('/api/admin/users?limit=100', { headers: getAuthHeaders(), credentials: 'include' }).catch(() => null),
+        ]);
+
+        if (verifRes && verifRes.ok) {
+          const verifData = await verifRes.json();
+          if (verifData.status && Array.isArray(verifData.queue)) {
+            setVerificationRequests(verifData.queue);
+          }
+        }
+
+        if (usersRes && usersRes.ok) {
+          const usersData = await usersRes.json();
+          if (usersData.status && Array.isArray(usersData.users)) {
+            setRegisteredUsers(usersData.users);
+          }
+        }
+      } catch (err: any) {
+        console.warn('[Admin Sync Warning]:', err.message);
+      }
+    },
+    [currentUser?.role]
+  );
+
+  // PostgreSQL Single Source of Truth: Fetch public marketplace products/sellers and (for admins only) admin data
   const fetchMarketplaceData = useCallback(async () => {
     try {
-      const isAdminUser = currentUser?.role === 'admin';
-      const [prodRes, sellRes, verifRes, usersRes] = await Promise.all([
+      const [prodRes, sellRes] = await Promise.all([
         fetch('/api/products?limit=100', { credentials: 'include' }).catch(() => null),
         fetch('/api/sellers', { credentials: 'include' }).catch(() => null),
-        isAdminUser
-          ? fetch('/api/verification/admin/queue', { headers: getAuthHeaders(), credentials: 'include' }).catch(() => null)
-          : Promise.resolve(null),
-        isAdminUser
-          ? fetch('/api/admin/users?limit=100', { headers: getAuthHeaders(), credentials: 'include' }).catch(() => null)
-          : Promise.resolve(null),
       ]);
 
       if (prodRes && prodRes.ok) {
@@ -843,27 +816,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
       }
 
-      if (verifRes && verifRes.ok) {
-        const verifData = await verifRes.json();
-        if (verifData.status && Array.isArray(verifData.queue)) {
-          setVerificationRequests(verifData.queue);
-        }
-      }
-
-      if (usersRes && usersRes.ok) {
-        const usersData = await usersRes.json();
-        if (usersData.status && Array.isArray(usersData.users)) {
-          setRegisteredUsers(usersData.users);
-        }
-      }
+      await refreshAdminData();
     } catch (err: any) {
       console.warn('[PostgreSQL Sync Warning]:', err.message);
     }
-  }, [currentUser?.role]);
+  }, [refreshAdminData]);
 
   useEffect(() => {
     fetchMarketplaceData();
-  }, [fetchMarketplaceData]);
+  }, [fetchMarketplaceData, currentUser?.id, currentUser?.role]);
 
   const refreshFinancials = useCallback(async () => {
     if (!currentUser?.id) return;
@@ -948,7 +909,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       })
       .catch(() => {});
 
-    // One-time browser migration cleanup
+    // One-time browser migration cleanup for non-user legacy keys
     try {
       const hasLegacyStranded = Boolean(
         localStorage.getItem('shopit_products_ready_made') ||
@@ -965,7 +926,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         localStorage.removeItem('shopit_disputes');
         localStorage.removeItem('shopit_conversations');
         localStorage.removeItem('shopit_messages');
-        localStorage.removeItem('shopit_registered_users');
       }
     } catch {}
   }, [currentUser?.id, currentUser?.role, refreshFinancials]);
@@ -1071,7 +1031,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       scheduledDeletionDate: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(),
     };
     setCurrentUser(updatedUser);
-    localStorage.setItem('shopit_current_user', JSON.stringify(updatedUser));
   };
 
   const notify = (message: string, type: 'success' | 'info' | 'error' = 'info') => {
@@ -1121,6 +1080,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       sellerProfile: userData.sellerProfile,
     };
     setCurrentUser(newUser);
+    if (newUser.role === 'admin') {
+      void refreshAdminData('admin');
+    } else {
+      setRegisteredUsers([]);
+      setVerificationRequests([]);
+    }
     notify(`Welcome back, ${newUser.name}!`, 'success');
   };
 
@@ -1139,9 +1104,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setRegisteredUsers([]);
     setVerificationRequests([]);
     localStorage.removeItem('shopit_session_token');
-    localStorage.removeItem('shopit_current_user');
-    localStorage.removeItem('shopit_admin_session_active');
-    localStorage.removeItem('shopit_registered_users');
     setActiveView('catalog');
     notify('Logged out successfully', 'info');
   };
@@ -1323,7 +1285,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setWallets(prev => ({ ...prev, [serverUser.id]: newWallet }));
 
       setCurrentUser(serverUser);
-      localStorage.setItem('shopit_current_user', JSON.stringify(serverUser));
+      setRegisteredUsers([]);
+      setVerificationRequests([]);
 
       closeAuthModal();
       setActiveView('seller_dashboard');
@@ -1492,7 +1455,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (res.status === 401) {
         setCurrentUser(null);
         localStorage.removeItem('shopit_session_token');
-        localStorage.removeItem('shopit_current_user');
         return;
       }
       if (!res.ok) return;
@@ -1501,7 +1463,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const serverUser = data.user;
         setCurrentUser(prev => {
           if (!prev) return serverUser;
-          const merged = {
+          return {
             ...prev,
             ...serverUser,
             sellerProfile: serverUser.sellerProfile ? {
@@ -1509,10 +1471,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               ...serverUser.sellerProfile,
             } : prev.sellerProfile,
           };
-          try {
-            localStorage.setItem('shopit_current_user', JSON.stringify(merged));
-          } catch {}
-          return merged;
         });
 
         if (data.isVerifiedSeller !== undefined) {
@@ -2350,6 +2308,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     notes?: string,
     adminName?: string
   ) => {
+    if (currentUser?.role !== 'admin') {
+      notify('Administrator session required.', 'error');
+      return;
+    }
     const canonicalStatus: 'verified' | 'rejected' | 'needs_resubmission' =
       status === 'approved' ? 'verified' : status;
     const reviewer = adminName || currentUser?.name || 'Admin Moderator';
@@ -2462,9 +2424,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                   joinedDate: new Date().toISOString(),
                 },
           };
-          try {
-            localStorage.setItem('shopit_current_user', JSON.stringify(updated));
-          } catch {}
           return updated;
         }
         return prev;
@@ -2590,7 +2549,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setCurrentUser(prev => {
       if (!prev) return prev;
       if (prev.id === data.sellerId || prev.sellerProfile?.id === data.sellerId) {
-        const updated = {
+        return {
           ...prev,
           sellerProfile: prev.sellerProfile
             ? {
@@ -2601,10 +2560,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               }
             : undefined,
         };
-        try {
-          localStorage.setItem('shopit_current_user', JSON.stringify(updated));
-        } catch {}
-        return updated;
       }
       return prev;
     });
@@ -2806,6 +2761,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // ==========================================
 
   const deleteUserAccount = (userId: string): boolean => {
+    if (currentUser?.role !== 'admin') {
+      notify('Administrator session required.', 'error');
+      return false;
+    }
     if (userId === 'admin_adeyinka_joseph') {
       notify('Master Admin account cannot be deleted.', 'error');
       return false;
@@ -2819,9 +2778,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       method: 'DELETE',
       headers: getAuthHeaders(),
       credentials: 'include',
-    }).catch(err => {
-      console.warn('API delete user warning:', err.message);
-    });
+    })
+      .then(() => refreshAdminData('admin'))
+      .catch(err => {
+        console.warn('API delete user warning:', err.message);
+      });
 
     setRegisteredUsers(prev => prev.filter(u => u.id !== userId));
 
@@ -2837,7 +2798,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     if (currentUser?.id === userId) {
       setCurrentUser(null);
-      localStorage.removeItem('shopit_current_user');
       setActiveView('catalog');
     }
 
@@ -2847,6 +2807,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const banUserAccount = (userId: string, isBanned: boolean, reason?: string) => {
+    if (currentUser?.role !== 'admin') {
+      notify('Administrator session required.', 'error');
+      return;
+    }
     if (userId === 'admin_adeyinka_joseph') {
       notify('Master Admin account cannot be suspended.', 'error');
       return;
@@ -2858,9 +2822,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
       credentials: 'include',
       body: JSON.stringify({ isBanned, banReason: reason }),
-    }).catch(err => {
-      console.warn('API ban user warning:', err.message);
-    });
+    })
+      .then(() => refreshAdminData('admin'))
+      .catch(err => {
+        console.warn('API ban user warning:', err.message);
+      });
 
     setRegisteredUsers(prev => prev.map(u => u.id === userId ? { ...u, isBanned } : u));
 
@@ -2878,6 +2844,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const adminResetUserPassword = (userId: string, newPass: string): boolean => {
+    if (currentUser?.role !== 'admin') {
+      notify('Administrator session required.', 'error');
+      return false;
+    }
     if (!newPass || newPass.trim().length < 8) {
       notify('Password must be at least 8 characters.', 'error');
       return false;
@@ -2899,15 +2869,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const adminToggleSellerVerification = (sellerId: string, isVerified: boolean) => {
+    if (currentUser?.role !== 'admin') {
+      notify('Administrator session required.', 'error');
+      return;
+    }
     // Update in PostgreSQL on server
     fetch(`/api/admin/sellers/${encodeURIComponent(sellerId)}/verify`, {
       method: 'POST',
       headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
       credentials: 'include',
       body: JSON.stringify({ isVerified }),
-    }).catch(err => {
-      console.warn('API verify seller warning:', err.message);
-    });
+    })
+      .then(() => refreshAdminData('admin'))
+      .catch(err => {
+        console.warn('API verify seller warning:', err.message);
+      });
 
     setSellers(prev =>
       prev.map(s => {
@@ -2929,7 +2905,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setCurrentUser(prev => {
       if (!prev) return prev;
       if (prev.id === sellerId || prev.sellerProfile?.id === sellerId || (prev.email && prev.email.toLowerCase() === sellerId.toLowerCase())) {
-        const updated = {
+        return {
           ...prev,
           sellerProfile: prev.sellerProfile
             ? {
@@ -2958,10 +2934,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 joinedDate: new Date().toISOString(),
               },
         };
-        try {
-          localStorage.setItem('shopit_current_user', JSON.stringify(updated));
-        } catch {}
-        return updated;
       }
       return prev;
     });
@@ -3398,6 +3370,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const clearMarketplaceDatabase = () => {
+    if (currentUser?.role !== 'admin') return;
     fetch('/api/admin/users/wipe-non-admins', {
       method: 'POST',
       headers: getAuthHeaders(),
@@ -3526,6 +3499,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updateFeeSettings,
         // Moderator Super-Powers & Account Governance
         registeredUsers,
+        refreshAdminData,
         deleteUserAccount,
         banUserAccount,
         adminResetUserPassword,
