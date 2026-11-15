@@ -1,5 +1,5 @@
 export type UserRole = 'buyer' | 'seller' | 'admin';
-export type AdminSubRole = 'moderator' | 'accounts' | 'finance' | 'support' | 'emergency' | 'payments' | 'reports';
+export type AdminSubRole = 'activity' | 'moderator' | 'accounts' | 'finance' | 'support' | 'emergency' | 'payments' | 'reports';
 
 
 export type Campus =
@@ -676,7 +676,14 @@ export interface AdminAuditLog {
   id: string;
   action: string;
   targetId?: string;
+  targetType?: string;
+  actorId?: string;
+  actorEmail?: string;
+  actorRole?: string;
   details: string;
+  rawDetails?: Record<string, any>;
+  ipAddress?: string;
+  createdAt?: string;
   timestamp: string;
   moderatorName: string;
 }

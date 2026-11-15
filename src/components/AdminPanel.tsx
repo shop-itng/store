@@ -127,7 +127,12 @@ export const AdminPanel: React.FC = () => {
   const [isClearDbModalOpen, setIsClearDbModalOpen] = useState(false);
   const [clearDbConfirmText, setClearDbConfirmText] = useState('');
 
-  const [activeTab, setActiveTab] = useState<AdminSubRole>(adminSubRole || 'moderator');
+  const [activeTab, setActiveTab] = useState<AdminSubRole>(adminSubRole || 'activity');
+  useEffect(() => {
+    if (adminSubRole && adminSubRole !== activeTab) {
+      setActiveTab(adminSubRole);
+    }
+  }, [adminSubRole]);
   const [selectedVerificationDoc, setSelectedVerificationDoc] = useState<string | null>(null);
   const [inspectRequest, setInspectRequest] = useState<any | null>(null);
   const [rejectModalRequest, setRejectModalRequest] = useState<any | null>(null);
@@ -325,12 +330,18 @@ export const AdminPanel: React.FC = () => {
     metrics: {
       totalUsers: number;
       newToday: number;
+      newLast24Hours?: number;
       totalSellers: number;
       totalBuyers: number;
       suspendedUsers?: number;
       verifiedSellers: number;
       pendingVerifications: number;
+      totalActivityEvents?: number;
+      activityLast24Hours?: number;
+      totalOrders?: number;
+      totalProducts?: number;
     };
+    latestUsers?: any[];
     database: {
       neon: boolean;
       isPgMem?: boolean;
@@ -343,12 +354,35 @@ export const AdminPanel: React.FC = () => {
   } | null>(null);
   const [loadingMetrics, setLoadingMetrics] = useState(false);
 
-  // STEP 2 ITEM 5: Database Users with search and pagination
+  // STEP 2 ITEM 5: Database Users with search, role, new-24h filter and pagination
   const [dbUsers, setDbUsers] = useState<any[]>([]);
   const [dbUsersTotal, setDbUsersTotal] = useState(0);
   const [dbUsersPage, setDbUsersPage] = useState(1);
   const [dbUsersTotalPages, setDbUsersTotalPages] = useState(1);
   const [loadingDbUsers, setLoadingDbUsers] = useState(false);
+  const [onlyNewUsers, setOnlyNewUsers] = useState(false);
+
+  // Live Website Activity Feed state
+  const [activityEvents, setActivityEvents] = useState<any[]>([]);
+  const [activitySummary, setActivitySummary] = useState<{
+    totalEvents: number;
+    eventsLast24h: number;
+    newUsersLast24h: number;
+    securityAlertsCount: number;
+  }>({
+    totalEvents: 0,
+    eventsLast24h: 0,
+    newUsersLast24h: 0,
+    securityAlertsCount: 0,
+  });
+  const [activityTotal, setActivityTotal] = useState(0);
+  const [activityPage, setActivityPage] = useState(1);
+  const [activityTotalPages, setActivityTotalPages] = useState(1);
+  const [loadingActivity, setLoadingActivity] = useState(false);
+  const [activitySearch, setActivitySearch] = useState('');
+  const [activityCategory, setActivityCategory] = useState<'all' | 'users' | 'browsing' | 'orders_payments' | 'marketplace' | 'security'>('all');
+  const [activityActorEmail, setActivityActorEmail] = useState('');
+  const [livePolling, setLivePolling] = useState(true);
 
   const fetchMetrics = async () => {
     if (currentUser?.role !== 'admin') return;
@@ -369,7 +403,12 @@ export const AdminPanel: React.FC = () => {
     }
   };
 
-  const fetchDbUsers = async (page = 1, q = searchUserQuery, role = filterUserRole) => {
+  const fetchDbUsers = async (
+    page = 1,
+    q = searchUserQuery,
+    role = filterUserRole,
+    onlyNew = onlyNewUsers
+  ) => {
     if (currentUser?.role !== 'admin') return;
     setLoadingDbUsers(true);
     try {
@@ -378,6 +417,7 @@ export const AdminPanel: React.FC = () => {
         limit: '15',
         q: q.trim(),
         role: role,
+        ...(onlyNew ? { onlyNew: 'true' } : {}),
       });
       const res = await fetch(`/api/admin/users?${params.toString()}`, {
         headers: getAuthHeaders(),
@@ -394,6 +434,44 @@ export const AdminPanel: React.FC = () => {
       console.error('Failed to load database users:', e);
     } finally {
       setLoadingDbUsers(false);
+    }
+  };
+
+  const fetchActivityLogs = async (
+    page = 1,
+    opts?: { q?: string; category?: string; actorEmail?: string }
+  ) => {
+    if (currentUser?.role !== 'admin') return;
+    setLoadingActivity(true);
+    try {
+      const qVal = opts?.q !== undefined ? opts.q : activitySearch;
+      const catVal = opts?.category !== undefined ? opts.category : activityCategory;
+      const actorVal = opts?.actorEmail !== undefined ? opts.actorEmail : activityActorEmail;
+      const params = new URLSearchParams({
+        page: String(page),
+        limit: '50',
+        category: catVal || 'all',
+        ...(qVal.trim() ? { q: qVal.trim() } : {}),
+        ...(actorVal.trim() ? { actorEmail: actorVal.trim() } : {}),
+      });
+      const res = await fetch(`/api/admin/activity?${params.toString()}`, {
+        headers: getAuthHeaders(),
+        credentials: 'include',
+      });
+      const data = await res.json();
+      if (data.status) {
+        setActivityEvents(Array.isArray(data.events) ? data.events : []);
+        setActivityTotal(data.total || 0);
+        setActivityPage(data.page || 1);
+        setActivityTotalPages(data.totalPages || 1);
+        if (data.summary) {
+          setActivitySummary(data.summary);
+        }
+      }
+    } catch (e) {
+      console.error('Failed to load website activity:', e);
+    } finally {
+      setLoadingActivity(false);
     }
   };
 
@@ -478,6 +556,7 @@ export const AdminPanel: React.FC = () => {
       setPaymentsList([]);
       setReportsList([]);
       setPendingGuardianPayouts([]);
+      setActivityEvents([]);
       return;
     }
     refreshAdminData('admin');
@@ -485,8 +564,32 @@ export const AdminPanel: React.FC = () => {
     fetchReports();
     fetchMetrics();
     fetchDbUsers(1);
+    fetchActivityLogs(1);
     fetchPendingGuardianPayouts();
   }, [currentUser?.id, currentUser?.role, refreshAdminData]);
+
+  React.useEffect(() => {
+    if (currentUser?.role !== 'admin' || !livePolling) return;
+    const interval = setInterval(() => {
+      fetchMetrics();
+      fetchActivityLogs(activityPage);
+      fetchDbUsers(dbUsersPage);
+      refreshAdminData('admin');
+    }, 15000);
+    return () => clearInterval(interval);
+  }, [
+    currentUser?.role,
+    livePolling,
+    activityPage,
+    activitySearch,
+    activityCategory,
+    activityActorEmail,
+    dbUsersPage,
+    searchUserQuery,
+    filterUserRole,
+    onlyNewUsers,
+    refreshAdminData,
+  ]);
 
   if (currentUser?.role !== 'admin') {
     return null;
@@ -528,6 +631,7 @@ export const AdminPanel: React.FC = () => {
         <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
           <div className="flex items-center bg-stone-900 p-1.5 rounded-xl border border-stone-800 shrink-0 overflow-x-auto gap-1">
             {[
+              { id: 'activity', label: 'Live Activity & New Users', icon: Activity, badge: metricsData?.metrics?.newLast24Hours ?? 0 },
               { id: 'moderator', label: 'NIN & Safety', icon: ShieldCheck, badge: verificationRequests.filter(r => r.status === 'pending').length },
               { id: 'payments', label: 'Payments & Gateway', icon: CreditCard, badge: undefined },
               { id: 'reports', label: 'Reports Queue', icon: Flag, badge: reportsList.filter(r => r.status === 'open').length },
@@ -544,6 +648,10 @@ export const AdminPanel: React.FC = () => {
                   onClick={() => {
                     setActiveTab(tab.id as AdminSubRole);
                     setAdminSubRole(tab.id as AdminSubRole);
+                    if (tab.id === 'activity') {
+                      fetchMetrics();
+                      fetchActivityLogs(1);
+                    }
                     if (tab.id === 'moderator') refreshAdminData('admin');
                     if (tab.id === 'accounts') {
                       fetchDbUsers(dbUsersPage);
@@ -646,8 +754,8 @@ export const AdminPanel: React.FC = () => {
           </button>
         </div>
 
-        {/* 5 Core Metric Cards (Step 2 Item 6: total users, new today, sellers, verified sellers, pending verifications) */}
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+        {/* 6 Core Metric Cards */}
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
           <div className="bg-stone-50 rounded-xl p-3 border border-stone-200">
             <span className="text-[11px] font-bold text-stone-500 uppercase tracking-wider">Total Users</span>
             <p className="text-xl sm:text-2xl font-black text-stone-900 mt-0.5">
@@ -657,11 +765,12 @@ export const AdminPanel: React.FC = () => {
           </div>
 
           <div className="bg-emerald-50 rounded-xl p-3 border border-emerald-200">
-            <span className="text-[11px] font-bold text-emerald-700 uppercase tracking-wider">New Today</span>
+            <span className="text-[11px] font-bold text-emerald-700 uppercase tracking-wider">New (24h / Today)</span>
             <p className="text-xl sm:text-2xl font-black text-emerald-900 mt-0.5">
-              {metricsData ? metricsData.metrics.newToday : 0}
+              {metricsData ? (metricsData.metrics.newLast24Hours ?? metricsData.metrics.newToday) : 0}
+              <span className="text-xs font-bold text-emerald-700 ml-1">({metricsData ? metricsData.metrics.newToday : 0} today)</span>
             </p>
-            <span className="text-[10px] text-emerald-600">Registered today</span>
+            <span className="text-[10px] text-emerald-600">Sent to Admin automatically</span>
           </div>
 
           <div className="bg-amber-50 rounded-xl p-3 border border-amber-200">
@@ -680,15 +789,443 @@ export const AdminPanel: React.FC = () => {
             <span className="text-[10px] text-blue-700">NIN badge granted</span>
           </div>
 
-          <div className="bg-purple-50 rounded-xl p-3 border border-purple-200 col-span-2 sm:col-span-1">
+          <div className="bg-purple-50 rounded-xl p-3 border border-purple-200">
             <span className="text-[11px] font-bold text-purple-800 uppercase tracking-wider">Pending Verifications</span>
             <p className="text-xl sm:text-2xl font-black text-purple-900 mt-0.5">
               {metricsData ? metricsData.metrics.pendingVerifications : verificationRequests.filter(v => v.status === 'pending').length}
             </p>
             <span className="text-[10px] text-purple-700">Awaiting review</span>
           </div>
+
+          <div className="bg-orange-50 rounded-xl p-3 border border-orange-200">
+            <span className="text-[11px] font-bold text-[#FF6B00] uppercase tracking-wider">Site Events (24h)</span>
+            <p className="text-xl sm:text-2xl font-black text-stone-900 mt-0.5">
+              {metricsData?.metrics?.activityLast24Hours ?? activitySummary.eventsLast24h}
+            </p>
+            <span className="text-[10px] text-orange-800">
+              {metricsData?.metrics?.totalActivityEvents ?? activitySummary.totalEvents} total tracked
+            </span>
+          </div>
         </div>
       </div>
+
+      {/* ========================================================= */}
+      {/* 0. LIVE WEBSITE ACTIVITY & NEW USERS TAB                  */}
+      {/* ========================================================= */}
+      {activeTab === 'activity' && (
+        <div className="space-y-6">
+          {/* Control Strip */}
+          <div className="bg-white rounded-2xl border-2 border-stone-900 p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs">
+            <div>
+              <h3 className="text-base sm:text-lg font-black font-heading text-stone-900 flex items-center gap-2">
+                <Activity className="w-5 h-5 text-[#FF6B00]" />
+                <span>Live Website Activity &amp; New User Arrivals</span>
+              </h3>
+              <p className="text-xs text-stone-500 mt-0.5">
+                Every signup, login, search, product view, cart edit, payment, chat message, report, and admin action recorded in PostgreSQL.
+              </p>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => setLivePolling(p => !p)}
+                className={`px-3 py-1.5 rounded-xl text-xs font-black border transition-all flex items-center gap-1.5 cursor-pointer ${
+                  livePolling
+                    ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
+                    : 'bg-stone-100 text-stone-600 border-stone-300'
+                }`}
+              >
+                <Radio className={`w-3.5 h-3.5 ${livePolling ? 'animate-pulse text-emerald-600' : ''}`} />
+                <span>{livePolling ? 'Auto-Refresh ON (15s)' : 'Auto-Refresh PAUSED'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  fetchMetrics();
+                  fetchActivityLogs(activityPage);
+                  fetchDbUsers(dbUsersPage);
+                  refreshAdminData('admin');
+                }}
+                disabled={loadingActivity}
+                className="px-3 py-1.5 rounded-xl bg-stone-900 hover:bg-stone-800 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${loadingActivity ? 'animate-spin' : ''}`} />
+                <span>Refresh Feed</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Panel 1: Newest Registered Users Sent Automatically to Admin */}
+          <div className="bg-white rounded-2xl border-2 border-stone-900 overflow-hidden shadow-xs">
+            <div className="p-4 sm:p-5 border-b border-stone-200 bg-emerald-50/50 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <h4 className="text-sm sm:text-base font-black text-stone-900 flex items-center gap-2">
+                  <UserCheck className="w-4 h-4 text-emerald-700" />
+                  <span>Newest Registered Users (Auto-Delivered to Admin)</span>
+                  <span className="px-2 py-0.5 rounded-full bg-emerald-600 text-white text-[10px] font-black">
+                    {metricsData?.metrics?.newLast24Hours ?? 0} in 24h
+                  </span>
+                </h4>
+                <p className="text-xs text-stone-600 mt-0.5">
+                  All new buyers and sellers appear here the moment they sign up.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setOnlyNewUsers(true);
+                  setActiveTab('accounts');
+                  setAdminSubRole('accounts');
+                  fetchDbUsers(1, searchUserQuery, filterUserRole, true);
+                }}
+                className="px-3 py-1.5 rounded-xl bg-white border border-stone-300 hover:bg-stone-100 text-xs font-bold text-stone-800 flex items-center gap-1.5 cursor-pointer self-start sm:self-auto"
+              >
+                <span>Open Full New Users List</span>
+                <ArrowRight className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            {!metricsData?.latestUsers || metricsData.latestUsers.length === 0 ? (
+              <div className="p-8 text-center text-xs text-stone-500">
+                No registered users found yet.
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead>
+                    <tr className="border-b border-stone-200 bg-stone-100/70 text-stone-600 font-bold uppercase text-[10px] tracking-wider">
+                      <th className="py-2.5 px-4">User &amp; Email</th>
+                      <th className="py-2.5 px-3">Role / Shop</th>
+                      <th className="py-2.5 px-3">Age / Guardian</th>
+                      <th className="py-2.5 px-3">Verification</th>
+                      <th className="py-2.5 px-3">Signed Up</th>
+                      <th className="py-2.5 px-4 text-right">Inspect</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-stone-100">
+                    {metricsData.latestUsers.map((u: any) => (
+                      <tr key={u.id} className="hover:bg-stone-50/80">
+                        <td className="py-3 px-4">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="font-bold text-stone-900">{u.name}</span>
+                            {u.isNew && (
+                              <span className="px-1.5 py-0.5 rounded bg-emerald-600 text-white text-[9px] font-black uppercase">
+                                NEW
+                              </span>
+                            )}
+                            {u.isBanned && (
+                              <span className="px-1.5 py-0.5 rounded bg-red-100 text-red-800 text-[9px] font-black uppercase">
+                                BANNED
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-[11px] text-stone-500 font-mono">{u.email}</div>
+                        </td>
+                        <td className="py-3 px-3">
+                          <span
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-black uppercase ${
+                              u.role === 'admin'
+                                ? 'bg-black text-[#9FE870]'
+                                : u.role === 'seller'
+                                ? 'bg-[#FF6B00] text-white'
+                                : 'bg-blue-100 text-blue-800'
+                            }`}
+                          >
+                            {u.role}
+                          </span>
+                          {u.shopName && (
+                            <div className="text-[11px] text-stone-700 font-semibold mt-0.5">
+                              {u.shopName}{u.campus ? ` · ${u.campus}` : ''}
+                            </div>
+                          )}
+                        </td>
+                        <td className="py-3 px-3 text-[11px] text-stone-700">
+                          {u.age ? `${u.age} yrs` : '—'}
+                          {u.age && u.age < 18 && (
+                            <div className="text-[10px] text-amber-700 font-semibold">
+                              Minor{u.guardianName ? ` · Guardian: ${u.guardianName}` : ''}
+                            </div>
+                          )}
+                        </td>
+                        <td className="py-3 px-3">
+                          <span
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                              u.isVerifiedEmail ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'
+                            }`}
+                          >
+                            Email: {u.isVerifiedEmail ? 'Verified' : 'Pending'}
+                          </span>
+                        </td>
+                        <td className="py-3 px-3 text-[11px] text-stone-600 whitespace-nowrap">
+                          {u.createdAt ? new Date(u.createdAt).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—'}
+                        </td>
+                        <td className="py-3 px-4 text-right">
+                          <div className="flex items-center justify-end gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setActivityActorEmail(u.email);
+                                fetchActivityLogs(1, { actorEmail: u.email });
+                              }}
+                              className="px-2.5 py-1 rounded-lg border border-stone-300 bg-white hover:bg-stone-100 text-[11px] font-bold text-stone-800 cursor-pointer"
+                            >
+                              User Actions
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSearchUserQuery(u.email);
+                                setActiveTab('accounts');
+                                setAdminSubRole('accounts');
+                                fetchDbUsers(1, u.email, 'all', false);
+                              }}
+                              className="px-2.5 py-1 rounded-lg bg-stone-900 hover:bg-stone-800 text-white text-[11px] font-bold cursor-pointer"
+                            >
+                              Manage
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          {/* Panel 2: Everything Done On The Website By Anyone */}
+          <div className="bg-white rounded-2xl border-2 border-stone-900 overflow-hidden shadow-xs">
+            <div className="p-4 sm:p-5 border-b border-stone-200 bg-stone-50/70 space-y-3">
+              <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+                <div>
+                  <h4 className="text-sm sm:text-base font-black text-stone-900 flex items-center gap-2">
+                    <History className="w-4 h-4 text-[#FF6B00]" />
+                    <span>All Website Activity Stream (PostgreSQL)</span>
+                  </h4>
+                  <p className="text-xs text-stone-500 mt-0.5">
+                    Includes signed-in buyers, sellers, admins, and anonymous website visitors.
+                  </p>
+                </div>
+
+                {/* 4 KPI Summary Chips */}
+                <div className="flex flex-wrap items-center gap-2 text-[11px] font-bold">
+                  <span className="px-2.5 py-1 rounded-lg bg-stone-200/80 text-stone-800">
+                    Total: {activitySummary.totalEvents}
+                  </span>
+                  <span className="px-2.5 py-1 rounded-lg bg-orange-100 text-orange-900">
+                    24h Events: {activitySummary.eventsLast24h}
+                  </span>
+                  <span className="px-2.5 py-1 rounded-lg bg-emerald-100 text-emerald-900">
+                    24h Signups: {activitySummary.newUsersLast24h}
+                  </span>
+                  <span className="px-2.5 py-1 rounded-lg bg-red-100 text-red-900">
+                    Alerts (24h): {activitySummary.securityAlertsCount}
+                  </span>
+                </div>
+              </div>
+
+              {/* Search & Category Filters */}
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-2.5">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {([
+                    { id: 'all', label: 'All Activity' },
+                    { id: 'users', label: 'Signups & Auth' },
+                    { id: 'browsing', label: 'Browsing & Cart' },
+                    { id: 'orders_payments', label: 'Orders & Payments' },
+                    { id: 'marketplace', label: 'Marketplace & Chat' },
+                    { id: 'security', label: 'Security & Admin' },
+                  ] as const).map(cat => (
+                    <button
+                      key={cat.id}
+                      type="button"
+                      onClick={() => {
+                        setActivityCategory(cat.id);
+                        fetchActivityLogs(1, { category: cat.id });
+                      }}
+                      className={`px-2.5 py-1.5 rounded-xl text-[11px] font-bold border transition-all cursor-pointer ${
+                        activityCategory === cat.id
+                          ? 'bg-stone-900 text-white border-stone-900'
+                          : 'bg-white text-stone-700 border-stone-300 hover:bg-stone-100'
+                      }`}
+                    >
+                      {cat.label}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  {activityActorEmail && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActivityActorEmail('');
+                        fetchActivityLogs(1, { actorEmail: '' });
+                      }}
+                      className="px-2.5 py-1 rounded-xl bg-amber-100 text-amber-900 border border-amber-300 text-[11px] font-bold flex items-center gap-1 cursor-pointer"
+                    >
+                      <span>Actor: {activityActorEmail}</span>
+                      <X className="w-3 h-3" />
+                    </button>
+                  )}
+
+                  <div className="relative">
+                    <Search className="w-3.5 h-3.5 text-stone-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      value={activitySearch}
+                      onChange={e => {
+                        const val = e.target.value;
+                        setActivitySearch(val);
+                        fetchActivityLogs(1, { q: val });
+                      }}
+                      placeholder="Search action, email, item, query..."
+                      className="pl-8 pr-3 py-1.5 rounded-xl border border-stone-300 text-xs bg-white focus:outline-hidden focus:border-[#FF6B00] w-60"
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {loadingActivity && activityEvents.length === 0 ? (
+              <div className="p-10 text-center text-stone-500 text-xs">
+                <RefreshCw className="w-5 h-5 mx-auto mb-2 animate-spin text-stone-400" />
+                Loading website activity from PostgreSQL...
+              </div>
+            ) : activityEvents.length === 0 ? (
+              <div className="p-10 text-center text-stone-500 text-xs">
+                No activity events match the selected filters yet.
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead>
+                    <tr className="border-b border-stone-200 bg-stone-100/70 text-stone-600 font-bold uppercase text-[10px] tracking-wider">
+                      <th className="py-2.5 px-4">Time</th>
+                      <th className="py-2.5 px-3">Action</th>
+                      <th className="py-2.5 px-3">Who (Actor)</th>
+                      <th className="py-2.5 px-3">Target</th>
+                      <th className="py-2.5 px-3">Event Details</th>
+                      <th className="py-2.5 px-4 text-right">IP</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-stone-100">
+                    {activityEvents.map((ev: any) => {
+                      const actionStr = String(ev.action || '');
+                      const badgeStyle =
+                        actionStr === 'USER_REGISTERED'
+                          ? 'bg-emerald-600 text-white'
+                          : actionStr.includes('FAILED') || actionStr.includes('REJECTED') || actionStr.includes('BYPASS') || actionStr.includes('DELETED') || actionStr.includes('BANNED')
+                          ? 'bg-red-100 text-red-800 border border-red-200'
+                          : actionStr.includes('ADMIN_') || actionStr.includes('DISPUTE') || actionStr.includes('REPORT')
+                          ? 'bg-amber-100 text-amber-900 border border-amber-200'
+                          : actionStr.includes('ORDER') || actionStr.includes('PAYMENT') || actionStr.includes('WITHDRAWAL')
+                          ? 'bg-blue-100 text-blue-800 border border-blue-200'
+                          : 'bg-stone-100 text-stone-800 border border-stone-200';
+
+                      const detailPairs =
+                        ev.details && typeof ev.details === 'object'
+                          ? Object.entries(ev.details)
+                          : [];
+
+                      return (
+                        <tr key={ev.id} className="hover:bg-stone-50/70 align-top">
+                          <td className="py-3 px-4 text-[11px] text-stone-500 whitespace-nowrap font-mono">
+                            {ev.createdAt
+                              ? new Date(ev.createdAt).toLocaleString('en-GB', {
+                                  day: '2-digit',
+                                  month: 'short',
+                                  hour: '2-digit',
+                                  minute: '2-digit',
+                                  second: '2-digit',
+                                })
+                              : '—'}
+                          </td>
+                          <td className="py-3 px-3 whitespace-nowrap">
+                            <span className={`px-2 py-0.5 rounded text-[10px] font-black tracking-wide ${badgeStyle}`}>
+                              {actionStr}
+                            </span>
+                          </td>
+                          <td className="py-3 px-3">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (ev.actorEmail && ev.actorEmail !== 'guest@visitor') {
+                                  setActivityActorEmail(ev.actorEmail);
+                                  fetchActivityLogs(1, { actorEmail: ev.actorEmail });
+                                }
+                              }}
+                              className="text-left group cursor-pointer"
+                              title="Filter feed by this actor"
+                            >
+                              <div className="font-mono text-[11px] font-semibold text-stone-900 group-hover:text-[#FF6B00]">
+                                {ev.actorEmail || 'guest@visitor'}
+                              </div>
+                              <span className="inline-block px-1.5 py-0.2 rounded bg-stone-200 text-stone-700 text-[9px] font-bold uppercase mt-0.5">
+                                {ev.actorRole || 'visitor'}
+                              </span>
+                            </button>
+                          </td>
+                          <td className="py-3 px-3 text-[11px] text-stone-600 font-mono">
+                            {ev.targetType ? `${ev.targetType}${ev.targetId ? `:${ev.targetId}` : ''}` : '—'}
+                          </td>
+                          <td className="py-3 px-3 text-[11px] text-stone-700 max-w-md">
+                            {detailPairs.length === 0 ? (
+                              <span className="text-stone-400">—</span>
+                            ) : (
+                              <div className="flex flex-wrap gap-1.5">
+                                {detailPairs.map(([k, v]) => (
+                                  <span key={k} className="px-1.5 py-0.5 rounded bg-stone-100 border border-stone-200 text-[10px]">
+                                    <strong className="text-stone-600">{k}:</strong>{' '}
+                                    <span className="text-stone-900">
+                                      {typeof v === 'object' ? JSON.stringify(v) : String(v)}
+                                    </span>
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                          </td>
+                          <td className="py-3 px-4 text-right text-[10px] font-mono text-stone-400 whitespace-nowrap">
+                            {ev.ipAddress || '—'}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            <div className="p-3.5 sm:p-4 bg-stone-50 border-t border-stone-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-stone-600">
+              <div>
+                Showing <strong className="text-stone-900">{activityEvents.length}</strong> of{' '}
+                <strong className="text-stone-900">{activityTotal}</strong> logged website events
+                {activityTotalPages > 1 && ` (Page ${activityPage} of ${activityTotalPages})`}
+              </div>
+              <div className="flex items-center gap-1.5 self-end sm:self-auto">
+                <button
+                  type="button"
+                  disabled={activityPage <= 1 || loadingActivity}
+                  onClick={() => fetchActivityLogs(activityPage - 1)}
+                  className="px-3 py-1.5 rounded-xl border border-stone-300 bg-white font-bold text-stone-700 hover:bg-stone-100 disabled:opacity-40 cursor-pointer"
+                >
+                  Previous
+                </button>
+                <span className="px-2.5 py-1 font-mono text-stone-700 font-bold">
+                  {activityPage} / {activityTotalPages}
+                </span>
+                <button
+                  type="button"
+                  disabled={activityPage >= activityTotalPages || loadingActivity}
+                  onClick={() => fetchActivityLogs(activityPage + 1)}
+                  className="px-3 py-1.5 rounded-xl border border-stone-300 bg-white font-bold text-stone-700 hover:bg-stone-100 disabled:opacity-40 cursor-pointer"
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ========================================================= */}
       {/* 1. MODERATOR TAB                                         */}
@@ -1100,7 +1637,7 @@ export const AdminPanel: React.FC = () => {
                       key={role}
                       onClick={() => {
                         setFilterUserRole(role as any);
-                        fetchDbUsers(1, searchUserQuery, role as any);
+                        fetchDbUsers(1, searchUserQuery, role as any, onlyNewUsers);
                       }}
                       className={`px-2.5 py-1 rounded-lg capitalize transition-all cursor-pointer ${
                         filterUserRole === role
@@ -1112,6 +1649,22 @@ export const AdminPanel: React.FC = () => {
                     </button>
                   ))}
                 </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = !onlyNewUsers;
+                    setOnlyNewUsers(next);
+                    fetchDbUsers(1, searchUserQuery, filterUserRole, next);
+                  }}
+                  className={`px-2.5 py-1.5 rounded-xl text-xs font-black border transition-all cursor-pointer ${
+                    onlyNewUsers
+                      ? 'bg-emerald-600 text-white border-emerald-700'
+                      : 'bg-white text-emerald-800 border-emerald-300 hover:bg-emerald-50'
+                  }`}
+                >
+                  New (24h): {metricsData?.metrics?.newLast24Hours ?? 0}
+                </button>
 
                 <button
                   type="button"
@@ -1206,8 +1759,13 @@ export const AdminPanel: React.FC = () => {
                                 {user.name?.[0]?.toUpperCase() || 'U'}
                               </div>
                               <div>
-                                <div className="font-bold text-stone-900 flex items-center gap-1.5">
+                                <div className="font-bold text-stone-900 flex items-center gap-1.5 flex-wrap">
                                   <span>{user.name}</span>
+                                  {user.isNew && (
+                                    <span className="px-1.5 py-0.2 rounded text-[9px] font-black bg-emerald-600 text-white">
+                                      NEW (24h)
+                                    </span>
+                                  )}
                                   {user.isBanned && (
                                     <span className="px-1.5 py-0.2 rounded text-[9px] font-black bg-red-100 text-red-800 border border-red-200">
                                       BANNED
@@ -1215,6 +1773,14 @@ export const AdminPanel: React.FC = () => {
                                   )}
                                 </div>
                                 <div className="text-[11px] text-stone-500 font-mono">{user.email}</div>
+                                {(user.shopName || user.age) && (
+                                  <div className="text-[10px] text-stone-500 mt-0.5">
+                                    {user.shopName ? `Shop: ${user.shopName}` : ''}
+                                    {user.campus ? ` · ${user.campus}` : ''}
+                                    {user.age ? ` · Age ${user.age}` : ''}
+                                    {user.age && user.age < 18 && user.guardianName ? ` (Guardian: ${user.guardianName})` : ''}
+                                  </div>
+                                )}
                               </div>
                             </div>
                           </td>
@@ -1288,6 +1854,20 @@ export const AdminPanel: React.FC = () => {
                           {/* 7. Moderator Actions */}
                           <td className="py-3.5 px-4 text-right">
                             <div className="flex items-center justify-end gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setActivityActorEmail(user.email);
+                                  setActiveTab('activity');
+                                  setAdminSubRole('activity');
+                                  fetchActivityLogs(1, { actorEmail: user.email });
+                                }}
+                                className="px-2 py-1 rounded-lg border border-stone-300 text-stone-700 hover:bg-stone-100 text-[11px] font-bold transition-colors flex items-center gap-1 cursor-pointer"
+                                title="View everything this user has done on the website"
+                              >
+                                <Activity className="w-3 h-3" />
+                                <span>Activity</span>
+                              </button>
                               {user.role === 'seller' && (
                                 <button
                                   type="button"
@@ -2698,21 +3278,34 @@ export const AdminPanel: React.FC = () => {
             </div>
           </div>
 
-          {/* Live Moderator Security Audit Log */}
+          {/* Live Moderator Security Audit Log (PostgreSQL) */}
           <div className="bg-white rounded-2xl border border-stone-200 overflow-hidden shadow-xs">
-            <div className="p-4 sm:p-5 border-b border-stone-200 bg-stone-50/60 flex items-center justify-between">
+            <div className="p-4 sm:p-5 border-b border-stone-200 bg-stone-50/60 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
               <div>
                 <h3 className="text-base font-bold font-heading text-stone-900 flex items-center gap-2">
                   <History className="w-4 h-4 text-emerald-700" />
-                  <span>Moderator Action Security Audit Trail</span>
+                  <span>PostgreSQL Security &amp; Activity Audit Trail</span>
                 </h3>
                 <p className="text-xs text-stone-500 mt-0.5">
-                  Chronological, non-editable audit trail of high-power actions executed by system administrators.
+                  Chronological, persistent PostgreSQL audit trail of administrative overrides and platform events.
                 </p>
               </div>
-              <span className="text-xs font-mono font-semibold text-emerald-800 bg-emerald-50 px-2.5 py-1 rounded-lg border border-emerald-200">
-                {adminAuditLogs.length} Events Logged
-              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveTab('activity');
+                    setAdminSubRole('activity');
+                    fetchActivityLogs(1);
+                  }}
+                  className="text-xs font-bold text-stone-700 bg-white px-2.5 py-1 rounded-lg border border-stone-300 hover:bg-stone-100 cursor-pointer"
+                >
+                  Open Full Activity Feed
+                </button>
+                <span className="text-xs font-mono font-semibold text-emerald-800 bg-emerald-50 px-2.5 py-1 rounded-lg border border-emerald-200">
+                  {adminAuditLogs.length} Events Loaded
+                </span>
+              </div>
             </div>
 
             <div className="divide-y divide-stone-100 max-h-96 overflow-y-auto font-mono text-xs">
@@ -2721,9 +3314,9 @@ export const AdminPanel: React.FC = () => {
                   <div className="space-y-1">
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className={`px-2 py-0.5 rounded text-[10px] font-black ${
-                        log.action.includes('DELETED') || log.action.includes('SUSPENDED')
+                        log.action.includes('DELETED') || log.action.includes('SUSPENDED') || log.action.includes('FAILED') || log.action.includes('REJECTED')
                           ? 'bg-red-100 text-red-800'
-                          : log.action.includes('GRANTED') || log.action.includes('RELEASED')
+                          : log.action.includes('GRANTED') || log.action.includes('RELEASED') || log.action === 'USER_REGISTERED'
                           ? 'bg-emerald-100 text-emerald-800'
                           : 'bg-stone-200 text-stone-800'
                       }`}>
@@ -2735,12 +3328,15 @@ export const AdminPanel: React.FC = () => {
                     </div>
                     {log.targetId && (
                       <span className="text-[11px] text-stone-400 block font-mono">
-                        Target ID: {log.targetId}
+                        Target: {log.targetType ? `${log.targetType}:` : ''}{log.targetId}
                       </span>
                     )}
                   </div>
                   <div className="text-right shrink-0 text-[11px] text-stone-400 font-sans">
-                    <span className="text-stone-700 font-semibold block">{log.moderatorName}</span>
+                    <span className="text-stone-700 font-semibold block">
+                      {log.actorEmail || log.moderatorName}
+                      {log.actorRole ? ` (${log.actorRole})` : ''}
+                    </span>
                     <span>{log.timestamp}</span>
                   </div>
                 </div>

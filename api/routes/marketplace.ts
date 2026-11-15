@@ -461,6 +461,15 @@ router.put('/products/:id', requireAuth, async (req: AuthenticatedRequest, res: 
       [title, description, category, sellerPrice, serviceFee, displayPrice, stock, isSoldOut, images, id]
     );
 
+    await logAuditEvent({
+      action: 'PRODUCT_UPDATED',
+      actor: { id: user.userId, email: user.email, role: user.role },
+      target: { type: 'product', id },
+      details: { title, displayPriceNaira: displayPrice, stock, isSoldOut },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
+
     return res.json({ status: true, message: 'Product updated successfully.' });
   } catch (err: any) {
     return res.status(500).json({ status: false, message: err.message });
@@ -619,6 +628,15 @@ router.put('/sellers/:id', requireAuth, async (req: AuthenticatedRequest, res: R
       [shopName, bio, campus, location?.state, location?.city, location?.area, vacationMode, id]
     );
 
+    await logAuditEvent({
+      action: 'SELLER_PROFILE_UPDATED',
+      actor: { id: user.userId, email: user.email, role: user.role },
+      target: { type: 'seller', id },
+      details: { shopName, campus, vacationMode },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
+
     return res.json({ status: true, message: 'Seller profile updated.' });
   } catch (err: any) {
     return res.status(500).json({ status: false, message: err.message });
@@ -644,12 +662,24 @@ router.put('/cart', requireAuth, async (req: AuthenticatedRequest, res: Response
   try {
     const user = req.user!;
     const { items = [] } = req.body;
+    const sanitizedItems = Array.isArray(items) ? items.slice(0, 50) : [];
     await dbQuery(
       `INSERT INTO shopit_carts (user_id, items, updated_at)
        VALUES ($1, $2, NOW())
        ON CONFLICT (user_id) DO UPDATE SET items = $2, updated_at = NOW()`,
-      [user.userId, JSON.stringify(Array.isArray(items) ? items.slice(0, 50) : [])]
+      [user.userId, JSON.stringify(sanitizedItems)]
     );
+    await logAuditEvent({
+      action: 'CART_UPDATED',
+      actor: { id: user.userId, email: user.email, role: user.role },
+      target: { type: 'cart', id: user.userId },
+      details: {
+        itemCount: sanitizedItems.length,
+        productTitles: sanitizedItems.map((i: any) => i?.product?.title || i?.title || i?.productId).filter(Boolean).slice(0, 5),
+      },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
     return res.json({ status: true, message: 'Cart saved to database.' });
   } catch (err: any) {
     return res.status(500).json({ status: false, message: err.message });
@@ -671,12 +701,21 @@ router.put('/wishlist', requireAuth, async (req: AuthenticatedRequest, res: Resp
   try {
     const user = req.user!;
     const { productIds = [] } = req.body;
+    const sanitizedIds = Array.isArray(productIds) ? productIds.slice(0, 100) : [];
     await dbQuery(
       `INSERT INTO shopit_wishlists (user_id, product_ids, updated_at)
        VALUES ($1, $2, NOW())
        ON CONFLICT (user_id) DO UPDATE SET product_ids = $2, updated_at = NOW()`,
-      [user.userId, JSON.stringify(Array.isArray(productIds) ? productIds.slice(0, 100) : [])]
+      [user.userId, JSON.stringify(sanitizedIds)]
     );
+    await logAuditEvent({
+      action: 'WISHLIST_UPDATED',
+      actor: { id: user.userId, email: user.email, role: user.role },
+      target: { type: 'wishlist', id: user.userId },
+      details: { count: sanitizedIds.length, productIds: sanitizedIds.slice(0, 10) },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
     return res.json({ status: true, message: 'Wishlist saved to database.' });
   } catch (err: any) {
     return res.status(500).json({ status: false, message: err.message });
@@ -991,8 +1030,23 @@ router.patch('/orders/:id/status', requireAuth, async (req: AuthenticatedRequest
         }
       }
 
-      return { code: 200, body: { status: true, message: `Order status updated to ${newStatus}.` } };
+      return {
+        code: 200,
+        body: { status: true, message: `Order status updated to ${newStatus}.` },
+        audit: { prevStatus, newStatus, isReleasingEscrow },
+      };
     });
+
+    if (result.code === 200 && (result as any).audit) {
+      await logAuditEvent({
+        action: 'ORDER_STATUS_CHANGED',
+        actor: { id: user.userId, email: user.email, role: user.role },
+        target: { type: 'order', id },
+        details: (result as any).audit,
+        ip: req.ip,
+        userAgent: req.get('user-agent'),
+      });
+    }
 
     return res.status(result.code).json(result.body);
   } catch (err: any) {
@@ -1129,9 +1183,21 @@ export async function processEscrowAutoRelease(batchLimit = 50): Promise<{ relea
 }
 
 // POST /api/escrow/auto-release - Strictly Admin-authenticated manual trigger (cron runs via /api/cron/daily)
-router.post('/escrow/auto-release', requireAdmin, async (_req, res) => {
+router.post('/escrow/auto-release', requireAdmin, async (req: AuthenticatedRequest, res) => {
   const result = await processEscrowAutoRelease(50);
   const unshipped = await processUnshippedOrders(50);
+  await logAuditEvent({
+    action: 'ADMIN_ESCROW_SCAN_TRIGGERED',
+    actor: { id: req.user!.userId, email: req.user!.email, role: req.user!.role },
+    target: { type: 'escrow', id: 'batch_scan' },
+    details: {
+      releasedCount: result.releasedCount,
+      remindedCount: unshipped.remindedCount,
+      refundedCount: unshipped.refundedCount,
+    },
+    ip: req.ip,
+    userAgent: req.get('user-agent'),
+  });
   return res.json({
     status: true,
     message: `Escrow scan completed. ${result.releasedCount} orders auto-released; ${unshipped.remindedCount} unshipped reminders; ${unshipped.refundedCount} Day-5 auto-refunds.`,
@@ -1477,6 +1543,15 @@ router.post('/chat/conversations', requireAuth, async (req: AuthenticatedRequest
       [convId, orderId || null, productId || null, productTitle || null, productImage || null, user.userId, buyerMaskedId, sellerId, shopName]
     );
 
+    await logAuditEvent({
+      action: 'CHAT_CONVERSATION_STARTED',
+      actor: { id: user.userId, email: user.email, role: user.role },
+      target: { type: 'conversation', id: convId },
+      details: { sellerId, shopName, productTitle: productTitle || null, orderId: orderId || null },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
+
     return res.status(201).json({ status: true, conversation: insertRes.rows[0] });
   } catch (err: any) {
     return res.status(500).json({ status: false, message: err.message });
@@ -1573,6 +1648,20 @@ router.post('/chat/conversations/:id/messages', requireAuth, async (req: Authent
        WHERE id = $3`,
       [savedContent, nextViolations, id]
     );
+
+    await logAuditEvent({
+      action: isBypass ? 'CHAT_BYPASS_BLOCKED' : 'CHAT_MESSAGE_SENT',
+      actor: { id: user.userId, email: user.email, role: user.role },
+      target: { type: 'conversation', id },
+      details: {
+        senderRole: role,
+        isBlockedBypass: isBypass,
+        violationsCount: nextViolations,
+        preview: isBypass ? '[Off-platform contact blocked]' : savedContent.slice(0, 80),
+      },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
 
     return res.status(201).json({
       status: true,
@@ -1693,6 +1782,15 @@ router.post('/disputes', requireAuth, async (req: AuthenticatedRequest, res: Res
          VALUES ($1, $2, $3, 'disputed', $4, $5, NOW())`,
         [`osh_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`, orderId, order.status, user.userId, `Dispute filed: ${String(reason).slice(0, 120)}`]
       );
+    });
+
+    await logAuditEvent({
+      action: 'DISPUTE_OPENED',
+      actor: { id: user.userId, email: user.email, role: user.role },
+      target: { type: 'dispute', id: disputeId },
+      details: { orderId, sellerId, sellerShopName, reason: String(reason).trim().slice(0, 200), amountHeldInEscrow: parseFloat(order.grand_total) },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
     });
 
     return res.status(201).json({ status: true, disputeId, message: 'Dispute opened. Funds held securely in escrow.' });
@@ -1821,6 +1919,15 @@ router.post('/commissions', requireAuth, async (req: AuthenticatedRequest, res: 
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', NOW(), NOW())`,
       [commId, user.userId, user.name, sellerId, shopName, String(title).trim().slice(0, 200), String(description || '').slice(0, 1500), budgetKobo, koboToNaira(budgetKobo)]
     );
+
+    await logAuditEvent({
+      action: 'COMMISSION_REQUESTED',
+      actor: { id: user.userId, email: user.email, role: user.role },
+      target: { type: 'commission', id: commId },
+      details: { sellerId, shopName, title: String(title).trim().slice(0, 120), budgetNaira: koboToNaira(budgetKobo) },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
 
     return res.status(201).json({ status: true, commissionId: commId, message: 'Commission request submitted.' });
   } catch (err: any) {

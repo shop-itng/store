@@ -1242,6 +1242,185 @@ async function main() {
       assert.deepStrictEqual(missingJson, { status: false, message: 'Not found' });
     });
 
+    await test('CR8: All new users and website activity by anyone are sent to & visible in Admin endpoints', async () => {
+      // 1. Admin activity & audit endpoints enforce 401/403
+      for (const ep of [
+        { method: 'GET', path: '/api/admin/activity' },
+        { method: 'POST', path: '/api/admin/audit', body: { action: 'TEST_AUDIT', summary: 'test' } },
+      ]) {
+        const unauth = await origFetch(`${baseUrl}${ep.path}`, {
+          method: ep.method,
+          headers: ep.body ? { 'Content-Type': 'application/json' } : {},
+          body: ep.body ? JSON.stringify(ep.body) : undefined,
+        });
+        assert.strictEqual(unauth.status, 401, `${ep.method} ${ep.path} unauth must return 401`);
+
+        const buyerForbidden = await origFetch(`${baseUrl}${ep.path}`, {
+          method: ep.method,
+          headers: {
+            Authorization: `Bearer ${buyerToken}`,
+            ...(ep.body ? { 'Content-Type': 'application/json' } : {}),
+          },
+          body: ep.body ? JSON.stringify(ep.body) : undefined,
+        });
+        assert.strictEqual(buyerForbidden.status, 403, `${ep.method} ${ep.path} buyer must return 403`);
+      }
+
+      // 2. Register a brand-new user -> appears in admin notifications, metrics.latestUsers, admin/users?onlyNew=true, and admin/activity?category=users
+      const brandNewEmail = `cr8_newuser_${ts}@shopit.ng`;
+      const regRes = await origFetch(`${baseUrl}/api/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: brandNewEmail,
+          password: 'NewUserPass123!',
+          name: 'Brand New Artisan',
+          role: 'seller',
+          age: 20,
+          shopName: 'CR8 Fresh Beads',
+          campus: 'UNILAG (Akoka)',
+          signupVerificationToken: await issueSignupVerificationToken(brandNewEmail),
+        }),
+      });
+      assert.strictEqual(regRes.status, 201);
+
+      const adminNotifsRes = await origFetch(`${baseUrl}/api/notifications`, {
+        headers: { Authorization: `Bearer ${adminSess.token}` },
+      });
+      assert.strictEqual(adminNotifsRes.status, 200);
+      const adminNotifsJson: any = await adminNotifsRes.json();
+      assert.ok(
+        Array.isArray(adminNotifsJson.notifications) &&
+          adminNotifsJson.notifications.some(
+            (n: any) => String(n.message || '').includes(brandNewEmail) || String(n.title || '').includes('New')
+          ),
+        'Admin must receive persistent notification for new user signup'
+      );
+
+      const metricsRes = await origFetch(`${baseUrl}/api/admin/metrics`, {
+        headers: { Authorization: `Bearer ${adminSess.token}` },
+      });
+      assert.strictEqual(metricsRes.status, 200);
+      const metricsJson: any = await metricsRes.json();
+      assert.ok(metricsJson.metrics.newLast24Hours >= 1, 'newLast24Hours must be >= 1');
+      assert.ok(
+        Array.isArray(metricsJson.latestUsers) &&
+          metricsJson.latestUsers.some((u: any) => u.email === brandNewEmail && u.isNew === true && u.shopName === 'CR8 Fresh Beads'),
+        'New user must appear in admin metrics.latestUsers with isNew=true'
+      );
+
+      const onlyNewUsersRes = await origFetch(`${baseUrl}/api/admin/users?onlyNew=true&limit=50`, {
+        headers: { Authorization: `Bearer ${adminSess.token}` },
+      });
+      assert.strictEqual(onlyNewUsersRes.status, 200);
+      const onlyNewUsersJson: any = await onlyNewUsersRes.json();
+      assert.ok(
+        Array.isArray(onlyNewUsersJson.users) && onlyNewUsersJson.users.some((u: any) => u.email === brandNewEmail),
+        'New user must appear in GET /api/admin/users?onlyNew=true'
+      );
+
+      const userActivityRes = await origFetch(
+        `${baseUrl}/api/admin/activity?category=users&q=${encodeURIComponent(brandNewEmail)}`,
+        { headers: { Authorization: `Bearer ${adminSess.token}` } }
+      );
+      assert.strictEqual(userActivityRes.status, 200);
+      const userActivityJson: any = await userActivityRes.json();
+      assert.ok(
+        Array.isArray(userActivityJson.events) &&
+          userActivityJson.events.some((e: any) => e.action === 'USER_REGISTERED' && e.actorEmail === brandNewEmail),
+        'USER_REGISTERED event must appear in admin/activity'
+      );
+
+      // 3. Website visitor & logged-in activity tracking + allow-list validation
+      const invalidTrackRes = await origFetch(`${baseUrl}/api/activity/track`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'ADMIN_USER_DELETED', targetId: 'spoof' }),
+      });
+      assert.strictEqual(invalidTrackRes.status, 400, 'Disallowed activity event must return 400');
+
+      const guestViewRes = await origFetch(`${baseUrl}/api/activity/track`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'PRODUCT_VIEWED',
+          targetType: 'product',
+          targetId: prodId,
+          details: { title: 'Handwoven Bead Bracelet' },
+          visitorId: 'vis_cr8_guest',
+        }),
+      });
+      assert.strictEqual(guestViewRes.status, 201);
+
+      const buyerSearchRes = await origFetch(`${baseUrl}/api/activity/track`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${buyerToken}` },
+        body: JSON.stringify({
+          action: 'MARKETPLACE_SEARCHED',
+          targetType: 'search',
+          details: { query: 'crochet tote bag' },
+        }),
+      });
+      assert.strictEqual(buyerSearchRes.status, 201);
+
+      const supportRes = await origFetch(`${baseUrl}/api/support/contact`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${buyerToken}` },
+        body: JSON.stringify({
+          name: 'Test Buyer',
+          email: buyerEmail,
+          subject: 'Need escrow receipt help',
+          message: 'Please check my order receipt on UNILAG campus.',
+        }),
+      });
+      assert.strictEqual(supportRes.status, 200);
+
+      const adminAuditRes = await origFetch(`${baseUrl}/api/admin/audit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminSess.token}` },
+        body: JSON.stringify({
+          action: 'BROADCAST_ACTIVATED',
+          targetType: 'admin_panel',
+          summary: 'CR8 emergency test notice',
+        }),
+      });
+      assert.strictEqual(adminAuditRes.status, 201);
+
+      const browsingActivityRes = await origFetch(
+        `${baseUrl}/api/admin/activity?category=browsing&limit=50`,
+        { headers: { Authorization: `Bearer ${adminSess.token}` } }
+      );
+      assert.strictEqual(browsingActivityRes.status, 200);
+      const browsingActivityJson: any = await browsingActivityRes.json();
+      assert.ok(
+        browsingActivityJson.events.some(
+          (e: any) => e.action === 'PRODUCT_VIEWED' && e.actorRole === 'visitor' && e.targetId === prodId
+        ),
+        'Guest PRODUCT_VIEWED must be visible in admin activity feed'
+      );
+      assert.ok(
+        browsingActivityJson.events.some(
+          (e: any) => e.action === 'MARKETPLACE_SEARCHED' && e.actorEmail === buyerEmail
+        ),
+        'Buyer MARKETPLACE_SEARCHED must be visible in admin activity feed'
+      );
+
+      const allActivityRes = await origFetch(
+        `${baseUrl}/api/admin/activity?limit=100`,
+        { headers: { Authorization: `Bearer ${adminSess.token}` } }
+      );
+      assert.strictEqual(allActivityRes.status, 200);
+      const allActivityJson: any = await allActivityRes.json();
+      assert.ok(
+        allActivityJson.events.some((e: any) => e.action === 'SUPPORT_CONTACT_SUBMITTED' && e.actorEmail === buyerEmail),
+        'SUPPORT_CONTACT_SUBMITTED must appear in admin activity feed'
+      );
+      assert.ok(
+        allActivityJson.events.some((e: any) => e.action === 'BROADCAST_ACTIVATED' && e.actorEmail === adminEmail),
+        'Admin audit action must appear in admin activity feed'
+      );
+    });
+
     console.log('\n==================================================================');
     console.log(`PHASE 4 SECURITY TEST RESULTS: ${passed} PASSED, ${failed} FAILED`);
     console.log('==================================================================');

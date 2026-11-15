@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import { withTransaction, query as dbQuery } from '../db/postgres.js';
 import { commitPaidOrderTransaction, koboToNaira, sendAdminAlert } from '../lib/payments.js';
+import { logAuditEvent } from '../auth/sessionStore.js';
 
 export const config = {
   api: {
@@ -118,6 +119,14 @@ export default async function handler(req: any, res: any) {
     }
 
     if (!timingSafeCompareHash(providedHash, webhookSecretHash)) {
+      await logAuditEvent({
+        action: 'WEBHOOK_SIGNATURE_REJECTED',
+        actor: { id: 'flutterwave_webhook', email: 'webhook@flutterwave', role: 'system' },
+        target: { type: 'webhook', id: 'flutterwave' },
+        details: { reason: 'Invalid verif-hash signature' },
+        ip: req.ip,
+        userAgent: req.headers?.['user-agent'],
+      });
       await sendAdminAlert(
         `forged_webhook_${Math.floor(Date.now() / 60000)}`,
         'Forged Flutterwave Webhook Attempt Blocked',
@@ -237,6 +246,15 @@ export default async function handler(req: any, res: any) {
         }
 
         return { found: true, outcome: flwTransferStatus, reference: payout.reference };
+      });
+
+      await logAuditEvent({
+        action: 'PAYOUT_WEBHOOK_PROCESSED',
+        actor: { id: 'flutterwave_webhook', email: 'webhook@flutterwave', role: 'system' },
+        target: { type: 'payout', id: transferRef || flwTransferId },
+        details: { status: flwTransferStatus, outcome: (transferOutcome as any).outcome },
+        ip: req.ip,
+        userAgent: req.headers?.['user-agent'],
       });
 
       res.setHeader('Content-Type', 'application/json');
@@ -369,6 +387,23 @@ export default async function handler(req: any, res: any) {
 
     if (settlement.committed) {
       await runKvCommand('SETEX', `pay_evt:${verifiedRef}`, String(7 * 24 * 60 * 60), '1');
+      await logAuditEvent({
+        action: 'ORDER_PAID_WEBHOOK',
+        actor: {
+          id: settlement.order?.buyer_id || 'buyer',
+          email: verifyData.data.customer?.email || settlement.order?.buyer_email || 'buyer@shopit.ng',
+          role: 'buyer',
+        },
+        target: { type: 'order', id: settlement.order?.id || verifiedRef },
+        details: {
+          reference: verifiedRef,
+          amountNaira: koboToNaira(verifiedAmountKobo),
+          channel,
+          flwTransactionId: verifyData.data.id,
+        },
+        ip: req.ip,
+        userAgent: req.headers?.['user-agent'],
+      });
     }
 
     res.setHeader('Content-Type', 'application/json');

@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useMemo, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   User,
   AppView,
@@ -506,8 +506,46 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Navigation states
   const [activeView, _setActiveView] = useState<AppView>(getInitialView);
 
+  const getOrCreateVisitorId = useCallback((): string => {
+    try {
+      const existing = localStorage.getItem('shopit_visitor_id');
+      if (existing) return existing;
+      const created = `vis_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+      localStorage.setItem('shopit_visitor_id', created);
+      return created;
+    } catch {
+      return 'guest';
+    }
+  }, []);
+
+  const trackActivity = useCallback(
+    (
+      action: string,
+      opts?: { targetType?: string; targetId?: string; details?: Record<string, any> }
+    ) => {
+      if (typeof window === 'undefined') return;
+      try {
+        fetch('/api/activity/track', {
+          method: 'POST',
+          headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+          credentials: 'include',
+          keepalive: true,
+          body: JSON.stringify({
+            action,
+            targetType: opts?.targetType || 'website',
+            targetId: opts?.targetId,
+            details: opts?.details || {},
+            visitorId: getOrCreateVisitorId(),
+          }),
+        }).catch(() => {});
+      } catch {}
+    },
+    [getOrCreateVisitorId]
+  );
+
   const setActiveView = (view: AppView) => {
     _setActiveView(view);
+    trackActivity('PAGE_VIEWED', { targetType: 'view', targetId: view, details: { view } });
     if (typeof window !== 'undefined') {
       if (view === 'reset-password') {
         if (window.location.pathname !== '/reset-password') {
@@ -640,7 +678,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [activeConversationId, setActiveConversationId] = useState<string | null>('conv_1');
 
   // Phase 3: Admin & Moderation States (populated strictly from server DB for admins)
-  const [adminSubRole, setAdminSubRole] = useState<AdminSubRole>('moderator');
+  const [adminSubRole, setAdminSubRole] = useState<AdminSubRole>('activity');
   const [verificationRequests, setVerificationRequests] = useState<SellerVerificationRequest[]>([]);
   const [disputes, setDisputes] = useState<DisputeTicket[]>(() => {
     const saved = localStorage.getItem('shopit_disputes');
@@ -705,24 +743,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   });
 
-  const [adminAuditLogs, setAdminAuditLogs] = useState<AdminAuditLog[]>(() => {
-    try {
-      const saved = localStorage.getItem('shopit_admin_audit_logs');
-      return saved
-        ? JSON.parse(saved)
-        : [
-            {
-              id: 'audit_root_init',
-              action: 'SUPER_ADMIN_INITIALIZED',
-              details: 'Adeyinka Joseph moderator root security authority active across Shop It marketplace.',
-              timestamp: new Date().toISOString(),
-              moderatorName: 'Adeyinka Joseph',
-            },
-          ];
-    } catch {
-      return [];
-    }
-  });
+  const [adminAuditLogs, setAdminAuditLogs] = useState<AdminAuditLog[]>([]);
+  const cartDirtyRef = useRef(false);
+  const wishlistDirtyRef = useRef(false);
+  const lastTrackedCategoryRef = useRef<string>('all');
 
   // Phase 3: Report Problem Modal State
   const [isReportProblemModalOpen, setIsReportProblemModalOpen] = useState(false);
@@ -766,12 +790,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (effectiveRole !== 'admin') {
         setRegisteredUsers([]);
         setVerificationRequests([]);
+        setAdminAuditLogs([]);
         return;
       }
       try {
-        const [verifRes, usersRes] = await Promise.all([
+        const [verifRes, usersRes, activityRes] = await Promise.all([
           fetch('/api/verification/admin/queue', { headers: getAuthHeaders(), credentials: 'include' }).catch(() => null),
           fetch('/api/admin/users?limit=100', { headers: getAuthHeaders(), credentials: 'include' }).catch(() => null),
+          fetch('/api/admin/activity?limit=100', { headers: getAuthHeaders(), credentials: 'include' }).catch(() => null),
         ]);
 
         if (verifRes && verifRes.ok) {
@@ -785,6 +811,37 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           const usersData = await usersRes.json();
           if (usersData.status && Array.isArray(usersData.users)) {
             setRegisteredUsers(usersData.users);
+          }
+        }
+
+        if (activityRes && activityRes.ok) {
+          const actData = await activityRes.json();
+          if (actData.status && Array.isArray(actData.events)) {
+            const mappedLogs: AdminAuditLog[] = actData.events.map((ev: any) => {
+              const dt = ev.createdAt ? new Date(ev.createdAt) : new Date();
+              const detailEntries =
+                ev.details && typeof ev.details === 'object'
+                  ? Object.entries(ev.details)
+                      .map(([k, v]) => `${k}: ${typeof v === 'object' ? JSON.stringify(v) : String(v)}`)
+                      .join(' · ')
+                  : String(ev.details || '');
+              return {
+                id: String(ev.id),
+                action: ev.action,
+                targetId: ev.targetId || undefined,
+                targetType: ev.targetType || undefined,
+                actorId: ev.actorId || undefined,
+                actorEmail: ev.actorEmail || 'guest@visitor',
+                actorRole: ev.actorRole || 'visitor',
+                details: detailEntries || (ev.targetType ? `${ev.targetType}${ev.targetId ? `:${ev.targetId}` : ''}` : 'Recorded'),
+                rawDetails: ev.details && typeof ev.details === 'object' ? ev.details : {},
+                ipAddress: ev.ipAddress || undefined,
+                createdAt: ev.createdAt,
+                timestamp: `${dt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · ${dt.toLocaleDateString()}`,
+                moderatorName: ev.actorEmail || 'system',
+              };
+            });
+            setAdminAuditLogs(mappedLogs);
           }
         }
       } catch (err: any) {
@@ -930,9 +987,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     } catch {}
   }, [currentUser?.id, currentUser?.role, refreshFinancials]);
 
-  // Sync cart and wishlist to PostgreSQL when changed by authenticated user
+  // Sync cart and wishlist to PostgreSQL only on explicit user changes (not initial hydration)
   useEffect(() => {
-    if (currentUser?.id && cart.length > 0) {
+    if (currentUser?.id && cartDirtyRef.current) {
+      cartDirtyRef.current = false;
       fetch('/api/cart', {
         method: 'PUT',
         headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
@@ -943,7 +1001,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, [cart, currentUser?.id]);
 
   useEffect(() => {
-    if (currentUser?.id && wishlist.length > 0) {
+    if (currentUser?.id && wishlistDirtyRef.current) {
+      wishlistDirtyRef.current = false;
       fetch('/api/wishlist', {
         method: 'PUT',
         headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
@@ -952,6 +1011,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }).catch(() => {});
     }
   }, [wishlist, currentUser?.id]);
+
+  // Track marketplace search queries (debounced) & category filter switches
+  useEffect(() => {
+    const trimmed = searchQuery.trim();
+    if (trimmed.length < 2) return;
+    const timer = setTimeout(() => {
+      trackActivity('MARKETPLACE_SEARCHED', {
+        targetType: 'search',
+        details: { query: trimmed, category: selectedCategory },
+      });
+    }, 700);
+    return () => clearTimeout(timer);
+  }, [searchQuery, selectedCategory, trackActivity]);
+
+  useEffect(() => {
+    if (lastTrackedCategoryRef.current === selectedCategory) return;
+    lastTrackedCategoryRef.current = selectedCategory;
+    if (selectedCategory !== 'all') {
+      trackActivity('CATEGORY_FILTERED', {
+        targetType: 'category',
+        targetId: selectedCategory,
+        details: { category: selectedCategory },
+      });
+    }
+  }, [selectedCategory, trackActivity]);
 
   // Keep localStorage ONLY for client UI settings
   useEffect(() => {
@@ -1103,6 +1187,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setLedgerEntries([]);
     setRegisteredUsers([]);
     setVerificationRequests([]);
+    setAdminAuditLogs([]);
     localStorage.removeItem('shopit_session_token');
     setActiveView('catalog');
     notify('Logged out successfully', 'info');
@@ -1111,6 +1196,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const openAuthModal = (tab: 'login' | 'signup' | 'seller_register' | 'forgot_password' = 'login') => {
     setAuthTab(tab);
     setIsAuthModalOpen(true);
+    trackActivity('AUTH_MODAL_OPENED', { targetType: 'auth', targetId: tab, details: { tab } });
   };
 
   const closeAuthModal = () => {
@@ -1610,6 +1696,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     : securityProfiles['user_tobi_buyer'];
 
   const toggleWishlist = (productId: string) => {
+    wishlistDirtyRef.current = true;
+    const willSave = !wishlist.includes(productId);
     setWishlist(prev => {
       const exists = prev.includes(productId);
       if (exists) {
@@ -1620,9 +1708,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return [...prev, productId];
       }
     });
+    trackActivity('WISHLIST_TOGGLED', {
+      targetType: 'product',
+      targetId: productId,
+      details: { saved: willSave },
+    });
   };
 
   const addToCart = (item: CartItem) => {
+    cartDirtyRef.current = true;
     setCart(prev => {
       const existingIdx = prev.findIndex(i => i.product.id === item.product.id);
       if (existingIdx >= 0) {
@@ -1632,16 +1726,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
       return [...prev, item];
     });
+    trackActivity('CART_ITEM_ADDED', {
+      targetType: 'product',
+      targetId: item.product.id,
+      details: { title: item.product.title, quantity: item.quantity, price: item.product.displayPrice },
+    });
     notify(`Added "${item.product.title.slice(0, 24)}..." to cart!`, 'success');
   };
 
   const removeFromCart = (cartItemId: string) => {
+    cartDirtyRef.current = true;
     setCart(prev => prev.filter(i => i.id !== cartItemId));
+    trackActivity('CART_ITEM_REMOVED', { targetType: 'cart_item', targetId: cartItemId });
     notify('Item removed from cart', 'info');
   };
 
   const clearCart = () => {
+    cartDirtyRef.current = true;
     setCart([]);
+    trackActivity('CART_CLEARED', { targetType: 'cart' });
   };
 
   const cartCount = cart.reduce((sum, item) => sum + item.quantity, 0);
@@ -1855,6 +1958,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setOrders(prev =>
       prev.map(o => (o.id === orderId ? { ...o, hasReview: true } : o))
     );
+
+    trackActivity('REVIEW_SUBMITTED', {
+      targetType: 'product',
+      targetId: productId,
+      details: { orderId, rating, commentLength: comment.length },
+    });
 
     notify('Thank you for rating your campus artisan!', 'success');
   };
@@ -2086,6 +2195,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         },
       };
     });
+    addAdminAuditLog(
+      'WALLET_FREEZE_UPDATED',
+      `${freeze ? 'Froze' : 'Unfroze'} wallet for seller ${sellerId}${reason ? ` (${reason})` : ''}`,
+      sellerId
+    );
     notify(freeze ? `Wallet for ${sellerId} frozen by Admin.` : `Wallet for ${sellerId} unfrozen.`, 'info');
   };
 
@@ -2717,6 +2831,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         decision: decisionText,
       });
     }
+
+    addAdminAuditLog(
+      'DISPUTE_RESOLVED',
+      `Dispute ${disputeId} (Order ${disp.orderId}) resolved via ${resolution}: ${decisionText}`,
+      disputeId
+    );
   };
 
   const updateFlagStatus = (flagId: string, action: 'warn' | 'lock_chat' | 'freeze_account' | 'dismiss') => {
@@ -2746,6 +2866,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     } else {
       notify(`Flag action: ${action} applied.`, 'info');
     }
+    addAdminAuditLog('FLAG_ACTION_APPLIED', `Anti-bypass flag #${flagId} updated with action: ${action}`, flagId);
   };
 
   const updateFeeSettings = (newSettings: Partial<FeeSettings>) => {
@@ -2754,6 +2875,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       notify('Platform fee settings updated successfully!', 'success');
       return updated;
     });
+    addAdminAuditLog(
+      'FEE_SETTINGS_UPDATED',
+      `Platform fee settings updated: ${Object.entries(newSettings).map(([k, v]) => `${k}=${v}`).join(', ')}`,
+      'fee_settings'
+    );
   };
 
   // ==========================================
@@ -2994,11 +3120,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       id: `audit_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       action,
       targetId,
+      actorEmail: currentUser?.email || 'moderator',
+      actorRole: currentUser?.role || 'admin',
       details,
+      createdAt: new Date().toISOString(),
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + ' · ' + new Date().toLocaleDateString(),
-      moderatorName: currentUser?.name || 'Adeyinka Joseph (Moderator)',
+      moderatorName: currentUser?.name || currentUser?.email || 'Moderator',
     };
-    setAdminAuditLogs(prev => [newEntry, ...prev.slice(0, 49)]);
+    setAdminAuditLogs(prev => [newEntry, ...prev.slice(0, 99)]);
+    if (currentUser?.role === 'admin') {
+      fetch('/api/admin/audit', {
+        method: 'POST',
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        credentials: 'include',
+        body: JSON.stringify({
+          action,
+          targetType: 'admin_panel',
+          targetId,
+          summary: details,
+        }),
+      }).catch(() => {});
+    }
   };
 
   const updateBroadcastAnnouncement = (data: Partial<BroadcastAnnouncement>) => {
@@ -3027,7 +3169,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     notify('Emergency platform control updated.', 'info');
   };
 
-  const openCheckoutModal = () => setIsCheckoutModalOpen(true);
+  const openCheckoutModal = () => {
+    setIsCheckoutModalOpen(true);
+    trackActivity('CHECKOUT_OPENED', { targetType: 'checkout', details: { itemCount: cart.length } });
+  };
   const closeCheckoutModal = () => setIsCheckoutModalOpen(false);
 
   const toggleLowDataMode = () => {
@@ -3057,12 +3202,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const openProduct = (id: string) => {
     setSelectedProductId(id);
     setActiveView('product_detail');
+    const prod = products.find(p => p.id === id);
+    trackActivity('PRODUCT_VIEWED', {
+      targetType: 'product',
+      targetId: id,
+      details: prod ? { title: prod.title, price: prod.displayPrice, sellerId: prod.sellerId } : {},
+    });
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
   const openSellerShop = (sellerId: string) => {
     setSelectedSellerId(sellerId);
     setActiveView('seller_shop');
+    const sel = sellers.find(s => s.id === sellerId);
+    trackActivity('SELLER_SHOP_VIEWED', {
+      targetType: 'seller',
+      targetId: sellerId,
+      details: sel ? { shopName: sel.shopName, campus: sel.campus } : {},
+    });
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
@@ -3268,6 +3425,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
 
     setCommissions(prev => [newComm, ...prev]);
+    trackActivity('COMMISSION_SUBMITTED', {
+      targetType: 'seller',
+      targetId: requestData.artisanId,
+      details: { title: requestData.title, shopName: requestData.artisanShopName },
+    });
     notify(`Custom commission request submitted to ${requestData.artisanShopName}!`, 'success');
   };
 
@@ -3336,6 +3498,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       userHasLiked: true,
     };
     setStylePosts(prev => [newPost, ...prev]);
+    trackActivity('STYLE_POST_SUBMITTED', {
+      targetType: 'style_post',
+      targetId: id,
+      details: { caption: postData.caption?.slice(0, 80) },
+    });
     notify('Your campus craft style photo has been shared to the Campus Wall!', 'success');
   };
 
@@ -3351,6 +3518,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return false;
     }
     setActiveAmbassadorCode(clean);
+    trackActivity('REFERRAL_CODE_APPLIED', {
+      targetType: 'ambassador',
+      targetId: clean,
+      details: { code: clean },
+    });
     notify(`Ambassador code "${clean}" applied! ₦500 referral credit active for your hall.`, 'success');
     return true;
   };

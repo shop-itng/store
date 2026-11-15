@@ -33,6 +33,7 @@ const PUBLIC_ALLOW_LIST = new Set([
   'GET /sellers/:id',
   'POST /reports',
   'POST /support/contact',
+  'POST /activity/track',
   'GET /payments/config',
   'GET /payments/webhook-info',
 ]);

@@ -417,6 +417,63 @@ router.post(['/auth/register', '/auth/signup'], async (req, res) => {
       path: '/',
     });
 
+    // Notify Admin Panel & Audit Log of Every New User Registration
+    const signupShopName = txResult.sellerProfile?.shop_name || (shopName ? String(shopName).trim() : undefined);
+    const signupCampus = txResult.sellerProfile?.campus || (campus ? String(campus).trim() : undefined);
+    const signupArea = txResult.sellerProfile?.location_area || location?.area || undefined;
+
+    await logAuditEvent({
+      action: 'USER_REGISTERED',
+      actor: { id: userId, email: cleanEmail, role: userRole },
+      target: { type: 'user', id: userId },
+      details: {
+        name: cleanName,
+        email: cleanEmail,
+        role: userRole,
+        age: parsedAge,
+        isUnder18: parsedAge < 18,
+        hasGuardianConsent: parsedAge < 18 ? Boolean(hasGuardianConsent) : true,
+        guardianName: guardianName ? String(guardianName).trim() : null,
+        shopName: signupShopName || null,
+        campus: signupCampus || null,
+        locationArea: signupArea || null,
+      },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
+
+    try {
+      const adminUsersRes = await dbQuery("SELECT id FROM shopit_users WHERE role = 'admin'");
+      const roleLabel = userRole === 'seller' ? 'Seller' : 'Buyer';
+      const notifMsg =
+        userRole === 'seller'
+          ? `${cleanName} (${cleanEmail}) registered Seller Shop "${signupShopName || cleanName}" at ${signupCampus || 'Campus'}.`
+          : `${cleanName} (${cleanEmail}) joined Shop It as a Buyer (Age ${parsedAge}).`;
+      for (const adm of adminUsersRes.rows) {
+        await dbQuery(
+          `INSERT INTO shopit_notifications (id, user_id, title, message, type, is_read, link, created_at)
+           VALUES ($1, $2, $3, $4, 'info', false, '/admin', NOW())`,
+          [
+            `notif_new_user_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
+            adm.id,
+            `New ${roleLabel} Registered: ${cleanName}`,
+            notifMsg,
+          ]
+        ).catch(() => {});
+      }
+    } catch {}
+
+    await dispatchAdminAlert(
+      `new_user_${userId}`,
+      `New ${userRole === 'seller' ? 'Seller' : 'Buyer'} Signed Up: ${cleanName}`,
+      `Name: <strong>${escapeHtml(cleanName)}</strong><br/>
+       Email: <strong>${escapeHtml(cleanEmail)}</strong><br/>
+       Role: <strong>${escapeHtml(userRole.toUpperCase())}</strong><br/>
+       Age: <strong>${parsedAge}</strong>${parsedAge < 18 && guardianName ? ` (Guardian: ${escapeHtml(guardianName)})` : ''}<br/>
+       ${signupShopName ? `Shop: <strong>${escapeHtml(signupShopName)}</strong> (${escapeHtml(signupCampus || 'Campus')})<br/>` : ''}
+       Registered At: <strong>${new Date().toISOString()}</strong>`
+    ).catch(() => {});
+
     return res.status(201).json({
       status: true,
       sessionToken: token,
@@ -480,6 +537,14 @@ router.post('/auth/login', async (req, res) => {
 
     if (userRes.rows.length === 0) {
       await recordLoginFailure(cleanEmail);
+      await logAuditEvent({
+        action: 'USER_LOGIN_FAILED',
+        actor: { id: 'unknown', email: cleanEmail, role: 'visitor' },
+        target: { type: 'auth', id: cleanEmail },
+        details: { reason: 'unknown_email' },
+        ip: req.ip,
+        userAgent: req.get('user-agent'),
+      });
       return res.status(401).json({
         status: false,
         error: 'INVALID_CREDENTIALS',
@@ -491,6 +556,14 @@ router.post('/auth/login', async (req, res) => {
     const isPasswordValid = verifyPassword(cleanPassword, userRow.password_hash);
     if (!isPasswordValid) {
       const fail = await recordLoginFailure(cleanEmail);
+      await logAuditEvent({
+        action: 'USER_LOGIN_FAILED',
+        actor: { id: userRow.id, email: userRow.email, role: userRow.role },
+        target: { type: 'auth', id: userRow.id },
+        details: { reason: fail.locked ? 'account_locked' : 'invalid_password' },
+        ip: req.ip,
+        userAgent: req.get('user-agent'),
+      });
       if (fail.locked) {
         return res.status(429).json({
           status: false,
@@ -506,6 +579,14 @@ router.post('/auth/login', async (req, res) => {
     }
 
     if (userRow.is_verified_email === false) {
+      await logAuditEvent({
+        action: 'USER_LOGIN_FAILED',
+        actor: { id: userRow.id, email: userRow.email, role: userRow.role },
+        target: { type: 'auth', id: userRow.id },
+        details: { reason: 'email_not_verified' },
+        ip: req.ip,
+        userAgent: req.get('user-agent'),
+      });
       return res.status(403).json({
         status: false,
         error: 'EMAIL_NOT_VERIFIED',
@@ -514,6 +595,14 @@ router.post('/auth/login', async (req, res) => {
     }
 
     if (userRow.is_banned) {
+      await logAuditEvent({
+        action: 'USER_LOGIN_FAILED',
+        actor: { id: userRow.id, email: userRow.email, role: userRow.role },
+        target: { type: 'auth', id: userRow.id },
+        details: { reason: 'account_banned' },
+        ip: req.ip,
+        userAgent: req.get('user-agent'),
+      });
       return res.status(403).json({
         status: false,
         error: 'ACCOUNT_BANNED',
@@ -593,7 +682,17 @@ router.post('/auth/login', async (req, res) => {
 router.post('/auth/logout', async (req: AuthenticatedRequest, res) => {
   const token = extractToken(req);
   if (token) {
+    const sess = await getSession(token);
     await destroySession(token);
+    if (sess) {
+      await logAuditEvent({
+        action: 'USER_LOGOUT',
+        actor: { id: sess.userId, email: sess.email, role: sess.role },
+        target: { type: 'session', id: token.slice(-8) },
+        ip: req.ip,
+        userAgent: req.get('user-agent'),
+      });
+    }
   }
   res.clearCookie(SESSION_COOKIE_NAME, { path: '/' });
   return res.json({ status: true, message: 'Logged out successfully.' });
@@ -709,6 +808,14 @@ router.post('/auth/reset-password', async (req, res) => {
     await dbQuery('UPDATE shopit_users SET password_hash = $1, updated_at = NOW() WHERE id = $2', [newHash, userId]);
     await revokeUserSessions(userId);
 
+    await logAuditEvent({
+      action: 'PASSWORD_RESET_COMPLETED',
+      actor: { id: userId, email: cleanEmail, role: 'user' },
+      target: { type: 'user', id: userId },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
+
     return res.json({
       status: true,
       message: 'Your password has been reset successfully! All older sessions were signed out.',
@@ -795,9 +902,14 @@ router.get('/admin/users', requireModerator, async (req: AuthenticatedRequest, r
   try {
     const q = req.query.q ? String(req.query.q).trim().toLowerCase() : '';
     const role = req.query.role ? String(req.query.role).trim() : 'all';
+    const onlyNew = String(req.query.onlyNew || '').toLowerCase() === 'true' || req.query.onlyNew === '1';
     const page = Math.max(1, parseInt(String(req.query.page || '1'), 10));
-    const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit || '15'), 10)));
+    const limit = Math.min(200, Math.max(1, parseInt(String(req.query.limit || '15'), 10)));
     const offset = (page - 1) * limit;
+
+    const cutoff24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
 
     const conditions: string[] = [];
     const params: any[] = [];
@@ -813,15 +925,30 @@ router.get('/admin/users', requireModerator, async (req: AuthenticatedRequest, r
       params.push(role);
       paramIndex++;
     }
+    if (onlyNew) {
+      conditions.push(`u.created_at >= $${paramIndex}`);
+      params.push(cutoff24h);
+      paramIndex++;
+    }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-    const countRes = await dbQuery(`SELECT COUNT(*) as total FROM shopit_users u ${whereClause}`, params);
+    const [countRes, newCountsRes] = await Promise.all([
+      dbQuery(`SELECT COUNT(*) as total FROM shopit_users u ${whereClause}`, params),
+      dbQuery(
+        `SELECT
+           COUNT(CASE WHEN created_at >= $1 THEN 1 END) as new_today,
+           COUNT(CASE WHEN created_at >= $2 THEN 1 END) as new_24h
+         FROM shopit_users`,
+        [todayStart.toISOString(), cutoff24h]
+      ),
+    ]);
     const total = parseInt(countRes.rows[0].total, 10);
 
     const dataSql = `
       SELECT u.id, u.email, u.name, u.role, u.is_verified_email, u.age, u.has_guardian_consent,
              u.guardian_name, u.is_banned, u.ban_reason, u.last_login_at, u.created_at,
-             s.id as seller_id, s.shop_name, s.verification_status, s.is_verified_seller
+             s.id as seller_id, s.shop_name, s.campus, s.location_area, s.bio,
+             s.verification_status, s.is_verified_seller
       FROM shopit_users u
       LEFT JOIN shopit_sellers s ON u.id = s.user_id
       ${whereClause}
@@ -830,6 +957,7 @@ router.get('/admin/users', requireModerator, async (req: AuthenticatedRequest, r
     `;
     const usersRes = await dbQuery(dataSql, [...params, limit, offset]);
 
+    const cutoffMs = Date.now() - 24 * 60 * 60 * 1000;
     const users = usersRes.rows.map((row: any) => ({
       id: row.id,
       email: row.email,
@@ -843,12 +971,25 @@ router.get('/admin/users', requireModerator, async (req: AuthenticatedRequest, r
       banReason: row.ban_reason,
       lastLoginAt: row.last_login_at,
       createdAt: row.created_at,
+      isNew: row.created_at ? new Date(row.created_at).getTime() >= cutoffMs : false,
       shopName: row.shop_name,
+      campus: row.campus,
+      locationArea: row.location_area,
+      bio: row.bio,
       verificationStatus: row.verification_status || (row.role === 'seller' ? 'not_started' : 'not_applicable'),
       isVerifiedSeller: Boolean(row.is_verified_seller),
     }));
 
-    return res.json({ status: true, users, total, page, limit, totalPages: Math.ceil(total / limit) || 1 });
+    return res.json({
+      status: true,
+      users,
+      total,
+      newTodayCount: parseInt(newCountsRes.rows[0]?.new_today || '0', 10),
+      newLast24HoursCount: parseInt(newCountsRes.rows[0]?.new_24h || '0', 10),
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit) || 1,
+    });
   } catch (err: any) {
     console.error('[Admin Users Error]:', err.message);
     return res.status(500).json({ status: false, message: 'Database error reading users.' });
@@ -1126,36 +1267,80 @@ router.get('/admin/metrics', requireModerator, async (_req: AuthenticatedRequest
   try {
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
+    const cutoff24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 
-    const [userStats, sellerStats, verifStats] = await Promise.all([
+    const [userStats, sellerStats, verifStats, activityStats, orderStats, productStats, latestUsersRes] = await Promise.all([
       dbQuery(
         `SELECT
           COUNT(*) as total_users,
           COUNT(CASE WHEN created_at >= $1 THEN 1 END) as new_today,
+          COUNT(CASE WHEN created_at >= $2 THEN 1 END) as new_24h,
           COUNT(CASE WHEN role = 'seller' THEN 1 END) as total_sellers,
           COUNT(CASE WHEN role = 'buyer' THEN 1 END) as total_buyers,
           COUNT(CASE WHEN is_banned = true THEN 1 END) as suspended_users
         FROM shopit_users`,
-        [todayStart.toISOString()]
+        [todayStart.toISOString(), cutoff24h]
       ),
       dbQuery(`SELECT COUNT(CASE WHEN verification_status = 'verified' THEN 1 END) as verified_sellers FROM shopit_sellers`),
       dbQuery(`SELECT COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending_verifications FROM shopit_verifications`),
+      dbQuery(
+        `SELECT
+          COUNT(*) as total_events,
+          COUNT(CASE WHEN created_at >= $1 THEN 1 END) as events_24h
+         FROM shopit_audit_logs`,
+        [cutoff24h]
+      ),
+      dbQuery(`SELECT COUNT(*) as total_orders FROM shopit_orders`),
+      dbQuery(`SELECT COUNT(*) as total_products FROM shopit_products`),
+      dbQuery(
+        `SELECT u.id, u.email, u.name, u.role, u.age, u.has_guardian_consent, u.guardian_name, u.is_verified_email, u.is_banned, u.created_at, u.last_login_at,
+                s.shop_name, s.campus, s.location_area, s.verification_status, s.is_verified_seller
+         FROM shopit_users u
+         LEFT JOIN shopit_sellers s ON u.id = s.user_id
+         ORDER BY u.created_at DESC
+         LIMIT 10`
+      ),
     ]);
 
     const pgPing = await pingPostgres();
     const redisPing = await pingRedis();
+    const cutoffMs = Date.now() - 24 * 60 * 60 * 1000;
 
     return res.json({
       status: true,
       metrics: {
         totalUsers: parseInt(userStats.rows[0].total_users || '0', 10),
         newToday: parseInt(userStats.rows[0].new_today || '0', 10),
+        newLast24Hours: parseInt(userStats.rows[0].new_24h || '0', 10),
         totalSellers: parseInt(userStats.rows[0].total_sellers || '0', 10),
         totalBuyers: parseInt(userStats.rows[0].total_buyers || '0', 10),
         suspendedUsers: parseInt(userStats.rows[0].suspended_users || '0', 10),
         verifiedSellers: parseInt(sellerStats.rows[0].verified_sellers || '0', 10),
         pendingVerifications: parseInt(verifStats.rows[0].pending_verifications || '0', 10),
+        totalActivityEvents: parseInt(activityStats.rows[0].total_events || '0', 10),
+        activityLast24Hours: parseInt(activityStats.rows[0].events_24h || '0', 10),
+        totalOrders: parseInt(orderStats.rows[0].total_orders || '0', 10),
+        totalProducts: parseInt(productStats.rows[0].total_products || '0', 10),
       },
+      latestUsers: latestUsersRes.rows.map((row: any) => ({
+        id: row.id,
+        email: row.email,
+        name: row.name,
+        role: row.role,
+        age: row.age,
+        hasGuardianConsent: Boolean(row.has_guardian_consent),
+        guardianName: row.guardian_name,
+        isVerifiedEmail: Boolean(row.is_verified_email),
+        isBanned: Boolean(row.is_banned),
+        createdAt: row.created_at,
+        lastLoginAt: row.last_login_at,
+        isNew: row.created_at ? new Date(row.created_at).getTime() >= cutoffMs : false,
+        shopName: row.shop_name,
+        campus: row.campus,
+        locationArea: row.location_area,
+        verificationStatus: row.verification_status || (row.role === 'seller' ? 'not_started' : 'not_applicable'),
+        isVerifiedSeller: Boolean(row.is_verified_seller),
+      })),
       database: {
         neon: pgPing.ok && !pgPing.isPgMem,
         isPgMem: Boolean(pgPing.isPgMem),
@@ -1168,6 +1353,235 @@ router.get('/admin/metrics', requireModerator, async (_req: AuthenticatedRequest
   } catch (err: any) {
     console.error('[Admin Metrics Error]:', err.message);
     return res.status(500).json({ status: false, message: 'Database error reading metrics.' });
+  }
+});
+
+// Live Website Activity & Full Audit Log Feed (Moderator+)
+router.get('/admin/activity', requireModerator, async (req: AuthenticatedRequest, res) => {
+  try {
+    const q = req.query.q ? String(req.query.q).trim().toLowerCase() : '';
+    const category = req.query.category ? String(req.query.category).trim().toLowerCase() : 'all';
+    const actorEmail = req.query.actorEmail ? String(req.query.actorEmail).trim().toLowerCase() : '';
+    const actionFilter = req.query.action ? String(req.query.action).trim().toUpperCase() : '';
+    const page = Math.max(1, parseInt(String(req.query.page || '1'), 10));
+    const limit = Math.min(200, Math.max(1, parseInt(String(req.query.limit || '50'), 10)));
+    const offset = (page - 1) * limit;
+
+    const conditions: string[] = [];
+    const params: any[] = [];
+    let paramIndex = 1;
+
+    if (q) {
+      conditions.push(
+        `(LOWER(action) LIKE $${paramIndex} OR LOWER(COALESCE(actor_email, '')) LIKE $${paramIndex} OR LOWER(COALESCE(target_type, '')) LIKE $${paramIndex} OR LOWER(COALESCE(target_id, '')) LIKE $${paramIndex} OR LOWER(CAST(details AS TEXT)) LIKE $${paramIndex})`
+      );
+      params.push(`%${q}%`);
+      paramIndex++;
+    }
+
+    if (actorEmail) {
+      conditions.push(`LOWER(COALESCE(actor_email, '')) = $${paramIndex}`);
+      params.push(actorEmail);
+      paramIndex++;
+    }
+
+    if (actionFilter) {
+      conditions.push(`action = $${paramIndex}`);
+      params.push(actionFilter);
+      paramIndex++;
+    }
+
+    if (category === 'users') {
+      conditions.push(
+        `action IN ('USER_REGISTERED','USER_LOGIN','USER_LOGIN_FAILED','USER_LOGOUT','OTP_REQUESTED','OTP_VERIFIED','OTP_VERIFY_FAILED','PASSWORD_CHANGED','PASSWORD_RESET_COMPLETED','PASSWORD_RESET_FAILED','ADMIN_USER_DELETED','ADMIN_USER_BANNED','ADMIN_USER_UNBANNED','ADMIN_PASSWORD_RESET')`
+      );
+    } else if (category === 'orders_payments') {
+      conditions.push(
+        `action IN ('CHECKOUT_INITIALIZED','ORDER_PAYMENT_VERIFIED','ORDER_PAID_WEBHOOK','ORDER_STATUS_CHANGED','PAYMENT_REFUND_EXECUTED','SELLER_WITHDRAWAL_DISPATCHED','PAYOUT_ACCOUNT_LINKED','MINOR_GUARDIAN_PAYOUT_ACCOUNT_LINKED','MINOR_PAYOUT_ACCOUNT_APPROVED','ORDER_ADMIN_HOLD_UPDATED','PAYOUT_WEBHOOK_PROCESSED','COUPON_VALIDATED','CRON_DAILY_PROCESSED','ADMIN_ESCROW_SCAN_TRIGGERED')`
+      );
+    } else if (category === 'marketplace') {
+      conditions.push(
+        `action IN ('PRODUCT_CREATED','PRODUCT_UPDATED','PRODUCT_DELETED','SELLER_PROFILE_UPDATED','CHAT_CONVERSATION_STARTED','CHAT_MESSAGE_SENT','COMMISSION_REQUESTED','COMMISSION_SUBMITTED','REVIEW_SUBMITTED','CART_UPDATED','WISHLIST_UPDATED')`
+      );
+    } else if (category === 'security') {
+      conditions.push(
+        `(action LIKE 'ADMIN_%' OR action LIKE 'NIN_%' OR action LIKE 'VERIFICATION_%' OR action LIKE '%BYPASS%' OR action IN ('REPORT_SUBMITTED','REPORT_STATUS_UPDATED','DISPUTE_OPENED','DISPUTE_RESOLVED','FLAG_ACTION_APPLIED','BROADCAST_UPDATED','BROADCAST_ACTIVATED','BROADCAST_DEACTIVATED','KILLSWITCH_TOGGLED','FEE_SETTINGS_UPDATED','WEBHOOK_SIGNATURE_REJECTED','DUPLICATE_NIN_FLAGGED','KYC_DOCUMENT_ACCESSED','NDPA_DATA_PURGED','ORDER_STATUS_IDOR_BLOCKED','WALLET_FREEZE_UPDATED','SUPPORT_CONTACT_SUBMITTED','USER_LOGIN_FAILED'))`
+      );
+    } else if (category === 'browsing') {
+      conditions.push(
+        `action IN ('PAGE_VIEWED','PRODUCT_VIEWED','SELLER_SHOP_VIEWED','MARKETPLACE_SEARCHED','CATEGORY_FILTERED','CART_ITEM_ADDED','CART_ITEM_REMOVED','CART_CLEARED','WISHLIST_TOGGLED','CHECKOUT_OPENED','AUTH_MODAL_OPENED','STYLE_POST_SUBMITTED','REFERRAL_CODE_APPLIED')`
+      );
+    }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const cutoff24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
+    const [countRes, rowsRes, summaryRes] = await Promise.all([
+      dbQuery(`SELECT COUNT(*) as total FROM shopit_audit_logs ${whereClause}`, params),
+      dbQuery(
+        `SELECT id, action, actor_id, actor_email, actor_role, target_type, target_id, details, ip_address, user_agent, created_at
+         FROM shopit_audit_logs
+         ${whereClause}
+         ORDER BY created_at DESC
+         LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`,
+        [...params, limit, offset]
+      ),
+      dbQuery(
+        `SELECT
+           COUNT(*) as total_events,
+           COUNT(CASE WHEN created_at >= $1 THEN 1 END) as events_24h,
+           COUNT(CASE WHEN action = 'USER_REGISTERED' AND created_at >= $1 THEN 1 END) as new_users_24h,
+           COUNT(CASE WHEN action IN ('WEBHOOK_SIGNATURE_REJECTED','CHAT_BYPASS_BLOCKED','DUPLICATE_NIN_FLAGGED','ORDER_STATUS_IDOR_BLOCKED','REPORT_SUBMITTED','DISPUTE_OPENED','USER_LOGIN_FAILED') AND created_at >= $1 THEN 1 END) as security_alerts_24h
+         FROM shopit_audit_logs`,
+        [cutoff24h]
+      ),
+    ]);
+
+    const total = parseInt(countRes.rows[0]?.total || '0', 10);
+    const events = rowsRes.rows.map((row: any) => {
+      let parsedDetails: Record<string, any> = {};
+      if (row.details) {
+        if (typeof row.details === 'string') {
+          try {
+            parsedDetails = JSON.parse(row.details);
+          } catch {
+            parsedDetails = { message: row.details };
+          }
+        } else if (typeof row.details === 'object') {
+          parsedDetails = row.details;
+        }
+      }
+      return {
+        id: row.id,
+        action: row.action,
+        actorId: row.actor_id,
+        actorEmail: row.actor_email || 'guest@visitor',
+        actorRole: row.actor_role || 'visitor',
+        targetType: row.target_type,
+        targetId: row.target_id,
+        details: parsedDetails,
+        ipAddress: row.ip_address,
+        userAgent: row.user_agent,
+        createdAt: row.created_at,
+      };
+    });
+
+    return res.json({
+      status: true,
+      events,
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit) || 1,
+      summary: {
+        totalEvents: parseInt(summaryRes.rows[0]?.total_events || '0', 10),
+        eventsLast24h: parseInt(summaryRes.rows[0]?.events_24h || '0', 10),
+        newUsersLast24h: parseInt(summaryRes.rows[0]?.new_users_24h || '0', 10),
+        securityAlertsCount: parseInt(summaryRes.rows[0]?.security_alerts_24h || '0', 10),
+      },
+    });
+  } catch (err: any) {
+    console.error('[Admin Activity Error]:', err.message);
+    return res.status(500).json({ status: false, message: 'Database error reading website activity.' });
+  }
+});
+
+// Moderator Audit Recorder for Admin Panel UI actions (broadcast, killswitch, dispute resolution, fee changes, etc.)
+router.post('/admin/audit', requireModerator, async (req: AuthenticatedRequest, res) => {
+  try {
+    const user = req.user!;
+    const rawAction = String(req.body?.action || '').trim().toUpperCase().replace(/[^A-Z0-9_]/g, '').slice(0, 64);
+    if (!rawAction) {
+      return res.status(400).json({ status: false, message: 'Valid action code is required.' });
+    }
+    const targetType = String(req.body?.targetType || 'admin_panel').slice(0, 60);
+    const targetId = req.body?.targetId ? String(req.body.targetId).slice(0, 120) : undefined;
+    const summaryText = req.body?.summary ? String(req.body.summary).slice(0, 500) : undefined;
+    const rawMeta = req.body?.details && typeof req.body.details === 'object' ? req.body.details : {};
+    const safeDetails: Record<string, any> = summaryText ? { summary: summaryText } : {};
+    for (const [k, v] of Object.entries(rawMeta).slice(0, 12)) {
+      if (!/password|secret|token|otp|nin/i.test(k)) {
+        safeDetails[k.slice(0, 40)] = typeof v === 'string' ? v.slice(0, 200) : v;
+      }
+    }
+
+    await logAuditEvent({
+      action: rawAction,
+      actor: { id: user.userId, email: user.email, role: user.role },
+      target: { type: targetType, id: targetId },
+      details: safeDetails,
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
+
+    return res.status(201).json({ status: true, message: 'Admin audit event recorded.' });
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: 'Failed to record admin audit event.' });
+  }
+});
+
+// Allow-listed Website Activity Tracker (Captures visitor & logged-in user browsing, search, cart/wishlist, reviews)
+const ALLOWED_WEBSITE_ACTIVITY_ACTIONS = new Set([
+  'PAGE_VIEWED',
+  'PRODUCT_VIEWED',
+  'SELLER_SHOP_VIEWED',
+  'MARKETPLACE_SEARCHED',
+  'CATEGORY_FILTERED',
+  'CART_ITEM_ADDED',
+  'CART_ITEM_REMOVED',
+  'CART_CLEARED',
+  'WISHLIST_TOGGLED',
+  'REVIEW_SUBMITTED',
+  'CHECKOUT_OPENED',
+  'AUTH_MODAL_OPENED',
+  'COMMISSION_SUBMITTED',
+  'STYLE_POST_SUBMITTED',
+  'REFERRAL_CODE_APPLIED',
+]);
+
+router.post('/activity/track', optionalAuth, async (req: AuthenticatedRequest, res) => {
+  try {
+    const clientIp = req.ip || 'unknown';
+    const rl = await checkAndRecordRateLimit(`activity_track:${clientIp}`, 120, 60 * 1000);
+    if (!rl.allowed) {
+      return res.status(429).json({ status: false, message: 'Too many activity events.' });
+    }
+
+    const action = String(req.body?.action || '').trim().toUpperCase();
+    if (!ALLOWED_WEBSITE_ACTIVITY_ACTIONS.has(action)) {
+      return res.status(400).json({ status: false, message: 'Unsupported activity event type.' });
+    }
+
+    const targetType = req.body?.targetType ? String(req.body.targetType).trim().slice(0, 60) : 'website';
+    const targetId = req.body?.targetId ? String(req.body.targetId).trim().slice(0, 120) : undefined;
+    const rawDetails = req.body?.details && typeof req.body.details === 'object' ? req.body.details : {};
+    const safeDetails: Record<string, any> = {};
+    for (const [k, v] of Object.entries(rawDetails).slice(0, 10)) {
+      if (/password|secret|token|otp|nin|cvv|pin/i.test(k)) continue;
+      if (typeof v === 'string') {
+        safeDetails[k.slice(0, 40)] = v.slice(0, 200);
+      } else if (typeof v === 'number' || typeof v === 'boolean') {
+        safeDetails[k.slice(0, 40)] = v;
+      }
+    }
+
+    const visitorId = req.body?.visitorId ? String(req.body.visitorId).slice(0, 64) : undefined;
+    const actor = req.user
+      ? { id: req.user.userId, email: req.user.email, role: req.user.role }
+      : { id: visitorId || 'guest', email: 'guest@visitor', role: 'visitor' };
+
+    await logAuditEvent({
+      action,
+      actor,
+      target: { type: targetType, id: targetId },
+      details: safeDetails,
+      ip: clientIp,
+      userAgent: req.get('user-agent'),
+    });
+
+    return res.status(201).json({ status: true });
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: 'Failed to log activity.' });
   }
 });
 
@@ -1623,6 +2037,20 @@ router.post('/payments/initialize', requirePaymentsEnabled, requireAuth, async (
       });
     }
 
+    await logAuditEvent({
+      action: 'CHECKOUT_INITIALIZED',
+      actor: { id: user.userId, email: user.email, role: user.role },
+      target: { type: 'order', id: initializedOrder.orderId },
+      details: {
+        reference: initializedOrder.reference,
+        amountNaira: initializedOrder.pricing.grandTotalNaira,
+        itemCount: initializedOrder.resolvedItems.length,
+        campus: campus || 'Nigeria',
+      },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
+
     const responseData = {
       gateway: 'flutterwave',
       reference: initializedOrder.reference,
@@ -1763,6 +2191,17 @@ router.get('/payments/verify/:reference', requirePaymentsEnabled, requireAuth, a
         expired: true,
         orderStatus: 'cancelled',
         message: 'Order expired before payment cleared and has been flagged for admin refund.',
+      });
+    }
+
+    if (settlement.committed) {
+      await logAuditEvent({
+        action: 'ORDER_PAYMENT_VERIFIED',
+        actor: { id: user.userId, email: user.email, role: user.role },
+        target: { type: 'order', id: order.id },
+        details: { reference, amountNaira: koboToNaira(confirmedAmountKobo), channel },
+        ip: req.ip,
+        userAgent: req.get('user-agent'),
       });
     }
 
@@ -2377,6 +2816,14 @@ router.post('/email/send', requireAdmin, async (req: AuthenticatedRequest, res) 
     const cleanEmail = String(to).trim().toLowerCase();
     const rendered = renderTransactionalEmail(template as EmailTemplateKey, data || {});
     const sent = await sendBrevoDirect(cleanEmail, rendered.subject, rendered.text, rendered.html, toName || data?.name);
+    await logAuditEvent({
+      action: 'ADMIN_EMAIL_SENT',
+      actor: { id: req.user!.userId, email: req.user!.email, role: req.user!.role },
+      target: { type: 'email', id: cleanEmail },
+      details: { template, dispatched: sent, subject: rendered.subject },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
     return res.json({ status: true, dispatched: sent, subject: rendered.subject });
   } catch (err: any) {
     return res.status(500).json({ status: false, message: 'Internal server error dispatching email.' });
@@ -2421,6 +2868,15 @@ router.post('/support/contact', async (req, res) => {
       htmlBody,
       'Shop It Support'
     );
+
+    await logAuditEvent({
+      action: 'SUPPORT_CONTACT_SUBMITTED',
+      actor: { id: cleanEmail, email: cleanEmail, role: 'visitor' },
+      target: { type: 'support', id: cleanCat },
+      details: { name: cleanName, category: cleanCat, preview: cleanMsg.slice(0, 150) },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
 
     return res.json({ status: true, message: 'Support inquiry sent.' });
   } catch (err: any) {
@@ -2508,6 +2964,15 @@ router.post('/auth/send-otp', async (req, res) => {
 
     await sendBrevoDirect(cleanEmail, rendered.subject, rendered.text, rendered.html, metadata?.name);
 
+    await logAuditEvent({
+      action: 'OTP_REQUESTED',
+      actor: { id: cleanEmail, email: cleanEmail, role: 'user' },
+      target: { type: 'otp', id: cleanPurpose },
+      details: { purpose: cleanPurpose },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
+
     return res.json({
       status: true,
       message:
@@ -2539,6 +3004,14 @@ router.post('/auth/verify-otp', async (req, res) => {
 
     const result = await verifyAndConsumeOtp(cleanEmail, cleanPurpose, inputCode);
     if (!result.success) {
+      await logAuditEvent({
+        action: 'OTP_VERIFY_FAILED',
+        actor: { id: cleanEmail, email: cleanEmail, role: 'user' },
+        target: { type: 'otp', id: cleanPurpose },
+        details: { purpose: cleanPurpose, reason: result.error || 'Invalid code' },
+        ip: req.ip,
+        userAgent: req.get('user-agent'),
+      });
       return res.status(400).json({
         status: false,
         message: result.error,
@@ -2553,6 +3026,15 @@ router.post('/auth/verify-otp', async (req, res) => {
         cleanEmail,
       ]).catch(() => {});
     }
+
+    await logAuditEvent({
+      action: 'OTP_VERIFIED',
+      actor: { id: cleanEmail, email: cleanEmail, role: 'user' },
+      target: { type: 'otp', id: cleanPurpose },
+      details: { purpose: cleanPurpose },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
 
     return res.json({
       status: true,
@@ -2604,6 +3086,24 @@ router.post('/reports', optionalAuth, async (req: AuthenticatedRequest, res) => 
     };
 
     await saveReportRecord(newReport);
+
+    await logAuditEvent({
+      action: 'REPORT_SUBMITTED',
+      actor: {
+        id: req.user?.userId || 'visitor',
+        email: newReport.reporterEmail || 'anonymous@visitor',
+        role: req.user?.role || 'visitor',
+      },
+      target: { type: 'report', id: reportId },
+      details: {
+        targetType: newReport.targetType,
+        targetId: newReport.targetId,
+        targetTitle: newReport.targetTitle,
+        reason: newReport.reason,
+      },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
 
     await sendAdminAlert(
       `report_alert_${reportId}`,
@@ -2721,6 +3221,15 @@ router.post(
          WHERE id = $7 OR user_id = $7`,
         [ownerName || null, ninLast4 || null, Boolean(under18), guardianName || null, guardianPhone || null, Boolean(guardianConsent), targetId]
       );
+
+      await logAuditEvent({
+        action: 'NIN_SUBMITTED_FOR_ADMIN_REVIEW',
+        actor: { id: user.userId, email: user.email, role: user.role },
+        target: { type: 'seller', id: targetId },
+        details: { requestId: reqId, shopName: shopName || null, maskedNin: `***-***-${ninLast4}` },
+        ip: req.ip,
+        userAgent: req.get('user-agent'),
+      });
 
       return res.json({ status: true, requestId: reqId, message: 'Verification submitted for review.' });
     } catch (err: any) {
@@ -3225,6 +3734,30 @@ router.all(['/cron/daily', '/cron/escrow'], async (req, res) => {
   const unshipped = await processUnshippedOrders(50);
   const reconciliation = await runDailyReconciliationCheck();
 
+  const workCount =
+    expired.expiredCount +
+    escrow.releasedCount +
+    unshipped.remindedCount +
+    unshipped.refundedCount +
+    expired.purgedDocsCount;
+  if (workCount > 0 || !reconciliation.ok) {
+    await logAuditEvent({
+      action: 'CRON_DAILY_PROCESSED',
+      actor: { id: 'cron', email: 'system@shopit.ng', role: 'system' },
+      target: { type: 'cron', id: 'daily' },
+      details: {
+        expiredOrdersCount: expired.expiredCount,
+        escrowReleasedCount: escrow.releasedCount,
+        unshippedRemindedCount: unshipped.remindedCount,
+        unshippedRefundedCount: unshipped.refundedCount,
+        purgedDocsCount: expired.purgedDocsCount,
+        reconciliationOk: reconciliation.ok,
+      },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
+  }
+
   return res.json({
     status: true,
     ok: true,
@@ -3273,6 +3806,15 @@ router.post('/coupons/validate', requireAuth, async (req: AuthenticatedRequest, 
     }
 
     const discountAmount = koboToNaira(parseInt(String(coupon.discount_kobo || '0'), 10));
+    await logAuditEvent({
+      action: 'COUPON_VALIDATED',
+      actor: { id: req.user!.userId, email: req.user!.email, role: req.user!.role },
+      target: { type: 'coupon', id: coupon.code },
+      details: { code: coupon.code, discountAmount, subtotalNaira },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
+
     return res.json({
       status: true,
       coupon: {
