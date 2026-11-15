@@ -301,7 +301,7 @@ async function main() {
       verifyTxRef = initJson.data.reference;
       verifyAmountNaira = initJson.data.grandTotalNaira;
 
-      const whRes = await origFetch(`${baseUrl}/api/payments/webhook`, {
+      const whRes = await origFetch(`${baseUrl}/api/webhooks/flutterwave`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'verif-hash': process.env.FLW_WEBHOOK_SECRET_HASH! },
         body: JSON.stringify({

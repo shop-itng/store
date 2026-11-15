@@ -72,7 +72,7 @@ export default async function handler(req: any, res: any) {
       JSON.stringify({
         status: true,
         message: 'Flutterwave payment webhook endpoint ready.',
-        endpoint: '/api/payments/webhook',
+        endpoint: '/api/webhooks/flutterwave',
       })
     );
   }

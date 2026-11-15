@@ -385,14 +385,14 @@ async function main() {
     // TEST 5: Forged webhook rejected (401) & missing secret fails closed (503)
     // -------------------------------------------------------------------------
     await test('5. Webhook rejects missing/bad verif-hash (401) and fails closed (503) if FLW_WEBHOOK_SECRET_HASH missing', async () => {
-      const missingHeaderRes = await origFetch(`${baseUrl}/api/payments/webhook`, {
+      const missingHeaderRes = await origFetch(`${baseUrl}/api/webhooks/flutterwave`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ event: 'charge.completed', data: { tx_ref: paidOrderRef } }),
       });
       assert.strictEqual(missingHeaderRes.status, 401);
 
-      const badHashRes = await origFetch(`${baseUrl}/api/payments/webhook`, {
+      const badHashRes = await origFetch(`${baseUrl}/api/webhooks/flutterwave`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'verif-hash': 'forged_bad_hash' },
         body: JSON.stringify({ event: 'charge.completed', data: { tx_ref: paidOrderRef } }),
@@ -402,7 +402,7 @@ async function main() {
       const savedSecret = process.env.FLW_WEBHOOK_SECRET_HASH;
       delete process.env.FLW_WEBHOOK_SECRET_HASH;
       try {
-        const noSecretRes = await origFetch(`${baseUrl}/api/payments/webhook`, {
+        const noSecretRes = await origFetch(`${baseUrl}/api/webhooks/flutterwave`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'verif-hash': 'anything' },
           body: JSON.stringify({ event: 'charge.completed', data: { tx_ref: paidOrderRef } }),
@@ -422,7 +422,7 @@ async function main() {
 
       for (const mode of ['wrong_amount', 'wrong_currency', 'unknown_txref'] as const) {
         mockFlwVerifyMode = mode;
-        const res = await origFetch(`${baseUrl}/api/payments/webhook`, {
+        const res = await origFetch(`${baseUrl}/api/webhooks/flutterwave`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -467,14 +467,14 @@ async function main() {
         },
       });
 
-      const first = await origFetch(`${baseUrl}/api/payments/webhook`, {
+      const first = await origFetch(`${baseUrl}/api/webhooks/flutterwave`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'verif-hash': process.env.FLW_WEBHOOK_SECRET_HASH! },
         body: payload,
       });
       assert.strictEqual(first.status, 200);
 
-      const second = await origFetch(`${baseUrl}/api/payments/webhook`, {
+      const second = await origFetch(`${baseUrl}/api/webhooks/flutterwave`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'verif-hash': process.env.FLW_WEBHOOK_SECRET_HASH! },
         body: payload,

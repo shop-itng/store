@@ -2,7 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import crypto from 'crypto';
 import cookieParser from 'cookie-parser';
-import paymentsWebhookHandler from './payments/webhook.js';
+import paymentsWebhookHandler from './webhooks/flutterwave.js';
 import { renderTransactionalEmail, type EmailTemplateKey } from '../src/utils/transactionalEmails.js';
 import {
   checkRateLimit as checkOtpRateLimit,
@@ -145,8 +145,8 @@ app.use((req, res, next) => {
   const originHeader = req.headers.origin ? String(req.headers.origin).replace(/\/$/, '') : '';
   const allowedOrigins = getAllowedOrigins();
   const isWebhookPath =
-    req.path === '/payments/webhook' ||
-    req.path === '/api/payments/webhook';
+    req.path === '/webhooks/flutterwave' ||
+    req.path === '/api/webhooks/flutterwave';
 
   const isOriginAllowed = !originHeader || allowedOrigins.includes(originHeader);
 
@@ -1214,8 +1214,8 @@ router.get('/payments/config', (_req, res) => {
     publicKey: getFlwPublicKey(),
     isSecretConfigured: Boolean(getFlwSecretKey()),
     isWebhookSecretConfigured: Boolean(getFlwWebhookHash()),
-    webhookPath: '/api/payments/webhook',
-    webhookUrl: `${APP_URL}/api/payments/webhook`,
+    webhookPath: '/api/webhooks/flutterwave',
+    webhookUrl: `${APP_URL}/api/webhooks/flutterwave`,
     minWithdrawal: 1000,
     coolingPeriodHours: 24,
   });
@@ -1224,8 +1224,8 @@ router.get('/payments/config', (_req, res) => {
 router.get('/payments/webhook-info', (_req, res) => {
   res.json({
     gateway: 'flutterwave',
-    webhookPath: '/api/payments/webhook',
-    webhookUrl: `${APP_URL}/api/payments/webhook`,
+    webhookPath: '/api/webhooks/flutterwave',
+    webhookUrl: `${APP_URL}/api/webhooks/flutterwave`,
     method: 'POST',
     signatureHeader: 'verif-hash',
     isConfigured: Boolean(getFlwSecretKey() && getFlwWebhookHash()),
@@ -1634,7 +1634,7 @@ router.post('/payments/initialize', requirePaymentsEnabled, requireAuth, async (
   }
 });
 
-router.all('/payments/webhook', requirePaymentsEnabled, async (req: any, res: any) => {
+router.all('/webhooks/flutterwave', requirePaymentsEnabled, async (req: any, res: any) => {
   return paymentsWebhookHandler(req, res);
 });
 

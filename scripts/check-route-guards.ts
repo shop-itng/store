@@ -72,8 +72,8 @@ function extractStackRoutes(stack: any[], prefix = '', out: DiscoveredRoute[] = 
 function isGuardedOrAllowed(route: DiscoveredRoute): { ok: boolean; reason: string } {
   const key = `${route.method} ${route.path}`;
 
-  // Normalize all HTTP method variations of webhook (router.all('/payments/webhook'))
-  if (route.path === '/payments/webhook') {
+  // Normalize all HTTP method variations of webhook (router.all('/webhooks/flutterwave'))
+  if (route.path === '/webhooks/flutterwave') {
     const hasPaymentGate = route.middlewares.includes('requirePaymentsEnabled');
     return hasPaymentGate
       ? { ok: true, reason: 'Webhook verif-hash + requirePaymentsEnabled' }

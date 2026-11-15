@@ -329,12 +329,18 @@ async function main() {
 
     await test('C6: Forged or unconfigured webhook never returns 200 or marks paid', async () => {
       process.env.PAYMENTS_ENABLED = 'true';
-      const res = await fetch(`${baseUrl}/api/payments/webhook`, {
+      const res = await fetch(`${baseUrl}/api/webhooks/flutterwave`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'verif-hash': 'deadbeef' },
         body: JSON.stringify({ event: 'charge.completed', data: { tx_ref: 'fake_ref', amount: 100 } }),
       });
       assert.ok([401, 503].includes(res.status), `Expected 401 or 503, got ${res.status}`);
+      const oldRes = await fetch(`${baseUrl}/api/payments/webhook`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'verif-hash': 'deadbeef' },
+        body: JSON.stringify({ event: 'charge.completed' }),
+      });
+      assert.strictEqual(oldRes.status, 404, 'Old /api/payments/webhook path must be removed');
     });
 
     // C8: Order visibility & state machine

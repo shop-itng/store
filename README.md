@@ -34,7 +34,7 @@ In your [Flutterwave Dashboard](https://app.flutterwave.com/):
 1. Go to **Settings** → **Webhooks**.
 2. Under **URL**, paste your exact endpoint:
    ```text
-   https://shop-itng-pied.vercel.app/api/payments/webhook
+   https://shop-itng-pied.vercel.app/api/webhooks/flutterwave
    ```
 3. Under **Secret Hash**, paste the exact value you set for `FLW_WEBHOOK_SECRET_HASH`.
 4. Enable **Receive webhook response in JSON format** and click **Save**.

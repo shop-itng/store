@@ -94,9 +94,9 @@ async function main() {
     })
   );
 
-  // 5. POST /api/payments/webhook
+  // 5. POST /api/webhooks/flutterwave
   tests.push(
-    await runTest('Payment Webhook', 'POST', '/api/payments/webhook', {
+    await runTest('Payment Webhook', 'POST', '/api/webhooks/flutterwave', {
       event: 'charge.completed',
     })
   );

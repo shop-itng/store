@@ -130,8 +130,8 @@ export async function getPaymentServerConfig(): Promise<{
       publicKey: PAYMENT_CONFIG.publicKey,
       isSecretConfigured: false,
       isWebhookSecretConfigured: false,
-      webhookPath: '/api/payments/webhook',
-      webhookUrl: 'https://shop-itng-pied.vercel.app/api/payments/webhook',
+      webhookPath: '/api/webhooks/flutterwave',
+      webhookUrl: 'https://shop-itng-pied.vercel.app/api/webhooks/flutterwave',
     };
   }
 }

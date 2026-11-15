@@ -2079,13 +2079,13 @@ export const AdminPanel: React.FC = () => {
                 <input
                   type="text"
                   readOnly
-                  value="https://shop-itng-pied.vercel.app/api/payments/webhook"
+                  value="https://shop-itng-pied.vercel.app/api/webhooks/flutterwave"
                   className="flex-1 bg-stone-900 border border-stone-700 text-xs text-[#9FE870] font-mono px-3 py-2 rounded-xl select-all focus:outline-hidden"
                 />
                 <button
                   onClick={() => {
                     navigator.clipboard.writeText(
-                      'https://shop-itng-pied.vercel.app/api/payments/webhook'
+                      'https://shop-itng-pied.vercel.app/api/webhooks/flutterwave'
                     );
                     notify('Flutterwave Webhook URL copied to clipboard!', 'success');
                   }}
