@@ -249,7 +249,7 @@ router.get('/version', (_req, res) => {
   });
 });
 
-// Health check
+// Health check (verifies PostgreSQL connection + core schema tables + optional Redis)
 router.get(['/health', '/api/health'], async (_req, res) => {
   const pgPing = await pingPostgres();
   const redisPing = await pingRedis();
@@ -258,13 +258,23 @@ router.get(['/health', '/api/health'], async (_req, res) => {
   const isRedisOk = !hasRedisConfig || redisPing.ok;
 
   if (isPgOk && isRedisOk) {
-    return res.status(200).json({ status: 'OK', timestamp: new Date().toISOString() });
+    return res.status(200).json({
+      status: 'OK',
+      database: pgPing.provider,
+      schemaOk: Boolean(pgPing.schemaOk),
+      timestamp: new Date().toISOString(),
+    });
   }
 
   const failingServices: string[] = [];
   if (!isPgOk) failingServices.push('Neon Postgres');
   if (!isRedisOk) failingServices.push('Upstash Redis');
-  return res.status(503).json({ status: 'ERROR', failing: failingServices.join(', '), timestamp: new Date().toISOString() });
+  return res.status(503).json({
+    status: 'ERROR',
+    failing: failingServices.join(', '),
+    schemaOk: Boolean(pgPing.schemaOk),
+    timestamp: new Date().toISOString(),
+  });
 });
 
 // ============================================================================
@@ -548,7 +558,7 @@ router.post('/auth/login', async (req, res) => {
     const userRes = await dbQuery(
       `SELECT u.*, s.id as seller_id, s.shop_name, s.verification_status, s.is_verified_seller, s.bio, s.campus
        FROM shopit_users u
-       LEFT JOIN shopit_sellers s ON u.id = s.user_id
+       LEFT JOIN shopit_sellers s ON (u.id = s.user_id OR u.id = s.id)
        WHERE LOWER(u.email) = LOWER($1)`,
       [cleanEmail]
     );
@@ -729,7 +739,7 @@ router.post('/auth/change-password', requireAuth, async (req: AuthenticatedReque
     const userId = req.user!.userId;
 
     const userRes = await dbQuery(
-      'SELECT u.id, u.email, u.name, u.role, u.sub_role, s.id AS seller_id, s.is_verified_seller, u.password_hash, u.must_change_password FROM shopit_users u LEFT JOIN shopit_sellers s ON u.id = s.user_id WHERE u.id = $1',
+      'SELECT u.id, u.email, u.name, u.role, u.sub_role, s.id AS seller_id, s.is_verified_seller, u.password_hash, u.must_change_password FROM shopit_users u LEFT JOIN shopit_sellers s ON (u.id = s.user_id OR u.id = s.id) WHERE u.id = $1',
       [userId]
     );
     if (userRes.rows.length === 0) {
@@ -991,28 +1001,35 @@ router.get('/admin/users', requireModerator, async (req: AuthenticatedRequest, r
     const usersRes = await dbQuery(dataSql, [...params, limit, offset]);
 
     const cutoffMs = Date.now() - 24 * 60 * 60 * 1000;
-    const users = usersRes.rows.map((row: any) => ({
-      id: row.id,
-      email: row.email,
-      name: row.name,
-      role: row.role,
-      ...(row.role === 'admin' && row.sub_role ? { subRole: row.sub_role } : {}),
-      isVerifiedEmail: Boolean(row.is_verified_email),
-      age: row.age,
-      hasGuardianConsent: Boolean(row.has_guardian_consent),
-      guardianName: row.guardian_name,
-      isBanned: Boolean(row.is_banned),
-      banReason: row.ban_reason,
-      lastLoginAt: row.last_login_at,
-      createdAt: row.created_at,
-      isNew: row.created_at ? new Date(row.created_at).getTime() >= cutoffMs : false,
-      shopName: row.shop_name,
-      campus: row.campus,
-      locationArea: row.location_area,
-      bio: row.bio,
-      verificationStatus: row.verification_status || (row.role === 'seller' ? 'not_started' : 'not_applicable'),
-      isVerifiedSeller: Boolean(row.is_verified_seller),
-    }));
+    const seenUserIds = new Set<string>();
+    const users = usersRes.rows
+      .filter((row: any) => {
+        if (seenUserIds.has(row.id)) return false;
+        seenUserIds.add(row.id);
+        return true;
+      })
+      .map((row: any) => ({
+        id: row.id,
+        email: row.email,
+        name: row.name,
+        role: row.role,
+        ...(row.role === 'admin' && row.sub_role ? { subRole: row.sub_role } : {}),
+        isVerifiedEmail: Boolean(row.is_verified_email),
+        age: row.age,
+        hasGuardianConsent: Boolean(row.has_guardian_consent),
+        guardianName: row.guardian_name,
+        isBanned: Boolean(row.is_banned),
+        banReason: row.ban_reason,
+        lastLoginAt: row.last_login_at,
+        createdAt: row.created_at,
+        isNew: row.created_at ? new Date(row.created_at).getTime() >= cutoffMs : false,
+        shopName: row.shop_name,
+        campus: row.campus,
+        locationArea: row.location_area,
+        bio: row.bio,
+        verificationStatus: row.verification_status || (row.role === 'seller' ? 'not_started' : 'not_applicable'),
+        isVerifiedSeller: Boolean(row.is_verified_seller),
+      }));
 
     return res.json({
       status: true,
@@ -1330,7 +1347,7 @@ router.get('/admin/metrics', requireModerator, async (_req: AuthenticatedRequest
         `SELECT u.id, u.email, u.name, u.role, u.age, u.has_guardian_consent, u.guardian_name, u.is_verified_email, u.is_banned, u.created_at, u.last_login_at,
                 s.shop_name, s.campus, s.location_area, s.verification_status, s.is_verified_seller
          FROM shopit_users u
-         LEFT JOIN shopit_sellers s ON u.id = s.user_id
+         LEFT JOIN shopit_sellers s ON (u.id = s.user_id OR u.id = s.id)
          ORDER BY u.created_at DESC
          LIMIT 10`
       ),
@@ -1427,7 +1444,7 @@ router.get('/admin/activity', requireModerator, async (req: AuthenticatedRequest
 
     if (category === 'users') {
       conditions.push(
-        `action IN ('USER_REGISTERED','USER_LOGIN','USER_LOGIN_FAILED','USER_LOGOUT','OTP_REQUESTED','OTP_VERIFIED','OTP_VERIFY_FAILED','PASSWORD_CHANGED','PASSWORD_RESET_COMPLETED','PASSWORD_RESET_FAILED','ADMIN_USER_DELETED','ADMIN_USER_BANNED','ADMIN_USER_UNBANNED','ADMIN_PASSWORD_RESET')`
+        `action IN ('USER_REGISTERED','BUYER_UPGRADED_TO_SELLER','USER_LOGIN','USER_LOGIN_FAILED','USER_LOGOUT','OTP_REQUESTED','OTP_VERIFIED','OTP_VERIFY_FAILED','PASSWORD_CHANGED','PASSWORD_RESET_COMPLETED','PASSWORD_RESET_FAILED','ADMIN_USER_DELETED','ADMIN_USER_BANNED','ADMIN_USER_UNBANNED','ADMIN_PASSWORD_RESET')`
       );
     } else if (category === 'orders_payments') {
       conditions.push(

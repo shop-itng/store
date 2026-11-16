@@ -51,6 +51,19 @@ async function runKvCommand(command: string, ...args: any[]): Promise<any> {
   }
 }
 
+function parseJsonArray<T = any>(raw: unknown): T[] {
+  if (Array.isArray(raw)) return raw as T[];
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
 const SESSION_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 days
 export const SESSION_COOKIE_NAME = 'shopit_session';
 
@@ -164,7 +177,7 @@ export async function getSession(token: string): Promise<UserSession | null> {
       `SELECT u.id, u.email, u.name, u.role, u.sub_role, u.is_banned, u.token_version, u.must_change_password,
               s.id AS seller_id, s.is_verified_seller AS s_verified
        FROM shopit_users u
-       LEFT JOIN shopit_sellers s ON u.id = s.user_id
+       LEFT JOIN shopit_sellers s ON (u.id = s.user_id OR u.id = s.id)
        WHERE u.id = $1`,
       [session.userId]
     );
@@ -299,7 +312,7 @@ export async function recordLoginFailure(email: string): Promise<{
   // Persist to PostgreSQL (shared across instances even without Redis)
   try {
     const existing = await dbQuery('SELECT timestamps FROM shopit_rate_limits WHERE key = $1', [rlKey]);
-    const recent: number[] = (existing.rows[0]?.timestamps || []).filter(
+    const recent: number[] = parseJsonArray<number>(existing.rows[0]?.timestamps).filter(
       (t: number) => now - t < LOCKOUT_DURATION_MS
     );
     recent.push(now);
@@ -372,7 +385,7 @@ export async function isAccountLocked(email: string): Promise<{
     }
 
     const rlRes = await dbQuery('SELECT timestamps FROM shopit_rate_limits WHERE key = $1', [rlKey]);
-    const recent: number[] = (rlRes.rows[0]?.timestamps || []).filter(
+    const recent: number[] = parseJsonArray<number>(rlRes.rows[0]?.timestamps).filter(
       (t: number) => now - t < LOCKOUT_DURATION_MS
     );
     if (recent.length >= MAX_FAILED_ATTEMPTS) {

@@ -32,6 +32,8 @@ export const AuthModal: React.FC = () => {
     closeAuthModal,
     authTab,
     setAuthTab,
+    preferredSignupRole,
+    currentUser,
     pendingAuthData,
     setPendingAuthData,
     verifyOtp,
@@ -88,6 +90,25 @@ export const AuthModal: React.FC = () => {
   const [pendingForceChangeUser, setPendingForceChangeUser] = useState<any>(null);
   const [forceNewPassword, setForceNewPassword] = useState('');
   const [forceConfirmPassword, setForceConfirmPassword] = useState('');
+
+  // Sync preferredSignupRole when AuthModal opens or switches into signup
+  useEffect(() => {
+    if (isAuthModalOpen && authTab === 'signup') {
+      if (preferredSignupRole === 'seller' && emergencyControls?.pauseSellerSignups) {
+        setRole('buyer');
+      } else if (preferredSignupRole === 'seller' || preferredSignupRole === 'buyer') {
+        setRole(preferredSignupRole);
+      }
+    }
+  }, [isAuthModalOpen, authTab, preferredSignupRole, emergencyControls?.pauseSellerSignups]);
+
+  // Prevent landing on Step 3 (seller_register) unauthenticated without an OTP signupVerificationToken
+  useEffect(() => {
+    if (isAuthModalOpen && authTab === 'seller_register' && !currentUser && !pendingAuthData?.signupVerificationToken) {
+      setRole('seller');
+      setAuthTab('signup');
+    }
+  }, [isAuthModalOpen, authTab, currentUser, pendingAuthData?.signupVerificationToken, setAuthTab]);
 
   // Sync under-18 and guardian info captured during Step 1 signup into Seller Setup step
   useEffect(() => {
@@ -845,9 +866,13 @@ export const AuthModal: React.FC = () => {
         {authTab === 'signup' && (
           <form onSubmit={handleInitialSignup} className="space-y-4">
             <div>
-              <h2 className="text-xl font-black text-[#111111]">Join Shop It</h2>
+              <h2 className="text-xl font-black text-[#111111]">
+                {role === 'seller' ? 'Create Your Seller Account' : 'Join Shop It'}
+              </h2>
               <p className="text-xs text-[#71717A] mt-1">
-                Marketplace for Nigerian teens and youth with escrow payment protection.
+                {role === 'seller'
+                  ? 'Step 1 of 3: Account details -> Step 2: Email OTP -> Step 3: Shop setup.'
+                  : 'Marketplace for Nigerian teens and youth with escrow payment protection.'}
               </p>
             </div>
 

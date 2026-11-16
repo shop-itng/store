@@ -13,6 +13,19 @@ export interface StoredOtpRecord {
   metadata?: Record<string, any>;
 }
 
+function parseJsonArray<T = any>(raw: unknown): T[] {
+  if (Array.isArray(raw)) return raw as T[];
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
 const OTP_EXPIRY_MS = 10 * 60 * 1000; // 10 minutes
 const RESEND_COOLDOWN_MS = 60 * 1000; // 60 seconds
 const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
@@ -116,7 +129,7 @@ export async function checkAndRecordRateLimit(
       'SELECT timestamps FROM shopit_rate_limits WHERE key = $1 FOR UPDATE',
       [cleanKey]
     );
-    const recent: number[] = (res.rows[0]?.timestamps || []).filter(
+    const recent: number[] = parseJsonArray<number>(res.rows[0]?.timestamps).filter(
       (t: number) => now - t < windowMs
     );
     if (recent.length >= maxRequests) {
@@ -177,7 +190,7 @@ export async function checkRateLimit(
   }
 
   const res = await dbQuery('SELECT timestamps FROM shopit_rate_limits WHERE key = $1', [emailKey]);
-  const emailTimes: number[] = (res.rows[0]?.timestamps || []).filter(
+  const emailTimes: number[] = parseJsonArray<number>(res.rows[0]?.timestamps).filter(
     (t: number) => now - t < RATE_LIMIT_WINDOW_MS
   );
   if (emailTimes.length >= MAX_EMAIL_REQUESTS) {
@@ -189,7 +202,7 @@ export async function checkRateLimit(
 
   if (cleanDevice !== 'dev_unknown') {
     const dRes = await dbQuery('SELECT timestamps FROM shopit_rate_limits WHERE key = $1', [devKey]);
-    const devTimes: number[] = (dRes.rows[0]?.timestamps || []).filter(
+    const devTimes: number[] = parseJsonArray<number>(dRes.rows[0]?.timestamps).filter(
       (t: number) => now - t < RATE_LIMIT_WINDOW_MS
     );
     if (devTimes.length >= MAX_DEVICE_REQUESTS) {
@@ -236,7 +249,7 @@ export async function recordRateLimit(email: string, deviceId?: string): Promise
       'SELECT timestamps FROM shopit_rate_limits WHERE key = $1 FOR UPDATE',
       [emailKey]
     );
-    const emailTimes: number[] = (res.rows[0]?.timestamps || []).filter(
+    const emailTimes: number[] = parseJsonArray<number>(res.rows[0]?.timestamps).filter(
       (t: number) => now - t < RATE_LIMIT_WINDOW_MS
     );
     emailTimes.push(now);
@@ -250,7 +263,7 @@ export async function recordRateLimit(email: string, deviceId?: string): Promise
         'SELECT timestamps FROM shopit_rate_limits WHERE key = $1 FOR UPDATE',
         [devKey]
       );
-      const devTimes: number[] = (dRes.rows[0]?.timestamps || []).filter(
+      const devTimes: number[] = parseJsonArray<number>(dRes.rows[0]?.timestamps).filter(
         (t: number) => now - t < RATE_LIMIT_WINDOW_MS
       );
       devTimes.push(now);
@@ -592,7 +605,7 @@ export async function getAllReportRecords(): Promise<ReportRecord[]> {
     reason: row.reason,
     details: row.details,
     status: row.status,
-    actionLogs: row.action_logs || [],
+    actionLogs: parseJsonArray(row.action_logs),
     createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
   }));
 }
@@ -603,7 +616,7 @@ export async function updateReportStatus(
   actionNote?: string
 ): Promise<void> {
   const existing = await dbQuery('SELECT action_logs FROM shopit_reports WHERE id = $1', [reportId]);
-  const logs = existing.rows[0]?.action_logs || [];
+  const logs = parseJsonArray<{ action: string; note: string; timestamp: string }>(existing.rows[0]?.action_logs);
   if (actionNote) {
     logs.push({ action: `Status changed to ${status}`, note: actionNote, timestamp: new Date().toISOString() });
   }

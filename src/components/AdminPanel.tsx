@@ -1996,9 +1996,11 @@ export const AdminPanel: React.FC = () => {
                                 <button
                                   type="button"
                                   onClick={async () => {
-                                    adminToggleSellerVerification(user.id, !user.isVerifiedSeller);
-                                    await fetchDbUsers(dbUsersPage);
-                                    fetchMetrics();
+                                    const ok = await adminToggleSellerVerification(user.id, !user.isVerifiedSeller);
+                                    if (ok) {
+                                      await fetchDbUsers(dbUsersPage);
+                                      await fetchMetrics();
+                                    }
                                   }}
                                   className={`px-2 py-1 rounded-lg text-[11px] font-bold border transition-colors flex items-center gap-1 cursor-pointer ${
                                     user.isVerifiedSeller
@@ -2034,9 +2036,11 @@ export const AdminPanel: React.FC = () => {
                                   <button
                                     type="button"
                                     onClick={async () => {
-                                      banUserAccount(user.id, !user.isBanned);
-                                      await fetchDbUsers(dbUsersPage);
-                                      await fetchMetrics();
+                                      const ok = await banUserAccount(user.id, !user.isBanned);
+                                      if (ok) {
+                                        await fetchDbUsers(dbUsersPage);
+                                        await fetchMetrics();
+                                      }
                                     }}
                                     className={`px-2 py-1 rounded-lg text-[11px] font-bold border transition-colors flex items-center gap-1 cursor-pointer ${
                                       user.isBanned
@@ -4051,10 +4055,12 @@ export const AdminPanel: React.FC = () => {
               <button
                 type="button"
                 onClick={async () => {
-                  deleteUserAccount(deleteConfirmModal.userId);
-                  setDeleteConfirmModal(prev => ({ ...prev, isOpen: false }));
-                  await fetchDbUsers(dbUsersPage);
-                  await fetchMetrics();
+                  const ok = await deleteUserAccount(deleteConfirmModal.userId);
+                  if (ok) {
+                    setDeleteConfirmModal(prev => ({ ...prev, isOpen: false }));
+                    await fetchDbUsers(dbUsersPage);
+                    await fetchMetrics();
+                  }
                 }}
                 className="px-5 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white font-black text-xs transition-all shadow-md active:scale-95 flex items-center gap-1.5 cursor-pointer"
               >
@@ -4142,9 +4148,11 @@ export const AdminPanel: React.FC = () => {
                 type="button"
                 disabled={resetPasswordModal.newPassword.trim().length < 8}
                 onClick={async () => {
-                  adminResetUserPassword(resetPasswordModal.userId, resetPasswordModal.newPassword.trim());
-                  setResetPasswordModal(prev => ({ ...prev, isOpen: false }));
-                  await fetchDbUsers(dbUsersPage);
+                  const ok = await adminResetUserPassword(resetPasswordModal.userId, resetPasswordModal.newPassword.trim());
+                  if (ok) {
+                    setResetPasswordModal(prev => ({ ...prev, isOpen: false }));
+                    await fetchDbUsers(dbUsersPage);
+                  }
                 }}
                 className="px-5 py-2.5 rounded-xl bg-stone-900 hover:bg-black text-[#9FE870] font-black text-xs transition-all shadow-md disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5 cursor-pointer"
               >

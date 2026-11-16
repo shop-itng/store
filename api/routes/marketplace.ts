@@ -643,6 +643,148 @@ router.put('/sellers/:id', requireAuth, async (req: AuthenticatedRequest, res: R
   }
 });
 
+// POST /api/sellers/upgrade - Authenticated buyer creates a shop profile and upgrades to seller
+router.post('/sellers/upgrade', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const authUser = req.user!;
+    const { shopName, bio, campus, location, locationArea, under18, guardianName, guardianPhone } = req.body || {};
+
+    const cleanShopName = String(shopName || '').trim().slice(0, 120);
+    if (!cleanShopName || cleanShopName.length < 2) {
+      return res.status(400).json({ status: false, message: 'Please provide a valid shop name (at least 2 characters).' });
+    }
+    if (under18 && (!guardianName || !String(guardianName).trim())) {
+      return res.status(400).json({ status: false, message: 'Youth sellers under 18 require parent/guardian consent.' });
+    }
+
+    const userRes = await dbQuery('SELECT * FROM shopit_users WHERE id = $1', [authUser.userId]);
+    if (userRes.rows.length === 0) {
+      return res.status(404).json({ status: false, message: 'User account not found.' });
+    }
+    const uRow = userRes.rows[0];
+    const resolvedArea = locationArea || location?.area || 'Yaba';
+    const resolvedCampus = campus || 'UNILAG (Akoka)';
+    const resolvedBio = String(bio || '').trim().slice(0, 1000);
+
+    const existingSeller = await dbQuery(
+      'SELECT * FROM shopit_sellers WHERE id = $1 OR user_id = $1',
+      [authUser.userId]
+    );
+
+    let sellerId = authUser.userId;
+    let isVerifiedSeller = false;
+    let verificationStatus = 'not_started';
+
+    if (existingSeller.rows.length > 0) {
+      const sRow = existingSeller.rows[0];
+      sellerId = sRow.id;
+      isVerifiedSeller = Boolean(sRow.is_verified_seller);
+      verificationStatus = sRow.verification_status || 'not_started';
+      await dbQuery(
+        `UPDATE shopit_sellers
+         SET shop_name = $1, bio = $2, campus = $3, location_state = $4, location_city = $5, location_area = $6,
+             under_18 = $7, guardian_consent = $8, guardian_name = COALESCE($9, guardian_name),
+             guardian_phone = COALESCE($10, guardian_phone), updated_at = NOW()
+         WHERE id = $11`,
+        [
+          cleanShopName,
+          resolvedBio,
+          resolvedCampus,
+          location?.state || sRow.location_state || 'Lagos',
+          location?.city || sRow.location_city || 'Lagos Mainland',
+          resolvedArea,
+          Boolean(under18),
+          Boolean(under18),
+          guardianName ? String(guardianName).trim() : null,
+          guardianPhone ? String(guardianPhone).trim() : null,
+          sellerId,
+        ]
+      );
+    } else {
+      await dbQuery(
+        `INSERT INTO shopit_sellers (
+          id, user_id, shop_name, owner_name, email, bio, campus,
+          location_state, location_city, location_area,
+          under_18, guardian_consent, guardian_name, guardian_phone,
+          is_verified_seller, verification_status, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, false, 'not_started', NOW(), NOW())`,
+        [
+          sellerId,
+          authUser.userId,
+          cleanShopName,
+          uRow.name,
+          uRow.email,
+          resolvedBio,
+          resolvedCampus,
+          location?.state || 'Lagos',
+          location?.city || 'Lagos Mainland',
+          resolvedArea,
+          Boolean(under18),
+          Boolean(under18),
+          guardianName ? String(guardianName).trim() : null,
+          guardianPhone ? String(guardianPhone).trim() : null,
+        ]
+      );
+    }
+
+    if (uRow.role === 'buyer') {
+      await dbQuery('UPDATE shopit_users SET role = $1, updated_at = NOW() WHERE id = $2', ['seller', authUser.userId]);
+    }
+
+    await dbQuery(
+      `INSERT INTO shopit_wallets (seller_id, pending_balance, available_balance, total_withdrawn, created_at, updated_at)
+       VALUES ($1, 0, 0, 0, NOW(), NOW()) ON CONFLICT (seller_id) DO NOTHING`,
+      [sellerId]
+    );
+
+    await logAuditEvent({
+      action: 'BUYER_UPGRADED_TO_SELLER',
+      actor: { id: authUser.userId, email: uRow.email, role: uRow.role === 'buyer' ? 'seller' : uRow.role },
+      target: { type: 'seller', id: sellerId },
+      details: { shopName: cleanShopName, campus: resolvedCampus, area: resolvedArea },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
+
+    return res.json({
+      status: true,
+      user: {
+        id: uRow.id,
+        email: uRow.email,
+        name: uRow.name,
+        role: uRow.role === 'admin' ? 'admin' : 'seller',
+        isVerifiedEmail: Boolean(uRow.is_verified_email),
+        sellerProfile: {
+          id: sellerId,
+          shopName: cleanShopName,
+          ownerName: uRow.name,
+          bio: resolvedBio,
+          campus: resolvedCampus,
+          location: location || { state: 'Lagos', city: 'Lagos Mainland', area: resolvedArea },
+          locationArea: resolvedArea,
+          isVerifiedSeller,
+          verificationStatus,
+          under18: Boolean(under18),
+          guardianConsent: Boolean(under18),
+          guardianName: guardianName || undefined,
+          badges: isVerifiedSeller ? ['verified'] : [],
+          level: 1,
+          rating: 5.0,
+          reviewCount: 0,
+          salesCount: 0,
+          viewsCount: 0,
+          vacationMode: false,
+          joinedDate: new Date().toISOString().split('T')[0],
+        },
+      },
+      message: 'Seller shop created and saved in database.',
+    });
+  } catch (err: any) {
+    console.error('[Seller Upgrade Error]:', err.message);
+    return res.status(500).json({ status: false, message: 'Database error creating seller profile.' });
+  }
+});
+
 // ============================================================================
 // 3. CARTS & WISHLISTS API (PostgreSQL: shopit_carts, shopit_wishlists)
 // ============================================================================

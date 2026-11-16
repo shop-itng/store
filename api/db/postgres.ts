@@ -45,24 +45,69 @@ export function verifyPassword(password: string, storedHash: string): boolean {
   }
 }
 
+const CORE_SCHEMA_TABLES = [
+  'shopit_users',
+  'shopit_sellers',
+  'shopit_otps',
+  'shopit_sessions',
+  'shopit_verified_signups',
+  'shopit_audit_logs',
+  'shopit_rate_limits',
+] as const;
+
 export function getDatabaseUrl(): string {
-  let url = (
+  return (
     process.env.DATABASE_URL ||
     process.env.POSTGRES_URL ||
     process.env.POSTGRES_PRISMA_URL ||
     process.env.POSTGRES_URL_NON_POOLING ||
     process.env.NEON_DATABASE_URL ||
     ''
-  ).trim().replace(/^["']|["']$/g, '');
+  )
+    .trim()
+    .replace(/^["']|["']$/g, '');
+}
 
-  if (!url) return '';
+/**
+ * Parses a PostgreSQL connection URL using the WHATWG URL API and returns explicit pg.PoolConfig fields.
+ * Avoiding `connectionString` prevents pg-connection-string from calling deprecated `url.parse()` (DEP0169)
+ * and prevents SSL mode alias deprecation warnings on Vercel/Node 22+.
+ */
+export function buildPgPoolConfig(dbUrl: string): pg.PoolConfig {
+  const parsed = new URL(dbUrl);
+  const host = parsed.hostname;
+  const port = parsed.port ? parseInt(parsed.port, 10) : 5432;
+  const user = parsed.username ? decodeURIComponent(parsed.username) : undefined;
+  const password = parsed.password ? decodeURIComponent(parsed.password) : undefined;
+  const rawDb = parsed.pathname.replace(/^\/+/, '');
+  const database = rawDb ? decodeURIComponent(rawDb) : undefined;
+  const pgOptions = parsed.searchParams.get('options') || undefined;
+  const sslMode = (parsed.searchParams.get('sslmode') || '').toLowerCase();
+  const isLocalHost = host === 'localhost' || host === '127.0.0.1' || host === '::1';
+  const isVercel = Boolean(process.env.VERCEL);
 
-  // Prepare for libpq compatibility and silence Node 22 deprecation warnings on Neon sslmode=require
-  if (url.includes('sslmode=require') && !url.includes('uselibpqcompat')) {
-    url = url.includes('?') ? `${url}&uselibpqcompat=true` : `${url}?uselibpqcompat=true`;
+  let ssl: pg.PoolConfig['ssl'];
+  if (sslMode === 'disable' || (isLocalHost && !sslMode)) {
+    ssl = false;
+  } else if (sslMode === 'verify-full' || sslMode === 'verify-ca') {
+    ssl = { rejectUnauthorized: true };
+  } else {
+    ssl = { rejectUnauthorized: false };
   }
 
-  return url;
+  return {
+    host,
+    port,
+    user,
+    password,
+    database,
+    ...(pgOptions ? { options: pgOptions } : {}),
+    ssl,
+    max: isVercel ? 5 : 10,
+    idleTimeoutMillis: 20000,
+    connectionTimeoutMillis: 10000,
+    allowExitOnIdle: isVercel,
+  };
 }
 
 export async function getPool(): Promise<any> {
@@ -74,13 +119,12 @@ export async function getPool(): Promise<any> {
   if (dbUrl) {
     try {
       const { Pool } = pg;
-      activePool = new Pool({
-        connectionString: dbUrl,
-        max: 10,
-        ssl: dbUrl.includes('localhost') || dbUrl.includes('127.0.0.1') ? false : { rejectUnauthorized: false },
-        idleTimeoutMillis: 30000,
-        connectionTimeoutMillis: 10000,
+      const poolConfig = buildPgPoolConfig(dbUrl);
+      const pool = new Pool(poolConfig);
+      pool.on('error', (err: any) => {
+        console.error('[Database Pool Idle Error]:', err?.message || err);
       });
+      activePool = pool;
       isPgMem = false;
       console.log('[Database] Connected to external PostgreSQL database.');
       return activePool;
@@ -123,15 +167,17 @@ export async function getPool(): Promise<any> {
 export async function query(text: string, params?: any[]): Promise<any> {
   const pool = await getPool();
   if (!migrationCompleted) {
-    try {
-      await runMigration();
-    } catch (migErr: any) {
-      console.warn('[Query Migration Await Warning]:', migErr.message);
-    }
+    await runMigration();
   }
   try {
     return await pool.query(text, params);
   } catch (err: any) {
+    if (err?.code === '42P01') {
+      console.warn('[PostgreSQL Query Recovery] Missing relation detected (42P01). Re-running migration and retrying once.');
+      migrationCompleted = false;
+      await runMigration();
+      return await pool.query(text, params);
+    }
     console.error('[PostgreSQL Query Error]:', err.message);
     throw err;
   }
@@ -148,28 +194,64 @@ export async function withTransaction<T>(fn: (client: any) => Promise<T>): Promi
     const result = await fn(client);
     await client.query('COMMIT');
     return result;
-  } catch (err) {
+  } catch (err: any) {
     try {
       await client.query('ROLLBACK');
     } catch {}
+    if (err?.code === '42P01') {
+      migrationCompleted = false;
+    }
     throw err;
   } finally {
     client.release();
   }
 }
 
-export async function pingPostgres(): Promise<{ ok: boolean; provider: string; isPgMem?: boolean; error?: string }> {
+export async function verifyDatabaseSchema(): Promise<{ ok: boolean; missingTables: string[]; error?: string }> {
+  try {
+    const pool = await getPool();
+    const missingTables: string[] = [];
+    for (const table of CORE_SCHEMA_TABLES) {
+      try {
+        await pool.query(`SELECT 1 FROM ${table} LIMIT 0`);
+      } catch {
+        missingTables.push(table);
+      }
+    }
+    return {
+      ok: missingTables.length === 0,
+      missingTables,
+    };
+  } catch (err: any) {
+    return {
+      ok: false,
+      missingTables: [...CORE_SCHEMA_TABLES],
+      error: err.message,
+    };
+  }
+}
+
+export async function pingPostgres(): Promise<{ ok: boolean; provider: string; isPgMem?: boolean; schemaOk?: boolean; error?: string }> {
   try {
     const pool = await getPool();
     const res = await pool.query('SELECT 1 AS alive');
     const isAlive = res?.rows?.[0]?.alive === 1;
+    if (!isAlive) {
+      return { ok: false, isPgMem, schemaOk: false, provider: isPgMem ? 'pg-mem (local dev)' : 'Neon PostgreSQL (DATABASE_URL)', error: 'SELECT 1 check failed' };
+    }
+    if (!migrationCompleted) {
+      await runMigration();
+    }
+    const schemaCheck = await verifyDatabaseSchema();
     return {
-      ok: isAlive,
+      ok: schemaCheck.ok,
+      schemaOk: schemaCheck.ok,
       isPgMem,
       provider: isPgMem ? 'pg-mem (local dev)' : 'Neon PostgreSQL (DATABASE_URL)',
+      ...(schemaCheck.ok ? {} : { error: `Missing core tables: ${schemaCheck.missingTables.join(', ')}` }),
     };
   } catch (err: any) {
-    return { ok: false, isPgMem, provider: 'Neon PostgreSQL', error: err.message };
+    return { ok: false, schemaOk: false, isPgMem, provider: 'Neon PostgreSQL', error: err.message };
   }
 }
 
@@ -915,26 +997,85 @@ export async function runMigration(): Promise<void> {
     'ALTER TABLE shopit_commissions ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();',
   ];
 
-  const statements = migrationSql
+  const allStatements = migrationSql
     .split(';')
     .map(s => s.trim())
     .filter(s => s.length > 0);
 
-  // Execute tables and column additions with individual fault-tolerance
-  for (const statement of statements) {
+  // Separate table DDL, column healing ALTERs, and index DDL so indexes on newer columns never fail silently
+  const tableStatements = allStatements.filter(s => /^CREATE\s+TABLE/i.test(s));
+  const sqlIndexStatements = allStatements.filter(s => /^CREATE\s+(UNIQUE\s+)?INDEX/i.test(s));
+  const otherSqlStatements = allStatements.filter(
+    s => !/^CREATE\s+TABLE/i.test(s) && !/^CREATE\s+(UNIQUE\s+)?INDEX/i.test(s)
+  );
+
+  const alterOnlyStatements = alterStatements
+    .map(s => s.trim())
+    .filter(s => s.length > 0 && !/^CREATE\s+(UNIQUE\s+)?INDEX/i.test(s));
+  const alterIndexStatements = alterStatements
+    .map(s => s.trim())
+    .filter(s => /^CREATE\s+(UNIQUE\s+)?INDEX/i.test(s));
+
+  const isBenignDdlError = (stmt: string, err: any): boolean => {
+    const msg = String(err?.message || '').toLowerCase();
+    const code = String(err?.code || '');
+    // Ignore already-exists errors
+    if (code === '42P07' || code === '42710' || code === '42701' || msg.includes('already exists')) {
+      return true;
+    }
+    // pg-mem omits a few Postgres syntax clauses like DROP DEFAULT / DROP CONSTRAINT IF EXISTS
+    if (
+      isPgMem &&
+      (stmt.includes('DROP DEFAULT') ||
+        stmt.includes('SET DEFAULT') ||
+        stmt.includes('DROP CONSTRAINT') ||
+        stmt.includes('ADD CONSTRAINT'))
+    ) {
+      return true;
+    }
+    return false;
+  };
+
+  // Phase 1: Create all tables
+  for (const statement of [...tableStatements, ...otherSqlStatements]) {
     try {
       await pool.query(statement);
     } catch (err: any) {
-      console.warn('[Migration DDL Statement Note]:', err.message);
+      if (!isBenignDdlError(statement, err)) {
+        console.error('[Migration Table DDL Error]:', err.message);
+        throw err;
+      }
+      console.warn('[Migration Table DDL Note]:', err.message);
     }
   }
 
-  for (const stmt of alterStatements) {
+  // Phase 2: Heal columns & constraints on existing tables
+  for (const stmt of alterOnlyStatements) {
     try {
       await pool.query(stmt);
     } catch (alterErr: any) {
+      if (!isBenignDdlError(stmt, alterErr)) {
+        console.error('[Migration Column Error]:', alterErr.message);
+        throw alterErr;
+      }
       console.warn('[Migration Column Note]:', alterErr.message);
     }
+  }
+
+  // Phase 3: Create indexes after all columns exist
+  for (const idxStmt of [...sqlIndexStatements, ...alterIndexStatements]) {
+    try {
+      await pool.query(idxStmt);
+    } catch (idxErr: any) {
+      if (!isBenignDdlError(idxStmt, idxErr)) {
+        console.warn('[Migration Index Note]:', idxErr.message);
+      }
+    }
+  }
+
+  // Phase 4: Verify all core tables actually exist before marking migrationCompleted = true
+  for (const coreTable of CORE_SCHEMA_TABLES) {
+    await pool.query(`SELECT 1 FROM ${coreTable} LIMIT 0`);
   }
 
   // Seed default coupons into PostgreSQL (DB-authoritative coupon validation)

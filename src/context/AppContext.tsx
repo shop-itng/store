@@ -104,6 +104,8 @@ interface AppContextType {
   closeAuthModal: () => void;
   authTab: 'login' | 'signup' | 'otp' | 'seller_register' | 'forgot_password';
   setAuthTab: (tab: 'login' | 'signup' | 'otp' | 'seller_register' | 'forgot_password') => void;
+  preferredSignupRole: UserRole;
+  setPreferredSignupRole: (role: UserRole) => void;
   pendingAuthData: any;
   setPendingAuthData: (data: any) => void;
   verifyOtp: (code: string) => Promise<boolean>;
@@ -116,7 +118,7 @@ interface AppContextType {
     under18: boolean;
     guardianName?: string;
     guardianPhone?: string;
-  }) => void;
+  }) => Promise<void>;
   refreshCurrentUser: () => Promise<void>;
 
   // Catalog & Products
@@ -125,16 +127,16 @@ interface AppContextType {
   addProduct: (
     newProd: Omit<Product, 'id' | 'createdAt' | 'rating' | 'reviewCount' | 'reviews' | 'serviceFee' | 'displayPrice' | 'isSoldOut' | 'isNewArrival'> &
       Partial<Pick<Product, 'serviceFee' | 'displayPrice' | 'isSoldOut' | 'isNewArrival'>>
-  ) => void;
-  updateProduct: (id: string, updates: Partial<Product>) => void;
-  deleteProduct: (id: string) => void;
-  toggleProductStock: (id: string) => void;
+  ) => Promise<void>;
+  updateProduct: (id: string, updates: Partial<Product>) => Promise<void>;
+  deleteProduct: (id: string) => Promise<void>;
+  toggleProductStock: (id: string) => Promise<void>;
 
   // Sellers
   sellers: SellerProfile[];
   getSellerById: (id: string) => SellerProfile | undefined;
   currentSeller: SellerProfile | null;
-  toggleVacationMode: (sellerId: string) => void;
+  toggleVacationMode: (sellerId: string) => Promise<void>;
 
   // Search & Filters
   searchQuery: string;
@@ -272,10 +274,10 @@ interface AppContextType {
   // Moderator Super-Powers & Account Governance
   registeredUsers: User[];
   refreshAdminData: (roleOverride?: UserRole) => Promise<void>;
-  deleteUserAccount: (userId: string) => boolean;
-  banUserAccount: (userId: string, isBanned: boolean, reason?: string) => void;
-  adminResetUserPassword: (userId: string, newPass: string) => boolean;
-  adminToggleSellerVerification: (sellerId: string, isVerified: boolean) => void;
+  deleteUserAccount: (userId: string) => Promise<boolean>;
+  banUserAccount: (userId: string, isBanned: boolean, reason?: string) => Promise<boolean>;
+  adminResetUserPassword: (userId: string, newPass: string) => Promise<boolean>;
+  adminToggleSellerVerification: (sellerId: string, isVerified: boolean) => Promise<boolean>;
   adminForceDeleteProduct: (productId: string) => void;
   adminForceReleaseEscrow: (orderId: string) => void;
   adminForceRefundOrder: (orderId: string, notes?: string) => void;
@@ -755,10 +757,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Auth modal states
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [authTab, setAuthTab] = useState<'login' | 'signup' | 'otp' | 'seller_register' | 'forgot_password'>('login');
+  const [preferredSignupRole, setPreferredSignupRole] = useState<UserRole>('buyer');
   const [pendingAuthData, setPendingAuthData] = useState<any>(null);
 
-  // Notifications
+  // Notifications (toast alerts kept separate from DB persistent notifications)
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
+  const [, setDbNotifications] = useState<any[]>([]);
 
   // Hydrate authenticated user strictly from server session (/api/auth/me) on initial mount
   useEffect(() => {
@@ -950,11 +954,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       })
       .catch(() => {});
 
-    // Fetch notifications from PostgreSQL
+    // Fetch notifications from PostgreSQL into dedicated dbNotifications state (never clobber toast queue)
     fetch('/api/notifications', { headers, credentials: 'include' })
       .then(res => res.json())
       .then(data => {
-        if (data.status && Array.isArray(data.notifications)) setNotifications(data.notifications);
+        if (data.status && Array.isArray(data.notifications)) setDbNotifications(data.notifications);
       })
       .catch(() => {});
 
@@ -1143,7 +1147,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setActiveView('seller_dashboard');
       } else {
         openAuthModal('seller_register');
-        notify('Register your shop to access Seller Dashboard.', 'info');
+        if (!currentUser) {
+          notify('Create your seller account and verify your email first to launch your shop.', 'info');
+        }
       }
     } else {
       setActiveView('catalog');
@@ -1195,12 +1201,36 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setRegisteredUsers([]);
     setVerificationRequests([]);
     setAdminAuditLogs([]);
+    setDbNotifications([]);
     localStorage.removeItem('shopit_session_token');
     setActiveView('catalog');
     notify('Logged out successfully', 'info');
   };
 
   const openAuthModal = (tab: 'login' | 'signup' | 'seller_register' | 'forgot_password' = 'login') => {
+    if (tab === 'seller_register') {
+      if (currentUser?.role === 'seller') {
+        setActiveView('seller_dashboard');
+        return;
+      }
+      if (currentUser?.role === 'buyer' || pendingAuthData?.signupVerificationToken) {
+        setPreferredSignupRole('seller');
+        setAuthTab('seller_register');
+        setIsAuthModalOpen(true);
+        trackActivity('AUTH_MODAL_OPENED', { targetType: 'auth', targetId: 'seller_register', details: { tab: 'seller_register' } });
+        return;
+      }
+      // Unauthenticated visitor clicking "Sign Up as a Seller" must start at Step 1 (signup with seller role) -> OTP -> shop setup
+      setPreferredSignupRole('seller');
+      setAuthTab('signup');
+      setIsAuthModalOpen(true);
+      trackActivity('AUTH_MODAL_OPENED', { targetType: 'auth', targetId: 'seller_signup', details: { tab: 'signup', role: 'seller' } });
+      return;
+    }
+
+    if (tab === 'signup') {
+      setPreferredSignupRole('buyer');
+    }
     setAuthTab(tab);
     setIsAuthModalOpen(true);
     trackActivity('AUTH_MODAL_OPENED', { targetType: 'auth', targetId: tab, details: { tab } });
@@ -1304,21 +1334,68 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }) => {
     const resolvedArea = sellerData.locationArea || sellerData.location?.area || 'Lagos Mainland';
 
+    // Authenticated buyer upgrading to seller shop
+    if (!pendingAuthData?.signupVerificationToken) {
+      if (currentUser) {
+        try {
+          const resp = await fetch('/api/sellers/upgrade', {
+            method: 'POST',
+            headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+            credentials: 'include',
+            body: JSON.stringify({
+              shopName: sellerData.shopName,
+              bio: sellerData.bio,
+              campus: sellerData.campus || 'UNILAG (Akoka)',
+              location: sellerData.location,
+              locationArea: resolvedArea,
+              under18: sellerData.under18,
+              guardianName: sellerData.guardianName,
+              guardianPhone: sellerData.guardianPhone,
+            }),
+          });
+          const data = await resp.json();
+          if (!resp.ok || !data.status) {
+            notify(data.message || 'Unable to create seller shop.', 'error');
+            return;
+          }
+          const upgradedUser = data.user;
+          if (upgradedUser?.sellerProfile) {
+            setSellers(prev => [upgradedUser.sellerProfile, ...prev.filter(s => s.id !== upgradedUser.sellerProfile.id)]);
+          }
+          setCurrentUser(prev => (prev ? { ...prev, ...upgradedUser } : upgradedUser));
+          closeAuthModal();
+          setActiveView('seller_dashboard');
+          fetchMarketplaceData();
+          notify(`Shop "${sellerData.shopName}" created and saved in database!`, 'success');
+          return;
+        } catch (err: any) {
+          console.error('[Seller Upgrade Error]:', err.message);
+          notify('Unable to reach database server. Please try again.', 'error');
+          return;
+        }
+      }
+
+      setPreferredSignupRole('seller');
+      setAuthTab('signup');
+      notify('Please create your account and verify your email OTP first before launching your shop.', 'error');
+      return;
+    }
+
     try {
       const resp = await fetch('/api/auth/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
         body: JSON.stringify({
-          email: pendingAuthData?.email,
-          password: pendingAuthData?.password,
-          name: pendingAuthData?.name || sellerData.shopName,
+          email: pendingAuthData.email,
+          password: pendingAuthData.password,
+          name: pendingAuthData.name || sellerData.shopName,
           role: 'seller',
-          age: pendingAuthData?.age,
-          hasGuardianConsent: pendingAuthData?.hasGuardianConsent,
-          guardianName: sellerData.guardianName || pendingAuthData?.guardianName,
+          age: pendingAuthData.age,
+          hasGuardianConsent: pendingAuthData.hasGuardianConsent,
+          guardianName: sellerData.guardianName || pendingAuthData.guardianName,
           guardianPhone: sellerData.guardianPhone,
-          signupVerificationToken: pendingAuthData?.signupVerificationToken,
+          signupVerificationToken: pendingAuthData.signupVerificationToken,
           shopName: sellerData.shopName,
           bio: sellerData.bio,
           campus: sellerData.campus || 'UNILAG (Akoka)',
@@ -1391,7 +1468,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  const addProduct = (
+  const addProduct = async (
     newProd: Omit<
       Product,
       'id' | 'createdAt' | 'rating' | 'reviewCount' | 'reviews' | 'serviceFee' | 'displayPrice' | 'isSoldOut' | 'isNewArrival'
@@ -1415,21 +1492,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       currentUser?.role === 'admin'
     );
 
-    // Allow smooth product listing for all creators (NIN verification is enforced at withdrawal time)
-    if (currentSeller && !isSellerVerified) {
-      notify('Craft published! Remember to complete your NIN identity verification before requesting bank payouts.', 'info');
-    }
-
-    const id = `prod_${Date.now()}`;
     const pricing = getPricingBreakdown(newProd.sellerPrice);
     const sanitizedBadges: Product['sellerBadges'] = (newProd.sellerBadges || []).filter(b => b !== 'verified');
     if (isSellerVerified) {
       sanitizedBadges.push('verified');
     }
 
+    const tempId = `prod_temp_${Date.now()}`;
     const product: Product = {
       ...newProd,
-      id,
+      id: tempId,
       sellerBadges: sanitizedBadges,
       location: newProd.location || userLocation,
       locationArea: newProd.locationArea || newProd.location?.area || userLocation.area,
@@ -1442,22 +1514,39 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       isSoldOut: (newProd.stock ?? 1) <= 0,
       isNewArrival: true,
     };
-    setProducts(prev => [product, ...prev]);
 
-    // Persist to Neon PostgreSQL with session headers
-    fetch('/api/products', {
-      method: 'POST',
-      headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
-      credentials: 'include',
-      body: JSON.stringify(product),
-    }).catch(err => {
+    try {
+      const resp = await fetch('/api/products', {
+        method: 'POST',
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        credentials: 'include',
+        body: JSON.stringify(product),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || !data.status) {
+        notify(data.message || 'Failed to save product listing in database.', 'error');
+        return;
+      }
+
+      const savedProduct: Product = {
+        ...product,
+        id: data.productId || tempId,
+      };
+      setProducts(prev => [savedProduct, ...prev]);
+
+      if (currentSeller && !isSellerVerified) {
+        notify('Craft published! Remember to complete your NIN identity verification before requesting bank payouts.', 'info');
+      } else {
+        notify(`Product "${product.title}" listed successfully in the marketplace!`, 'success');
+      }
+    } catch (err: any) {
       console.warn('[Add Product Network Error]:', err.message);
-    });
-
-    notify(`Product "${product.title}" listed successfully in the marketplace!`, 'success');
+      notify('Unable to reach server to publish product. Please try again.', 'error');
+    }
   };
 
-  const updateProduct = (id: string, updates: Partial<Product>) => {
+  const updateProduct = async (id: string, updates: Partial<Product>) => {
+    const previousProducts = products;
     setProducts(prev =>
       prev.map(p => {
         if (p.id === id) {
@@ -1477,61 +1566,100 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       })
     );
 
-    // Persist updates to Neon PostgreSQL
-    fetch(`/api/products/${encodeURIComponent(id)}`, {
-      method: 'PUT',
-      headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
-      credentials: 'include',
-      body: JSON.stringify(updates),
-    }).catch(err => console.warn('[Update Product Network Error]:', err.message));
-
-    notify('Product updated', 'success');
+    try {
+      const resp = await fetch(`/api/products/${encodeURIComponent(id)}`, {
+        method: 'PUT',
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        credentials: 'include',
+        body: JSON.stringify(updates),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || !data.status) {
+        setProducts(previousProducts);
+        notify(data.message || 'Failed to update product in database.', 'error');
+        return;
+      }
+      notify('Product updated', 'success');
+    } catch (err: any) {
+      setProducts(previousProducts);
+      console.warn('[Update Product Network Error]:', err.message);
+      notify('Unable to reach server to update product.', 'error');
+    }
   };
 
-  const deleteProduct = (id: string) => {
+  const deleteProduct = async (id: string) => {
+    const previousProducts = products;
     setProducts(prev => prev.filter(p => p.id !== id));
 
-    // Delete in Neon PostgreSQL
-    fetch(`/api/products/${encodeURIComponent(id)}`, {
-      method: 'DELETE',
-      headers: getAuthHeaders(),
-      credentials: 'include',
-    }).catch(err => console.warn('[Delete Product Network Error]:', err.message));
-
-    notify('Product removed', 'info');
+    try {
+      const resp = await fetch(`/api/products/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+        headers: getAuthHeaders(),
+        credentials: 'include',
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || !data.status) {
+        setProducts(previousProducts);
+        notify(data.message || 'Failed to delete product from database.', 'error');
+        return;
+      }
+      notify('Product removed', 'info');
+    } catch (err: any) {
+      setProducts(previousProducts);
+      console.warn('[Delete Product Network Error]:', err.message);
+      notify('Unable to reach server to delete product.', 'error');
+    }
   };
 
-  const toggleProductStock = (id: string) => {
-    setProducts(prev =>
-      prev.map(p => {
-        if (p.id === id) {
-          const newStock = p.stock > 0 ? 0 : 5;
-          return { ...p, stock: newStock, isSoldOut: newStock === 0 };
-        }
-        return p;
-      })
-    );
+  const toggleProductStock = async (id: string) => {
+    const target = products.find(p => p.id === id);
+    if (!target) return;
+    const newStock = target.stock > 0 ? 0 : 5;
+    await updateProduct(id, { stock: newStock, isSoldOut: newStock === 0 });
   };
 
-  const toggleVacationMode = (sellerId: string) => {
-    setSellers(prev =>
-      prev.map(s => {
-        if (s.id === sellerId) {
-          const newMode = !s.vacationMode;
-          notify(newMode ? 'Vacation mode activated. Your shop is paused.' : 'Vacation mode disabled. Your shop is open!', 'info');
-          return { ...s, vacationMode: newMode };
-        }
-        return s;
-      })
-    );
-    if (currentUser?.sellerProfile?.id === sellerId) {
-      setCurrentUser(prev => prev ? {
-        ...prev,
-        sellerProfile: prev.sellerProfile ? {
-          ...prev.sellerProfile,
-          vacationMode: !prev.sellerProfile.vacationMode
-        } : undefined
-      } : null);
+  const toggleVacationMode = async (sellerId: string) => {
+    const targetSeller = sellers.find(s => s.id === sellerId);
+    const nextMode = !(targetSeller?.vacationMode ?? currentUser?.sellerProfile?.vacationMode ?? false);
+    const previousSellers = sellers;
+    const previousUser = currentUser;
+
+    setSellers(prev => prev.map(s => (s.id === sellerId ? { ...s, vacationMode: nextMode } : s)));
+    if (currentUser?.sellerProfile?.id === sellerId || currentUser?.id === sellerId) {
+      setCurrentUser(prev =>
+        prev
+          ? {
+              ...prev,
+              sellerProfile: prev.sellerProfile
+                ? { ...prev.sellerProfile, vacationMode: nextMode }
+                : undefined,
+            }
+          : null
+      );
+    }
+
+    try {
+      const resp = await fetch(`/api/sellers/${encodeURIComponent(sellerId)}`, {
+        method: 'PUT',
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        credentials: 'include',
+        body: JSON.stringify({ vacationMode: nextMode }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || !data.status) {
+        setSellers(previousSellers);
+        setCurrentUser(previousUser);
+        notify(data.message || 'Failed to update vacation mode in database.', 'error');
+        return;
+      }
+      notify(
+        nextMode ? 'Vacation mode activated. Your shop is paused.' : 'Vacation mode disabled. Your shop is open!',
+        'info'
+      );
+    } catch (err: any) {
+      setSellers(previousSellers);
+      setCurrentUser(previousUser);
+      notify('Unable to reach server to update vacation mode.', 'error');
     }
   };
 
@@ -2893,7 +3021,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // MODERATOR SUPER-POWERS & ACCOUNT GOVERNANCE
   // ==========================================
 
-  const deleteUserAccount = (userId: string): boolean => {
+  const deleteUserAccount = async (userId: string): Promise<boolean> => {
     if (currentUser?.role !== 'admin') {
       notify('Administrator session required.', 'error');
       return false;
@@ -2906,77 +3034,91 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const targetUser = registeredUsers.find(u => u.id === userId);
     const targetEmail = targetUser?.email;
 
-    // Delete in PostgreSQL on server
-    fetch(`/api/admin/users/${encodeURIComponent(userId)}`, {
-      method: 'DELETE',
-      headers: getAuthHeaders(),
-      credentials: 'include',
-    })
-      .then(() => refreshAdminData('admin'))
-      .catch(err => {
-        console.warn('API delete user warning:', err.message);
+    try {
+      const resp = await fetch(`/api/admin/users/${encodeURIComponent(userId)}`, {
+        method: 'DELETE',
+        headers: getAuthHeaders(),
+        credentials: 'include',
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || !data.status) {
+        notify(data.message || 'Failed to delete user account in database.', 'error');
+        return false;
+      }
+
+      setRegisteredUsers(prev => prev.filter(u => u.id !== userId));
+      setSellers(prev => prev.filter(s => s.id !== userId));
+      setProducts(prev => prev.filter(p => p.sellerId !== userId));
+      setVerificationRequests(prev => prev.filter(v => v.sellerId !== userId));
+      setWallets(prev => {
+        const next = { ...prev };
+        delete next[userId];
+        return next;
       });
 
-    setRegisteredUsers(prev => prev.filter(u => u.id !== userId));
+      if (currentUser?.id === userId) {
+        setCurrentUser(null);
+        setActiveView('catalog');
+      }
 
-    // Cleanup seller profile, listings, and wallet if seller
-    setSellers(prev => prev.filter(s => s.id !== userId));
-    setProducts(prev => prev.filter(p => p.sellerId !== userId));
-    setVerificationRequests(prev => prev.filter(v => v.sellerId !== userId));
-    setWallets(prev => {
-      const next = { ...prev };
-      delete next[userId];
-      return next;
-    });
-
-    if (currentUser?.id === userId) {
-      setCurrentUser(null);
-      setActiveView('catalog');
+      await refreshAdminData('admin');
+      notify(`Account "${targetUser?.name || 'User'}" (${targetEmail || userId}) permanently deleted from database.`, 'success');
+      addAdminAuditLog('ACCOUNT_DELETED', `Permanently deleted account ${targetUser?.name || 'User'} (${targetEmail || userId})`, userId);
+      return true;
+    } catch (err: any) {
+      console.warn('API delete user error:', err.message);
+      notify('Unable to reach database server to delete user.', 'error');
+      return false;
     }
-
-    notify(`Account "${targetUser?.name || 'User'}" (${targetEmail || userId}) permanently deleted from database.`, 'success');
-    addAdminAuditLog('ACCOUNT_DELETED', `Permanently deleted account ${targetUser?.name || 'User'} (${targetEmail || userId})`, userId);
-    return true;
   };
 
-  const banUserAccount = (userId: string, isBanned: boolean, reason?: string) => {
+  const banUserAccount = async (userId: string, isBanned: boolean, reason?: string): Promise<boolean> => {
     if (currentUser?.role !== 'admin') {
       notify('Administrator session required.', 'error');
-      return;
+      return false;
     }
     if (userId === 'admin_adeyinka_joseph') {
       notify('Master Admin account cannot be suspended.', 'error');
-      return;
+      return false;
     }
 
-    // Update in PostgreSQL on server
-    fetch(`/api/admin/users/${encodeURIComponent(userId)}/ban`, {
-      method: 'POST',
-      headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
-      credentials: 'include',
-      body: JSON.stringify({ isBanned, banReason: reason }),
-    })
-      .then(() => refreshAdminData('admin'))
-      .catch(err => {
-        console.warn('API ban user warning:', err.message);
+    try {
+      const resp = await fetch(`/api/admin/users/${encodeURIComponent(userId)}/ban`, {
+        method: 'POST',
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        credentials: 'include',
+        body: JSON.stringify({ isBanned, banReason: reason }),
       });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || !data.status) {
+        notify(data.message || 'Failed to update suspension status in database.', 'error');
+        return false;
+      }
 
-    setRegisteredUsers(prev => prev.map(u => u.id === userId ? { ...u, isBanned } : u));
+      setRegisteredUsers(prev => prev.map(u => (u.id === userId ? { ...u, isBanned } : u)));
 
-    if (isBanned) {
-      toggleWalletFreeze(userId, true, reason || 'Account suspended by moderator');
-      setSellers(prev => prev.map(s => s.id === userId ? { ...s, vacationMode: true } : s));
-      notify(`Account suspended in database and store hidden from marketplace.`, 'info');
-      addAdminAuditLog('ACCOUNT_SUSPENDED', `Suspended account ${userId}. Reason: ${reason || 'Safety violation'}`, userId);
-    } else {
-      toggleWalletFreeze(userId, false);
-      setSellers(prev => prev.map(s => s.id === userId ? { ...s, vacationMode: false } : s));
-      notify(`Account suspension lifted in database.`, 'success');
-      addAdminAuditLog('ACCOUNT_UNSUSPENDED', `Lifted suspension for account ${userId}`, userId);
+      if (isBanned) {
+        toggleWalletFreeze(userId, true, reason || 'Account suspended by moderator');
+        setSellers(prev => prev.map(s => (s.id === userId ? { ...s, vacationMode: true } : s)));
+        notify(`Account suspended in database and store hidden from marketplace.`, 'info');
+        addAdminAuditLog('ACCOUNT_SUSPENDED', `Suspended account ${userId}. Reason: ${reason || 'Safety violation'}`, userId);
+      } else {
+        toggleWalletFreeze(userId, false);
+        setSellers(prev => prev.map(s => (s.id === userId ? { ...s, vacationMode: false } : s)));
+        notify(`Account suspension lifted in database.`, 'success');
+        addAdminAuditLog('ACCOUNT_UNSUSPENDED', `Lifted suspension for account ${userId}`, userId);
+      }
+
+      await refreshAdminData('admin');
+      return true;
+    } catch (err: any) {
+      console.warn('API ban user error:', err.message);
+      notify('Unable to reach database server to update suspension.', 'error');
+      return false;
     }
   };
 
-  const adminResetUserPassword = (userId: string, newPass: string): boolean => {
+  const adminResetUserPassword = async (userId: string, newPass: string): Promise<boolean> => {
     if (currentUser?.role !== 'admin') {
       notify('Administrator session required.', 'error');
       return false;
@@ -2986,101 +3128,118 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return false;
     }
 
-    // Update in PostgreSQL on server
-    fetch(`/api/admin/users/${encodeURIComponent(userId)}/reset-password`, {
-      method: 'POST',
-      headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
-      credentials: 'include',
-      body: JSON.stringify({ newPassword: newPass.trim() }),
-    }).catch(err => {
-      console.warn('API reset password warning:', err.message);
-    });
+    try {
+      const resp = await fetch(`/api/admin/users/${encodeURIComponent(userId)}/reset-password`, {
+        method: 'POST',
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        credentials: 'include',
+        body: JSON.stringify({ newPassword: newPass.trim() }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || !data.status) {
+        notify(data.message || 'Failed to reset user password in database.', 'error');
+        return false;
+      }
 
-    notify('Password reset successfully in database for account.', 'success');
-    addAdminAuditLog('PASSWORD_RESET', `Direct password reset executed for account ${userId}`, userId);
-    return true;
+      notify('Password reset successfully in database for account.', 'success');
+      addAdminAuditLog('PASSWORD_RESET', `Direct password reset executed for account ${userId}`, userId);
+      return true;
+    } catch (err: any) {
+      console.warn('API reset password error:', err.message);
+      notify('Unable to reach database server to reset password.', 'error');
+      return false;
+    }
   };
 
-  const adminToggleSellerVerification = (sellerId: string, isVerified: boolean) => {
+  const adminToggleSellerVerification = async (sellerId: string, isVerified: boolean): Promise<boolean> => {
     if (currentUser?.role !== 'admin') {
       notify('Administrator session required.', 'error');
-      return;
+      return false;
     }
-    // Update in PostgreSQL on server
-    fetch(`/api/admin/sellers/${encodeURIComponent(sellerId)}/verify`, {
-      method: 'POST',
-      headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
-      credentials: 'include',
-      body: JSON.stringify({ isVerified }),
-    })
-      .then(() => refreshAdminData('admin'))
-      .catch(err => {
-        console.warn('API verify seller warning:', err.message);
+    try {
+      const resp = await fetch(`/api/admin/sellers/${encodeURIComponent(sellerId)}/verify`, {
+        method: 'POST',
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        credentials: 'include',
+        body: JSON.stringify({ isVerified }),
       });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || !data.status) {
+        notify(data.message || 'Failed to update seller verification in database.', 'error');
+        return false;
+      }
 
-    setSellers(prev =>
-      prev.map(s => {
-        if (s.id === sellerId) {
-          const newBadges = isVerified
-            ? Array.from(new Set([...s.badges, 'verified']))
-            : s.badges.filter(b => b !== 'verified');
+      setSellers(prev =>
+        prev.map(s => {
+          if (s.id === sellerId) {
+            const newBadges = isVerified
+              ? Array.from(new Set([...s.badges, 'verified']))
+              : s.badges.filter(b => b !== 'verified');
+            return {
+              ...s,
+              isVerifiedSeller: isVerified,
+              verificationStatus: isVerified ? 'verified' : 'pending',
+              badges: newBadges as any,
+            };
+          }
+          return s;
+        })
+      );
+
+      setCurrentUser(prev => {
+        if (!prev) return prev;
+        if (prev.id === sellerId || prev.sellerProfile?.id === sellerId || (prev.email && prev.email.toLowerCase() === sellerId.toLowerCase())) {
           return {
-            ...s,
-            isVerifiedSeller: isVerified,
-            verificationStatus: isVerified ? 'verified' : 'pending',
-            badges: newBadges as any,
+            ...prev,
+            sellerProfile: prev.sellerProfile
+              ? {
+                  ...prev.sellerProfile,
+                  isVerifiedSeller: isVerified,
+                  verificationStatus: isVerified ? ('verified' as const) : ('pending' as const),
+                  badges: isVerified
+                    ? (Array.from(new Set([...(prev.sellerProfile.badges || []), 'verified'])) as any)
+                    : ((prev.sellerProfile.badges || []).filter(b => b !== 'verified') as any),
+                }
+              : {
+                  id: prev.id,
+                  shopName: `${prev.name}'s Shop`,
+                  bio: '',
+                  isVerifiedSeller: isVerified,
+                  verificationStatus: isVerified ? ('verified' as const) : ('pending' as const),
+                  badges: isVerified ? (['verified'] as any) : [],
+                  under18: false,
+                  guardianConsent: false,
+                  level: 1,
+                  rating: 5,
+                  reviewCount: 0,
+                  salesCount: 0,
+                  viewsCount: 0,
+                  vacationMode: false,
+                  joinedDate: new Date().toISOString(),
+                },
           };
         }
-        return s;
-      })
-    );
+        return prev;
+      });
 
-    setCurrentUser(prev => {
-      if (!prev) return prev;
-      if (prev.id === sellerId || prev.sellerProfile?.id === sellerId || (prev.email && prev.email.toLowerCase() === sellerId.toLowerCase())) {
-        return {
-          ...prev,
-          sellerProfile: prev.sellerProfile
-            ? {
-                ...prev.sellerProfile,
-                isVerifiedSeller: isVerified,
-                verificationStatus: isVerified ? ('verified' as const) : ('pending' as const),
-                badges: isVerified
-                  ? (Array.from(new Set([...(prev.sellerProfile.badges || []), 'verified'])) as any)
-                  : (prev.sellerProfile.badges || []).filter(b => b !== 'verified') as any,
-              }
-            : {
-                id: prev.id,
-                shopName: `${prev.name}'s Shop`,
-                bio: '',
-                isVerifiedSeller: isVerified,
-                verificationStatus: isVerified ? ('verified' as const) : ('pending' as const),
-                badges: isVerified ? (['verified'] as any) : [],
-                under18: false,
-                guardianConsent: false,
-                level: 1,
-                rating: 5,
-                reviewCount: 0,
-                salesCount: 0,
-                viewsCount: 0,
-                vacationMode: false,
-                joinedDate: new Date().toISOString(),
-              },
-        };
-      }
-      return prev;
-    });
-    notify(
-      isVerified
-        ? `Seller verified with NIN Slip! Verified maker badge activated in database.`
-        : `Seller verification status revoked in database.`,
-      'info'
-    );
-    addAdminAuditLog(
-      isVerified ? 'NIN_BADGE_GRANTED' : 'NIN_BADGE_REVOKED',
-      `Seller NIN verification status set to ${isVerified ? 'VERIFIED' : 'UNVERIFIED'}`,
-      sellerId
-    );
+      await refreshAdminData('admin');
+      notify(
+        isVerified
+          ? `Seller verified with NIN Slip! Verified maker badge activated in database.`
+          : `Seller verification status revoked in database.`,
+        'info'
+      );
+      addAdminAuditLog(
+        isVerified ? 'NIN_BADGE_GRANTED' : 'NIN_BADGE_REVOKED',
+        `Seller NIN verification status set to ${isVerified ? 'VERIFIED' : 'UNVERIFIED'}`,
+        sellerId
+      );
+      return true;
+    } catch (err: any) {
+      console.warn('API verify seller error:', err.message);
+      notify('Unable to reach database server to update verification.', 'error');
+      return false;
+    }
   };
 
   const adminForceDeleteProduct = (productId: string) => {
@@ -3598,6 +3757,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         closeAuthModal,
         authTab,
         setAuthTab,
+        preferredSignupRole,
+        setPreferredSignupRole,
         pendingAuthData,
         setPendingAuthData,
         verifyOtp,
