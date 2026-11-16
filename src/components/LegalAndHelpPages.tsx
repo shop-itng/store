@@ -38,7 +38,7 @@ export function getSiteUrl(): string {
   if (typeof window !== 'undefined' && window.location.origin) {
     return window.location.origin;
   }
-  return 'https://shop-itng-pied.vercel.app';
+  return 'https://shopitng.vercel.app';
 }
 
 export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'terms' }) => {

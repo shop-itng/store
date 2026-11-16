@@ -22,7 +22,7 @@ export const ShareButtons: React.FC<Props> = ({
   const [copied, setCopied] = useState(false);
   const [showStatusPreview, setShowStatusPreview] = useState(false);
 
-  const currentUrl = url || (typeof window !== 'undefined' ? window.location.href : 'https://shop-itng-pied.vercel.app');
+  const currentUrl = url || (typeof window !== 'undefined' ? window.location.href : 'https://shopitng.vercel.app');
   const priceText = price !== undefined ? `for ${formatNaira(price)}` : '';
   const sellerText = sellerShopName ? `by ${sellerShopName}` : '';
   const campusText = campus ? `at ${campus}` : '';
@@ -122,7 +122,7 @@ export const ShareButtons: React.FC<Props> = ({
           </div>
 
           <div className="flex items-center justify-between text-[11px] text-stone-400 pt-1 border-t border-stone-800">
-            <span>shop-itng-pied.vercel.app</span>
+            <span>{typeof window !== 'undefined' && window.location.hostname ? window.location.hostname : 'shopitng.vercel.app'}</span>
             <span className="text-white font-bold">Safe Youth Commerce</span>
           </div>
         </div>

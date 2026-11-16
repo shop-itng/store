@@ -21,7 +21,7 @@ In the Vercel project deployment screen, open **Environment Variables** and add 
 | `FLW_SECRET_KEY` | Server-only secret key for API calls & verification | `FLWSECK_TEST-...` (from Flutterwave Dashboard) |
 | `FLW_WEBHOOK_SECRET_HASH` | Secret hash matched against `verif-hash` header | Unique 32+ char secret set in Flutterwave Dashboard |
 | `VITE_FLW_PUBLIC_KEY` | Optional client test-mode indicator | `FLWPUBK_TEST-...` |
-| `APP_URL` | Your live Vercel URL | `https://shop-itng-pied.vercel.app` |
+| `APP_URL` | Your live Vercel URL | `https://shopitng.vercel.app` |
 
 Click **Deploy**. Daily maintenance runs automatically via `/api/cron/daily` (`0 3 * * *` UTC / 4:00 AM WAT).
 
@@ -34,7 +34,7 @@ In your [Flutterwave Dashboard](https://app.flutterwave.com/):
 1. Go to **Settings** → **Webhooks**.
 2. Under **URL**, paste your exact endpoint:
    ```text
-   https://shop-itng-pied.vercel.app/api/webhooks/flutterwave
+   https://shopitng.vercel.app/api/webhooks/flutterwave
    ```
 3. Under **Secret Hash**, paste the exact value you set for `FLW_WEBHOOK_SECRET_HASH`.
 4. Enable **Receive webhook response in JSON format** and click **Save**.

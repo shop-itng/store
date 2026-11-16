@@ -30,7 +30,7 @@ async function main() {
   process.env.FLW_SECRET_KEY = 'FLWSECK_TEST-mock-secret-phase2';
   process.env.FLW_PUBLIC_KEY = 'FLWPUBK_TEST-mock-public-phase2';
   process.env.FLW_WEBHOOK_SECRET_HASH = 'flw_webhook_hash_phase2_test';
-  process.env.APP_URL = 'https://shop-itng-pied.vercel.app';
+  process.env.APP_URL = 'https://shopitng.vercel.app';
 
   const server = http.createServer(app);
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));

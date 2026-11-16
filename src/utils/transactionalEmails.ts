@@ -64,7 +64,7 @@ export function renderTransactionalEmail(
   const rawBankName = String(data.bank_name || data.bankName || 'Nigerian Bank Account').trim();
   const rawLast4 = String(data.last4 || '••••').trim();
   const rawItem = String(data.item || 'your item').trim();
-  const appUrl = (data.appUrl || (typeof window !== 'undefined' ? window.location.origin : '') || 'https://shop-itng-pied.vercel.app').replace(/\/$/, '');
+  const appUrl = (data.appUrl || (typeof window !== 'undefined' ? window.location.origin : '') || 'https://shopitng.vercel.app').replace(/\/$/, '');
   const rawDecision = String(data.decision || 'Refund processed').trim();
   const rawReason = String(data.reason || 'Document was unreadable or selfie could not be verified').trim();
 

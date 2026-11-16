@@ -10,6 +10,7 @@ import {
   checkResendCooldown as checkOtpResendCooldown,
   checkAndRecordRateLimit,
   saveHashedOtp,
+  deleteOtpRecord,
   verifyAndConsumeOtp,
   issueSignupVerificationToken,
   consumeSignupVerificationToken,
@@ -87,10 +88,13 @@ app.use(cookieParser());
 
 const IS_PROD = process.env.NODE_ENV === 'production' || Boolean(process.env.VERCEL);
 
+const PRODUCTION_APP_URL = 'https://shopitng.vercel.app';
+
 const APP_URL = (
   process.env.APP_URL ||
+  (process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}` : '') ||
   (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : '') ||
-  'https://shop-itng-pied.vercel.app'
+  PRODUCTION_APP_URL
 ).replace(/\/$/, '');
 
 function getAllowedOrigins(): string[] {
@@ -101,7 +105,11 @@ function getAllowedOrigins(): string[] {
 
   const defaults = [
     APP_URL,
-    'https://shop-itng-pied.vercel.app',
+    PRODUCTION_APP_URL,
+    ...(process.env.VERCEL_PROJECT_PRODUCTION_URL
+      ? [`https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`.replace(/\/$/, '')]
+      : []),
+    ...(process.env.VERCEL_URL ? [`https://${process.env.VERCEL_URL}`.replace(/\/$/, '')] : []),
     ...(IS_PROD ? [] : ['http://localhost:3000', 'http://127.0.0.1:3000']),
   ];
   return Array.from(new Set([...defaults, ...extra]));
@@ -294,12 +302,16 @@ router.post(['/auth/register', '/auth/signup'], async (req, res) => {
     const cleanName = String(name).trim();
     const cleanPassword = String(password).trim();
 
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+    if (cleanName.length < 2 || cleanName.length > 120) {
+      return res.status(400).json({ status: false, message: 'Name must be between 2 and 120 characters.' });
+    }
+
+    if (cleanEmail.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
       return res.status(400).json({ status: false, message: 'Please provide a valid email address.' });
     }
 
-    if (cleanPassword.length < 8) {
-      return res.status(400).json({ status: false, message: 'Password must be at least 8 characters long.' });
+    if (cleanPassword.length < 8 || cleanPassword.length > 128) {
+      return res.status(400).json({ status: false, message: 'Password must be between 8 and 128 characters long.' });
     }
 
     if (age === undefined || age === null || String(age).trim() === '') {
@@ -492,6 +504,12 @@ router.post(['/auth/register', '/auth/signup'], async (req, res) => {
       message: 'Account successfully registered and saved to database.',
     });
   } catch (err: any) {
+    if (err?.code === '23505') {
+      return res.status(409).json({
+        status: false,
+        message: 'An account with this email address already exists. Please log in.',
+      });
+    }
     console.error('[User Registration Error]:', err.message);
     return res.status(500).json({ status: false, message: 'Database error saving user account. Please try again.' });
   }
@@ -647,7 +665,9 @@ router.post('/auth/login', async (req, res) => {
       email: userRow.email,
       name: userRow.name,
       role: userRow.role,
+      ...(userRow.role === 'admin' && userRow.sub_role ? { subRole: userRow.sub_role } : {}),
       isVerifiedEmail: Boolean(userRow.is_verified_email),
+      mustChangePassword: Boolean(userRow.must_change_password),
       age: userRow.age,
       hasGuardianConsent: Boolean(userRow.has_guardian_consent),
       guardianName: userRow.guardian_name,
@@ -831,7 +851,7 @@ router.get('/auth/me', requireAuth, async (req: AuthenticatedRequest, res) => {
   try {
     const sessionUser = req.user!;
     const result = await dbQuery(
-      `SELECT u.id, u.email, u.name, u.role, u.sub_role, u.is_verified_email, u.is_banned, u.ban_reason,
+      `SELECT u.id, u.email, u.name, u.role, u.sub_role, u.is_verified_email, u.must_change_password, u.is_banned, u.ban_reason,
               u.age, u.has_guardian_consent, u.guardian_name, u.created_at, u.last_login_at,
               s.id as seller_id, s.shop_name, s.bio, s.campus, s.is_verified_seller as seller_is_verified,
               s.verification_status as seller_verification_status,
@@ -861,6 +881,7 @@ router.get('/auth/me', requireAuth, async (req: AuthenticatedRequest, res) => {
       role: row.role,
       subRole: row.role === 'admin' ? row.sub_role || undefined : undefined,
       isVerifiedEmail: Boolean(row.is_verified_email),
+      mustChangePassword: Boolean(row.must_change_password),
       isVerifiedSeller: isVerified,
       verificationStatus: currentStatus,
       isBanned: Boolean(row.is_banned),
@@ -900,11 +921,23 @@ router.get('/auth/me', requireAuth, async (req: AuthenticatedRequest, res) => {
 
 router.get('/admin/users', requireModerator, async (req: AuthenticatedRequest, res) => {
   try {
-    const q = req.query.q ? String(req.query.q).trim().toLowerCase() : '';
-    const role = req.query.role ? String(req.query.role).trim() : 'all';
+    const rawQ = req.query.q ? String(req.query.q).trim().toLowerCase() : '';
+    const q = rawQ.slice(0, 100);
+    const role = req.query.role ? String(req.query.role).trim().toLowerCase() : 'all';
+    if (!['all', 'buyer', 'seller', 'admin'].includes(role)) {
+      return res.status(400).json({ status: false, message: 'Invalid role filter. Must be all, buyer, seller, or admin.' });
+    }
+
     const onlyNew = String(req.query.onlyNew || '').toLowerCase() === 'true' || req.query.onlyNew === '1';
-    const page = Math.max(1, parseInt(String(req.query.page || '1'), 10));
-    const limit = Math.min(200, Math.max(1, parseInt(String(req.query.limit || '15'), 10)));
+    const rawPage = req.query.page !== undefined ? String(req.query.page).trim() : '1';
+    const rawLimit = req.query.limit !== undefined ? String(req.query.limit).trim() : '15';
+    const parsedPage = /^\d+$/.test(rawPage) ? parseInt(rawPage, 10) : NaN;
+    const parsedLimit = /^\d+$/.test(rawLimit) ? parseInt(rawLimit, 10) : NaN;
+    if (isNaN(parsedPage) || parsedPage < 1 || isNaN(parsedLimit) || parsedLimit < 1) {
+      return res.status(400).json({ status: false, message: 'Invalid pagination parameters: page and limit must be positive integers.' });
+    }
+    const page = parsedPage;
+    const limit = Math.min(200, parsedLimit);
     const offset = (page - 1) * limit;
 
     const cutoff24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
@@ -945,12 +978,12 @@ router.get('/admin/users', requireModerator, async (req: AuthenticatedRequest, r
     const total = parseInt(countRes.rows[0].total, 10);
 
     const dataSql = `
-      SELECT u.id, u.email, u.name, u.role, u.is_verified_email, u.age, u.has_guardian_consent,
+      SELECT u.id, u.email, u.name, u.role, u.sub_role, u.is_verified_email, u.age, u.has_guardian_consent,
              u.guardian_name, u.is_banned, u.ban_reason, u.last_login_at, u.created_at,
              s.id as seller_id, s.shop_name, s.campus, s.location_area, s.bio,
              s.verification_status, s.is_verified_seller
       FROM shopit_users u
-      LEFT JOIN shopit_sellers s ON u.id = s.user_id
+      LEFT JOIN shopit_sellers s ON (u.id = s.user_id OR u.id = s.id)
       ${whereClause}
       ORDER BY u.created_at DESC
       LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
@@ -963,6 +996,7 @@ router.get('/admin/users', requireModerator, async (req: AuthenticatedRequest, r
       email: row.email,
       name: row.name,
       role: row.role,
+      ...(row.role === 'admin' && row.sub_role ? { subRole: row.sub_role } : {}),
       isVerifiedEmail: Boolean(row.is_verified_email),
       age: row.age,
       hasGuardianConsent: Boolean(row.has_guardian_consent),
@@ -1363,8 +1397,8 @@ router.get('/admin/activity', requireModerator, async (req: AuthenticatedRequest
     const category = req.query.category ? String(req.query.category).trim().toLowerCase() : 'all';
     const actorEmail = req.query.actorEmail ? String(req.query.actorEmail).trim().toLowerCase() : '';
     const actionFilter = req.query.action ? String(req.query.action).trim().toUpperCase() : '';
-    const page = Math.max(1, parseInt(String(req.query.page || '1'), 10));
-    const limit = Math.min(200, Math.max(1, parseInt(String(req.query.limit || '50'), 10)));
+    const page = Math.max(1, parseInt(String(req.query.page || '1'), 10) || 1);
+    const limit = Math.min(200, Math.max(1, parseInt(String(req.query.limit || '50'), 10) || 50));
     const offset = (page - 1) * limit;
 
     const conditions: string[] = [];
@@ -2962,7 +2996,22 @@ router.post('/auth/send-otp', async (req, res) => {
       ...metadata,
     });
 
-    await sendBrevoDirect(cleanEmail, rendered.subject, rendered.text, rendered.html, metadata?.name);
+    const emailSent = await sendBrevoDirect(
+      cleanEmail,
+      rendered.subject,
+      rendered.text,
+      rendered.html,
+      metadata?.name
+    );
+
+    if (IS_PROD && !emailSent && cleanPurpose !== 'password_reset') {
+      await deleteOtpRecord(cleanEmail, cleanPurpose).catch(() => {});
+      return res.status(503).json({
+        status: false,
+        error: 'EMAIL_SERVICE_UNAVAILABLE',
+        message: 'Verification email service is temporarily unavailable. Please try again shortly.',
+      });
+    }
 
     await logAuditEvent({
       action: 'OTP_REQUESTED',

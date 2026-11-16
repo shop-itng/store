@@ -37,7 +37,7 @@ async function main() {
   process.env.FLW_SECRET_KEY = 'FLWSECK_TEST-sec-suite-secret';
   process.env.FLW_PUBLIC_KEY = 'FLWPUBK_TEST-sec-suite-public';
   process.env.FLW_WEBHOOK_SECRET_HASH = 'flw_sec_suite_webhook_hash';
-  process.env.APP_URL = 'https://shop-itng-pied.vercel.app';
+  process.env.APP_URL = 'https://shopitng.vercel.app';
 
   const server = http.createServer(app);
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -1419,6 +1419,33 @@ async function main() {
         allActivityJson.events.some((e: any) => e.action === 'BROADCAST_ACTIVATED' && e.actorEmail === adminEmail),
         'Admin audit action must appear in admin activity feed'
       );
+    });
+
+    await test('REGRESSION: https://shopitng.vercel.app is allowed by CORS while unknown origins get 403', async () => {
+      const okOpt = await origFetch(`${baseUrl}/api/auth/login`, {
+        method: 'OPTIONS',
+        headers: { Origin: 'https://shopitng.vercel.app' },
+      });
+      assert.strictEqual(okOpt.status, 204);
+      assert.strictEqual(okOpt.headers.get('access-control-allow-origin'), 'https://shopitng.vercel.app');
+
+      const badOpt = await origFetch(`${baseUrl}/api/auth/login`, {
+        method: 'OPTIONS',
+        headers: { Origin: 'https://malicious-clone.example' },
+      });
+      assert.strictEqual(badOpt.status, 403);
+    });
+
+    await test('REGRESSION: GET /api/admin/users rejects invalid page/limit/role parameters with 400', async () => {
+      const badPage = await origFetch(`${baseUrl}/api/admin/users?page=abc`, {
+        headers: { Authorization: `Bearer ${adminSess.token}` },
+      });
+      assert.strictEqual(badPage.status, 400);
+
+      const badRole = await origFetch(`${baseUrl}/api/admin/users?role=superuser`, {
+        headers: { Authorization: `Bearer ${adminSess.token}` },
+      });
+      assert.strictEqual(badRole.status, 400);
     });
 
     console.log('\n==================================================================');

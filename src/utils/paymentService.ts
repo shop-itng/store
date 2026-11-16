@@ -131,7 +131,7 @@ export async function getPaymentServerConfig(): Promise<{
       isSecretConfigured: false,
       isWebhookSecretConfigured: false,
       webhookPath: '/api/webhooks/flutterwave',
-      webhookUrl: 'https://shop-itng-pied.vercel.app/api/webhooks/flutterwave',
+      webhookUrl: 'https://shopitng.vercel.app/api/webhooks/flutterwave',
     };
   }
 }

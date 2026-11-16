@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { getPool, withTransaction } from './postgres.js';
+import { query as dbQuery, pingPostgres, withTransaction } from './postgres.js';
 import { deriveSubKey } from '../lib/secrets.js';
 
 export interface StoredOtpRecord {
@@ -176,8 +176,7 @@ export async function checkRateLimit(
     } catch {}
   }
 
-  const pool = await getPool();
-  const res = await pool.query('SELECT timestamps FROM shopit_rate_limits WHERE key = $1', [emailKey]);
+  const res = await dbQuery('SELECT timestamps FROM shopit_rate_limits WHERE key = $1', [emailKey]);
   const emailTimes: number[] = (res.rows[0]?.timestamps || []).filter(
     (t: number) => now - t < RATE_LIMIT_WINDOW_MS
   );
@@ -189,7 +188,7 @@ export async function checkRateLimit(
   }
 
   if (cleanDevice !== 'dev_unknown') {
-    const dRes = await pool.query('SELECT timestamps FROM shopit_rate_limits WHERE key = $1', [devKey]);
+    const dRes = await dbQuery('SELECT timestamps FROM shopit_rate_limits WHERE key = $1', [devKey]);
     const devTimes: number[] = (dRes.rows[0]?.timestamps || []).filter(
       (t: number) => now - t < RATE_LIMIT_WINDOW_MS
     );
@@ -303,8 +302,7 @@ export async function saveHashedOtp(
     metadata,
   };
 
-  const pool = await getPool();
-  await pool.query(
+  await dbQuery(
     'INSERT INTO shopit_otps (key, data, expires_at) VALUES ($1, $2, $3) ON CONFLICT (key) DO UPDATE SET data = $2, expires_at = $3',
     [key, JSON.stringify(record), record.expiresAt]
   );
@@ -316,8 +314,7 @@ export async function getOtpRecord(email: string, purpose: string): Promise<Stor
   const cleanPurpose = purpose.trim();
   const key = `shopit_otp_${cleanEmail}_${cleanPurpose}`;
 
-  const pool = await getPool();
-  const res = await pool.query('SELECT data, expires_at FROM shopit_otps WHERE key = $1', [key]);
+  const res = await dbQuery('SELECT data, expires_at FROM shopit_otps WHERE key = $1', [key]);
   if (res.rows[0]) {
     const data = res.rows[0].data;
     return typeof data === 'string' ? JSON.parse(data) : (data as StoredOtpRecord);
@@ -327,8 +324,7 @@ export async function getOtpRecord(email: string, purpose: string): Promise<Stor
 
 export async function updateOtpRecord(record: StoredOtpRecord): Promise<void> {
   const key = `shopit_otp_${record.email}_${record.purpose}`;
-  const pool = await getPool();
-  await pool.query(
+  await dbQuery(
     'INSERT INTO shopit_otps (key, data, expires_at) VALUES ($1, $2, $3) ON CONFLICT (key) DO UPDATE SET data = $2, expires_at = $3',
     [key, JSON.stringify(record), record.expiresAt]
   );
@@ -338,8 +334,7 @@ export async function deleteOtpRecord(email: string, purpose: string): Promise<v
   const cleanEmail = email.trim().toLowerCase();
   const cleanPurpose = purpose.trim();
   const key = `shopit_otp_${cleanEmail}_${cleanPurpose}`;
-  const pool = await getPool();
-  await pool.query('DELETE FROM shopit_otps WHERE key = $1', [key]);
+  await dbQuery('DELETE FROM shopit_otps WHERE key = $1', [key]);
 }
 
 /**
@@ -419,8 +414,7 @@ export async function issueSignupVerificationToken(email: string): Promise<strin
     .digest('hex');
   const expiresAt = Date.now() + SIGNUP_PROOF_TTL_MS;
 
-  const pool = await getPool();
-  await pool.query(
+  await dbQuery(
     `INSERT INTO shopit_verified_signups (email, token_hash, expires_at)
      VALUES ($1, $2, $3)
      ON CONFLICT (email) DO UPDATE SET token_hash = $2, expires_at = $3`,
@@ -486,8 +480,7 @@ export interface PaymentRecord {
 }
 
 export async function savePaymentRecord(record: PaymentRecord): Promise<void> {
-  const pool = await getPool();
-  await pool.query(
+  await dbQuery(
     `INSERT INTO shopit_payments (
       reference, order_id, amount_kobo, amount_naira, currency, channel, status, webhook_received, customer_email, data, updated_at
     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
@@ -513,8 +506,7 @@ export async function savePaymentRecord(record: PaymentRecord): Promise<void> {
 }
 
 export async function getPaymentRecord(reference: string): Promise<PaymentRecord | null> {
-  const pool = await getPool();
-  const res = await pool.query('SELECT * FROM shopit_payments WHERE reference = $1', [reference]);
+  const res = await dbQuery('SELECT * FROM shopit_payments WHERE reference = $1', [reference]);
   if (res.rows.length > 0) {
     const row = res.rows[0];
     return {
@@ -536,8 +528,7 @@ export async function getPaymentRecord(reference: string): Promise<PaymentRecord
 }
 
 export async function getAllPaymentRecords(): Promise<PaymentRecord[]> {
-  const pool = await getPool();
-  const res = await pool.query('SELECT * FROM shopit_payments ORDER BY created_at DESC LIMIT 200');
+  const res = await dbQuery('SELECT * FROM shopit_payments ORDER BY created_at DESC LIMIT 200');
   return res.rows.map((row: any) => ({
     reference: row.reference,
     orderId: row.order_id,
@@ -572,8 +563,7 @@ export interface ReportRecord {
 }
 
 export async function saveReportRecord(report: ReportRecord): Promise<void> {
-  const pool = await getPool();
-  await pool.query(
+  await dbQuery(
     `INSERT INTO shopit_reports (id, target_type, target_id, target_title, reporter_email, reason, details, status, action_logs, created_at)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
      ON CONFLICT (id) DO UPDATE SET status = $8, action_logs = $9`,
@@ -592,8 +582,7 @@ export async function saveReportRecord(report: ReportRecord): Promise<void> {
 }
 
 export async function getAllReportRecords(): Promise<ReportRecord[]> {
-  const pool = await getPool();
-  const res = await pool.query('SELECT * FROM shopit_reports ORDER BY created_at DESC LIMIT 200');
+  const res = await dbQuery('SELECT * FROM shopit_reports ORDER BY created_at DESC LIMIT 200');
   return res.rows.map((row: any) => ({
     id: row.id,
     targetType: row.target_type,
@@ -613,13 +602,12 @@ export async function updateReportStatus(
   status: 'open' | 'reviewing' | 'resolved',
   actionNote?: string
 ): Promise<void> {
-  const pool = await getPool();
-  const existing = await pool.query('SELECT action_logs FROM shopit_reports WHERE id = $1', [reportId]);
+  const existing = await dbQuery('SELECT action_logs FROM shopit_reports WHERE id = $1', [reportId]);
   const logs = existing.rows[0]?.action_logs || [];
   if (actionNote) {
     logs.push({ action: `Status changed to ${status}`, note: actionNote, timestamp: new Date().toISOString() });
   }
-  await pool.query('UPDATE shopit_reports SET status = $1, action_logs = $2 WHERE id = $3', [
+  await dbQuery('UPDATE shopit_reports SET status = $1, action_logs = $2 WHERE id = $3', [
     status,
     JSON.stringify(logs),
     reportId,
@@ -636,11 +624,8 @@ export async function pingHealth(): Promise<{
   let redisStatus: 'connected' | 'not_configured' | 'error' = 'not_configured';
 
   try {
-    const pool = await getPool();
-    if (pool) {
-      await pool.query('SELECT 1');
-      dbStatus = 'connected';
-    }
+    const pg = await pingPostgres();
+    dbStatus = pg.ok ? 'connected' : 'error';
   } catch {
     dbStatus = 'error';
   }

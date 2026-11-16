@@ -84,6 +84,22 @@ export const AuthModal: React.FC = () => {
   const [bio, setBio] = useState('');
   const [under18, setUnder18] = useState(false);
   const [guardianName, setGuardianName] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [pendingForceChangeUser, setPendingForceChangeUser] = useState<any>(null);
+  const [forceNewPassword, setForceNewPassword] = useState('');
+  const [forceConfirmPassword, setForceConfirmPassword] = useState('');
+
+  // Sync under-18 and guardian info captured during Step 1 signup into Seller Setup step
+  useEffect(() => {
+    if (authTab === 'seller_register' && pendingAuthData) {
+      if (typeof pendingAuthData.age === 'number' && pendingAuthData.age < 18) {
+        setUnder18(true);
+      }
+      if (pendingAuthData.guardianName && !guardianName) {
+        setGuardianName(String(pendingAuthData.guardianName));
+      }
+    }
+  }, [authTab, pendingAuthData]);
 
   // Tick 1-second countdown for all active OTP resend cooldowns
   useEffect(() => {
@@ -206,6 +222,7 @@ export const AuthModal: React.FC = () => {
     let matchedUser: any = null;
     let sessionToken: string | undefined;
 
+    setIsSubmitting(true);
     try {
       const res = await fetch('/api/auth/login', {
         method: 'POST',
@@ -215,7 +232,7 @@ export const AuthModal: React.FC = () => {
       });
       const data = await res.json();
       if (res.ok && data.status && data.user) {
-        matchedUser = data.user;
+        matchedUser = { ...data.user, mustChangePassword: Boolean(data.mustChangePassword ?? data.user?.mustChangePassword) };
         sessionToken = data.sessionToken;
       } else {
         if (data.error === 'EMAIL_NOT_VERIFIED') {
@@ -228,60 +245,127 @@ export const AuthModal: React.FC = () => {
         }
         return;
       }
-    } catch (err: any) {
-      notify('Unable to connect to authentication server. Please check your network.', 'error');
-      return;
-    }
 
-    if (!matchedUser) {
-      notify('Invalid email or password.', 'error');
-      return;
-    }
-
-    if (sessionToken) {
-      try {
-        localStorage.setItem('shopit_session_token', sessionToken);
-      } catch {}
-    }
-
-    // New Device Security Check (Rule 3)
-    const isDeviceKnown = isKnownDevice(cleanEmail, currentDeviceId);
-    if (!isDeviceKnown) {
-      const otpResult = await generateEmailOtp(cleanEmail, 'new_device_login', { name: matchedUser.name });
-      if (!otpResult.success) {
-        notify(otpResult.error || 'Could not dispatch device verification code.', 'error');
+      if (!matchedUser) {
+        notify('Invalid email or password.', 'error');
         return;
       }
 
-      setPendingNewDeviceUser({ ...matchedUser, sessionToken });
-      setNewDeviceCooldown(60);
-      setDeviceOtpInput('');
-      setAuthTab('new_device_otp' as any);
-      notify(`[Security Alert] New device detected! A 6-digit authorization code was sent to ${cleanEmail}. Valid for 10 minutes.`, 'info');
+      if (sessionToken) {
+        try {
+          localStorage.setItem('shopit_session_token', sessionToken);
+        } catch {}
+      }
+
+      // Mandatory initial password change flow (e.g. bootstrapped ADMIN_EMAIL)
+      if (matchedUser.mustChangePassword) {
+        setPendingForceChangeUser({ ...matchedUser, sessionToken });
+        setForceNewPassword('');
+        setForceConfirmPassword('');
+        setAuthTab('force_change_password' as any);
+        notify('Security requirement: please set a permanent password for your administrator account.', 'info');
+        return;
+      }
+
+      // New Device Security Check (Rule 3)
+      const isDeviceKnown = isKnownDevice(cleanEmail, currentDeviceId);
+      if (!isDeviceKnown) {
+        const otpResult = await generateEmailOtp(cleanEmail, 'new_device_login', { name: matchedUser.name });
+        if (!otpResult.success) {
+          notify(otpResult.error || 'Could not dispatch device verification code.', 'error');
+          return;
+        }
+
+        setPendingNewDeviceUser({ ...matchedUser, sessionToken });
+        setNewDeviceCooldown(60);
+        setDeviceOtpInput('');
+        setAuthTab('new_device_otp' as any);
+        notify(`[Security Alert] New device detected! A 6-digit authorization code was sent to ${cleanEmail}. Valid for 10 minutes.`, 'info');
+        return;
+      }
+
+      // Known device - complete login
+      login({ ...matchedUser, sessionToken } as any);
+      closeAuthModal();
+      notify(`Welcome back, ${matchedUser.name}!`, 'success');
+    } catch (err: any) {
+      notify('Unable to connect to authentication server. Please check your network.', 'error');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleForceChangePasswordSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!pendingForceChangeUser || isSubmitting) return;
+    if (forceNewPassword.trim().length < 8) {
+      notify('New password must be at least 8 characters long.', 'error');
+      return;
+    }
+    if (forceNewPassword.trim() !== forceConfirmPassword.trim()) {
+      notify('Passwords do not match.', 'error');
       return;
     }
 
-    // Known device - complete login
-    login({ ...matchedUser, sessionToken } as any);
-    closeAuthModal();
-    notify(`Welcome back, ${matchedUser.name}!`, 'success');
+    setIsSubmitting(true);
+    try {
+      const resp = await fetch('/api/auth/change-password', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(pendingForceChangeUser.sessionToken
+            ? { Authorization: `Bearer ${pendingForceChangeUser.sessionToken}` }
+            : {}),
+        },
+        credentials: 'include',
+        body: JSON.stringify({ newPassword: forceNewPassword.trim() }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data.status) {
+        notify(data.message || 'Could not update initial password.', 'error');
+        return;
+      }
+
+      const freshToken = data.sessionToken || pendingForceChangeUser.sessionToken;
+      if (freshToken) {
+        try {
+          localStorage.setItem('shopit_session_token', freshToken);
+        } catch {}
+      }
+      recordKnownDevice(pendingForceChangeUser.email.toLowerCase(), getDeviceId());
+      login({ ...pendingForceChangeUser, mustChangePassword: false, sessionToken: freshToken } as any);
+      setPendingForceChangeUser(null);
+      setForceNewPassword('');
+      setForceConfirmPassword('');
+      closeAuthModal();
+      notify('Initial password updated! Welcome to Shop It.', 'success');
+    } catch {
+      notify('Network error updating password. Please try again.', 'error');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const handleNewDeviceOtpSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!pendingNewDeviceUser) return;
+    if (!pendingNewDeviceUser || isSubmitting) return;
     const cleanEmail = pendingNewDeviceUser.email.toLowerCase();
-    const result = await verifyEmailOtp(cleanEmail, 'new_device_login', deviceOtpInput);
-    if (!result.success) {
-      notify(result.error || 'Invalid or expired authorization code. Please request a new code.', 'error');
-      return;
-    }
+    setIsSubmitting(true);
+    try {
+      const result = await verifyEmailOtp(cleanEmail, 'new_device_login', deviceOtpInput);
+      if (!result.success) {
+        notify(result.error || 'Invalid or expired authorization code. Please request a new code.', 'error');
+        return;
+      }
 
-    recordKnownDevice(cleanEmail, getDeviceId());
-    login(pendingNewDeviceUser);
-    closeAuthModal();
-    setPendingNewDeviceUser(null);
-    notify(`New device authorized! Welcome back, ${pendingNewDeviceUser.name}.`, 'success');
+      recordKnownDevice(cleanEmail, getDeviceId());
+      login(pendingNewDeviceUser);
+      closeAuthModal();
+      setPendingNewDeviceUser(null);
+      notify(`New device authorized! Welcome back, ${pendingNewDeviceUser.name}.`, 'success');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const handleResendNewDeviceOtp = async () => {
@@ -338,28 +422,33 @@ export const AuthModal: React.FC = () => {
       return;
     }
 
-    const otpResult = await generateEmailOtp(cleanEmail, 'signup', { name: name.trim() });
-    if (!otpResult.success) {
-      notify(otpResult.error || 'Could not send verification code.', 'error');
-      return;
-    }
+    setIsSubmitting(true);
+    try {
+      const otpResult = await generateEmailOtp(cleanEmail, 'signup', { name: name.trim() });
+      if (!otpResult.success) {
+        notify(otpResult.error || 'Could not send verification code.', 'error');
+        return;
+      }
 
-    const authData = {
-      id: `user_${Date.now()}`,
-      name: name.trim(),
-      email: cleanEmail,
-      password,
-      role,
-      age: parsedAge,
-      hasGuardianConsent: parsedAge < 18 ? guardianConsentGiven : true,
-      guardianName: parsedAge < 18 ? signupGuardianName.trim() : undefined,
-      agreedToTermsDate: new Date().toISOString(),
-    };
-    setPendingAuthData(authData);
-    setSignupCooldown(60);
-    setOtpCode('');
-    setAuthTab('otp');
-    notify(`[Email Verification] A 6-digit code was sent to ${cleanEmail}! Valid for 10 minutes.`, 'info');
+      const authData = {
+        id: `user_${Date.now()}`,
+        name: name.trim(),
+        email: cleanEmail,
+        password,
+        role,
+        age: parsedAge,
+        hasGuardianConsent: parsedAge < 18 ? guardianConsentGiven : true,
+        guardianName: parsedAge < 18 ? signupGuardianName.trim() : undefined,
+        agreedToTermsDate: new Date().toISOString(),
+      };
+      setPendingAuthData(authData);
+      setSignupCooldown(60);
+      setOtpCode('');
+      setAuthTab('otp');
+      notify(`[Email Verification] A 6-digit code was sent to ${cleanEmail}! Valid for 10 minutes.`, 'info');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const handleResendSignupCode = async () => {
@@ -375,7 +464,13 @@ export const AuthModal: React.FC = () => {
 
   const handleOtpSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    await verifyOtp(otpCode);
+    if (isSubmitting) return;
+    setIsSubmitting(true);
+    try {
+      await verifyOtp(otpCode);
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   // Location Selector
@@ -397,25 +492,31 @@ export const AuthModal: React.FC = () => {
   };
 
   // 4. Seller Registration Step (Under-18 Guardian Name, no phone number field)
-  const handleSellerFormSubmit = (e: React.FormEvent) => {
+  const handleSellerFormSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
     if (under18 && !guardianName.trim()) {
       notify('Youth sellers under 18 require a verified guardian name for payouts.', 'error');
       return;
     }
 
-    submitSellerRegistration({
-      shopName,
-      location: {
-        state: stateName,
-        city: cityName,
-        area: areaName,
-      },
-      locationArea: areaName,
-      bio,
-      under18,
-      guardianName: under18 ? guardianName.trim() : undefined,
-    });
+    setIsSubmitting(true);
+    try {
+      await submitSellerRegistration({
+        shopName,
+        location: {
+          state: stateName,
+          city: cityName,
+          area: areaName,
+        },
+        locationArea: areaName,
+        bio,
+        under18,
+        guardianName: under18 ? guardianName.trim() : undefined,
+      });
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -431,7 +532,7 @@ export const AuthModal: React.FC = () => {
         </button>
 
         {/* Tab Header: Sign In vs Sign Up */}
-        {authTab !== 'seller_register' && authTab !== 'otp' && (authTab as any) !== 'new_device_otp' && (
+        {authTab !== 'seller_register' && authTab !== 'otp' && (authTab as any) !== 'new_device_otp' && (authTab as any) !== 'force_change_password' && (
           <div className="flex border-b border-slate-100 pb-3 gap-6">
             <button
               type="button"
@@ -513,9 +614,10 @@ export const AuthModal: React.FC = () => {
 
             <button
               type="submit"
-              className="w-full h-12 bg-[#FF6B00] hover:bg-[#FF7A1A] text-[#111111] border-2 border-[#111111] font-black rounded-xl text-xs sm:text-sm transition-all flex items-center justify-center gap-2 shadow-[0_3px_0_#111111] active:translate-y-0.5"
+              disabled={isSubmitting}
+              className="w-full h-12 bg-[#FF6B00] hover:bg-[#FF7A1A] text-[#111111] border-2 border-[#111111] font-black rounded-xl text-xs sm:text-sm transition-all flex items-center justify-center gap-2 shadow-[0_3px_0_#111111] active:translate-y-0.5 disabled:opacity-60"
             >
-              <span>Sign In</span>
+              <span>{isSubmitting ? 'Signing In...' : 'Sign In'}</span>
               <ArrowRight className="w-4 h-4" />
             </button>
           </form>
@@ -576,6 +678,55 @@ export const AuthModal: React.FC = () => {
                 {newDeviceCooldown > 0 ? `Resend code in ${newDeviceCooldown}s` : 'Resend Email Code'}
               </button>
             </div>
+          </form>
+        )}
+
+        {/* Tab 1b2: MANDATORY INITIAL PASSWORD CHANGE */}
+        {(authTab as any) === 'force_change_password' && (
+          <form onSubmit={handleForceChangePasswordSubmit} className="space-y-4">
+            <div className="text-center space-y-1">
+              <div className="w-12 h-12 rounded-full bg-amber-50 text-amber-600 border-2 border-[#111111] flex items-center justify-center mx-auto shadow-xs">
+                <KeyRound className="w-6 h-6 text-[#FF6B00]" />
+              </div>
+              <h2 className="text-xl font-black text-slate-900">Set Permanent Password</h2>
+              <p className="text-xs text-slate-500">
+                Before accessing the Admin Panel for <strong className="text-slate-800">{pendingForceChangeUser?.email}</strong>, please replace the initial password.
+              </p>
+            </div>
+
+            <div>
+              <label className="text-xs font-semibold text-slate-700 block mb-1">New Password (Min 8 characters)</label>
+              <input
+                type="password"
+                required
+                minLength={8}
+                value={forceNewPassword}
+                onChange={e => setForceNewPassword(e.target.value)}
+                placeholder="At least 8 characters"
+                className="w-full h-11 px-3.5 rounded-xl border border-slate-200 text-xs sm:text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#FF6B00]"
+              />
+            </div>
+
+            <div>
+              <label className="text-xs font-semibold text-slate-700 block mb-1">Confirm New Password</label>
+              <input
+                type="password"
+                required
+                minLength={8}
+                value={forceConfirmPassword}
+                onChange={e => setForceConfirmPassword(e.target.value)}
+                placeholder="Repeat new password"
+                className="w-full h-11 px-3.5 rounded-xl border border-slate-200 text-xs sm:text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#FF6B00]"
+              />
+            </div>
+
+            <button
+              type="submit"
+              disabled={isSubmitting}
+              className="w-full h-12 bg-[#9FE870] hover:bg-[#AEF083] text-[#111111] border-2 border-[#111111] font-black rounded-xl text-xs sm:text-sm transition-all shadow-[0_3px_0_#111111] active:translate-y-0.5 disabled:opacity-60"
+            >
+              {isSubmitting ? 'Saving Password...' : 'Save Password & Enter Admin Panel'}
+            </button>
           </form>
         )}
 
@@ -876,12 +1027,13 @@ export const AuthModal: React.FC = () => {
 
             <button
               type="submit"
-              className="w-full h-12 bg-[#FF6B00] hover:bg-[#FF7A1A] text-[#111111] border-2 border-[#111111] font-black rounded-xl text-xs sm:text-sm transition-all flex items-center justify-center gap-2 shadow-[0_3px_0_#111111] active:translate-y-0.5"
+              disabled={isSubmitting}
+              className="w-full h-12 bg-[#FF6B00] hover:bg-[#FF7A1A] text-[#111111] border-2 border-[#111111] font-black rounded-xl text-xs sm:text-sm transition-all flex items-center justify-center gap-2 shadow-[0_3px_0_#111111] active:translate-y-0.5 disabled:opacity-60"
             >
               <span className="w-5 h-5 rounded-full bg-[#9FE870] text-[#111111] flex items-center justify-center font-black">
                 →
               </span>
-              <span>Continue with Email OTP</span>
+              <span>{isSubmitting ? 'Sending Email Code...' : 'Continue with Email OTP'}</span>
             </button>
           </form>
         )}
@@ -917,9 +1069,10 @@ export const AuthModal: React.FC = () => {
 
             <button
               type="submit"
-              className="w-full h-12 bg-[#9FE870] hover:bg-[#AEF083] text-[#111111] border-2 border-[#111111] font-black rounded-xl text-xs sm:text-sm transition-all shadow-[0_3px_0_#111111] active:translate-y-0.5"
+              disabled={isSubmitting}
+              className="w-full h-12 bg-[#9FE870] hover:bg-[#AEF083] text-[#111111] border-2 border-[#111111] font-black rounded-xl text-xs sm:text-sm transition-all shadow-[0_3px_0_#111111] active:translate-y-0.5 disabled:opacity-60"
             >
-              Verify &amp; Complete Registration
+              {isSubmitting ? 'Verifying Code...' : 'Verify & Complete Registration'}
             </button>
 
             <div className="flex items-center justify-between text-xs pt-1">
@@ -1078,9 +1231,10 @@ export const AuthModal: React.FC = () => {
 
             <button
               type="submit"
-              className="w-full h-12 bg-[#FF6B00] hover:bg-[#FF7A1A] text-[#111111] border-2 border-[#111111] font-black rounded-xl text-xs sm:text-sm transition-all shadow-[0_3px_0_#111111] active:translate-y-0.5"
+              disabled={isSubmitting}
+              className="w-full h-12 bg-[#FF6B00] hover:bg-[#FF7A1A] text-[#111111] border-2 border-[#111111] font-black rounded-xl text-xs sm:text-sm transition-all shadow-[0_3px_0_#111111] active:translate-y-0.5 disabled:opacity-60"
             >
-              Launch My Shop On Campus
+              {isSubmitting ? 'Creating Seller Shop...' : 'Launch My Shop On Campus'}
             </button>
           </form>
         )}

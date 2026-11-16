@@ -85,8 +85,10 @@ export interface User {
   name: string;
   password?: string;
   role: UserRole;
+  subRole?: 'superadmin' | 'moderator' | 'finance' | 'support' | string;
   adminSubRole?: AdminSubRole;
   isVerifiedEmail: boolean;
+  mustChangePassword?: boolean;
   isBanned?: boolean;
   avatarUrl?: string;
   sellerProfile?: SellerProfile;

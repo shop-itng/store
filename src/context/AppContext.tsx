@@ -1159,12 +1159,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       name: userData.name || 'Shopper',
       email: userData.email || 'customer@shopit.ng',
       role: userData.role || 'buyer',
-      isVerifiedEmail: true,
+      ...(userData.subRole ? { subRole: userData.subRole } : {}),
+      isVerifiedEmail: userData.isVerifiedEmail ?? true,
+      mustChangePassword: Boolean(userData.mustChangePassword),
+      isBanned: userData.isBanned,
+      age: userData.age,
+      hasGuardianConsent: userData.hasGuardianConsent,
+      guardianName: userData.guardianName,
+      createdAt: userData.createdAt,
       savedDeliveryArea: userData.savedDeliveryArea || userLocation.area || 'Yaba',
       sellerProfile: userData.sellerProfile,
     };
     setCurrentUser(newUser);
-    if (newUser.role === 'admin') {
+    if (newUser.role === 'admin' && !newUser.mustChangePassword) {
       void refreshAdminData('admin');
     } else {
       setRegisteredUsers([]);

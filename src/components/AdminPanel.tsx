@@ -383,6 +383,11 @@ export const AdminPanel: React.FC = () => {
   const [activityCategory, setActivityCategory] = useState<'all' | 'users' | 'browsing' | 'orders_payments' | 'marketplace' | 'security'>('all');
   const [activityActorEmail, setActivityActorEmail] = useState('');
   const [livePolling, setLivePolling] = useState(true);
+  const [adminError, setAdminError] = useState<string | null>(null);
+  const [adminErrorCode, setAdminErrorCode] = useState<string | null>(null);
+  const [initialNewPw, setInitialNewPw] = useState('');
+  const [initialConfirmPw, setInitialConfirmPw] = useState('');
+  const [savingInitialPw, setSavingInitialPw] = useState(false);
 
   const fetchMetrics = async () => {
     if (currentUser?.role !== 'admin') return;
@@ -393,11 +398,17 @@ export const AdminPanel: React.FC = () => {
         credentials: 'include',
       });
       const data = await res.json();
-      if (data.status) {
-        setMetricsData(data);
+      if (!res.ok || !data.status) {
+        setAdminErrorCode(data?.error || null);
+        setAdminError(data?.message || `Unable to load metrics (HTTP ${res.status}).`);
+        return;
       }
-    } catch (e) {
+      setAdminError(null);
+      setAdminErrorCode(null);
+      setMetricsData(data);
+    } catch (e: any) {
       console.error('Failed to load admin metrics:', e);
+      setAdminError(e?.message || 'Network error loading admin metrics.');
     } finally {
       setLoadingMetrics(false);
     }
@@ -424,14 +435,20 @@ export const AdminPanel: React.FC = () => {
         credentials: 'include',
       });
       const data = await res.json();
-      if (data.status) {
-        setDbUsers(data.users || []);
-        setDbUsersTotal(data.total || 0);
-        setDbUsersPage(data.page || 1);
-        setDbUsersTotalPages(data.totalPages || 1);
+      if (!res.ok || !data.status) {
+        setAdminErrorCode(data?.error || null);
+        setAdminError(data?.message || `Unable to load registered accounts (HTTP ${res.status}).`);
+        return;
       }
-    } catch (e) {
+      setAdminError(null);
+      setAdminErrorCode(null);
+      setDbUsers(data.users || []);
+      setDbUsersTotal(data.total || 0);
+      setDbUsersPage(data.page || 1);
+      setDbUsersTotalPages(data.totalPages || 1);
+    } catch (e: any) {
       console.error('Failed to load database users:', e);
+      setAdminError(e?.message || 'Network error loading registered users.');
     } finally {
       setLoadingDbUsers(false);
     }
@@ -459,17 +476,23 @@ export const AdminPanel: React.FC = () => {
         credentials: 'include',
       });
       const data = await res.json();
-      if (data.status) {
-        setActivityEvents(Array.isArray(data.events) ? data.events : []);
-        setActivityTotal(data.total || 0);
-        setActivityPage(data.page || 1);
-        setActivityTotalPages(data.totalPages || 1);
-        if (data.summary) {
-          setActivitySummary(data.summary);
-        }
+      if (!res.ok || !data.status) {
+        setAdminErrorCode(data?.error || null);
+        setAdminError(data?.message || `Unable to load website activity (HTTP ${res.status}).`);
+        return;
       }
-    } catch (e) {
+      setAdminError(null);
+      setAdminErrorCode(null);
+      setActivityEvents(Array.isArray(data.events) ? data.events : []);
+      setActivityTotal(data.total || 0);
+      setActivityPage(data.page || 1);
+      setActivityTotalPages(data.totalPages || 1);
+      if (data.summary) {
+        setActivitySummary(data.summary);
+      }
+    } catch (e: any) {
       console.error('Failed to load website activity:', e);
+      setAdminError(e?.message || 'Network error loading website activity.');
     } finally {
       setLoadingActivity(false);
     }
@@ -706,6 +729,107 @@ export const AdminPanel: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {(currentUser?.mustChangePassword || adminErrorCode === 'PASSWORD_CHANGE_REQUIRED') && (
+        <div className="bg-amber-50 border-2 border-amber-400 rounded-2xl p-5 space-y-3 shadow-xs">
+          <div className="flex items-start gap-2.5">
+            <Key className="w-5 h-5 text-[#FF6B00] shrink-0 mt-0.5" />
+            <div>
+              <h3 className="text-sm font-black text-stone-900">Action Required: Change Initial Administrator Password</h3>
+              <p className="text-xs text-stone-700 mt-0.5">
+                For security, the backend blocks admin queries until your initial password is replaced. Set your permanent password below to unlock all users, metrics, and moderation controls.
+              </p>
+            </div>
+          </div>
+          <form
+            onSubmit={async e => {
+              e.preventDefault();
+              if (initialNewPw.trim().length < 8) {
+                notify('New password must be at least 8 characters long.', 'error');
+                return;
+              }
+              if (initialNewPw.trim() !== initialConfirmPw.trim()) {
+                notify('Passwords do not match.', 'error');
+                return;
+              }
+              setSavingInitialPw(true);
+              try {
+                const res = await fetch('/api/auth/change-password', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+                  credentials: 'include',
+                  body: JSON.stringify({ newPassword: initialNewPw.trim() }),
+                });
+                const data = await res.json();
+                if (!res.ok || !data.status) {
+                  notify(data.message || 'Could not update password.', 'error');
+                  return;
+                }
+                if (data.sessionToken) {
+                  localStorage.setItem('shopit_session_token', data.sessionToken);
+                }
+                setAdminError(null);
+                setAdminErrorCode(null);
+                setInitialNewPw('');
+                setInitialConfirmPw('');
+                notify('Password updated! Loading all admin records...', 'success');
+                window.location.reload();
+              } catch {
+                notify('Network error updating password.', 'error');
+              } finally {
+                setSavingInitialPw(false);
+              }
+            }}
+            className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-1"
+          >
+            <input
+              type="password"
+              required
+              minLength={8}
+              value={initialNewPw}
+              onChange={e => setInitialNewPw(e.target.value)}
+              placeholder="New password (min 8 chars)"
+              className="h-10 px-3 rounded-xl border border-amber-300 bg-white text-xs text-stone-900"
+            />
+            <input
+              type="password"
+              required
+              minLength={8}
+              value={initialConfirmPw}
+              onChange={e => setInitialConfirmPw(e.target.value)}
+              placeholder="Confirm new password"
+              className="h-10 px-3 rounded-xl border border-amber-300 bg-white text-xs text-stone-900"
+            />
+            <button
+              type="submit"
+              disabled={savingInitialPw}
+              className="h-10 px-4 rounded-xl bg-[#FF6B00] hover:bg-[#ff7a1a] text-[#111111] font-black text-xs border border-[#111111] cursor-pointer disabled:opacity-60"
+            >
+              {savingInitialPw ? 'Updating...' : 'Save Password & Unlock'}
+            </button>
+          </form>
+        </div>
+      )}
+
+      {adminError && adminErrorCode !== 'PASSWORD_CHANGE_REQUIRED' && (
+        <div className="bg-red-50 border-2 border-red-300 text-red-900 rounded-2xl p-4 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5 text-xs sm:text-sm font-bold">
+            <AlertCircle className="w-5 h-5 text-red-600 shrink-0" />
+            <span>{adminError}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              fetchMetrics();
+              fetchDbUsers(dbUsersPage);
+              fetchActivityLogs(activityPage);
+            }}
+            className="px-3 py-1.5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-black shrink-0 cursor-pointer"
+          >
+            Retry
+          </button>
+        </div>
+      )}
 
       {/* STEP 2 ITEM 6: DATABASE CONNECTED & PLATFORM METRICS DASHBOARD CARD */}
       <div className="bg-white rounded-2xl border-2 border-stone-900 p-5 shadow-xs space-y-4">
@@ -2659,13 +2783,13 @@ export const AdminPanel: React.FC = () => {
                 <input
                   type="text"
                   readOnly
-                  value="https://shop-itng-pied.vercel.app/api/webhooks/flutterwave"
+                  value="https://shopitng.vercel.app/api/webhooks/flutterwave"
                   className="flex-1 bg-stone-900 border border-stone-700 text-xs text-[#9FE870] font-mono px-3 py-2 rounded-xl select-all focus:outline-hidden"
                 />
                 <button
                   onClick={() => {
                     navigator.clipboard.writeText(
-                      'https://shop-itng-pied.vercel.app/api/webhooks/flutterwave'
+                      'https://shopitng.vercel.app/api/webhooks/flutterwave'
                     );
                     notify('Flutterwave Webhook URL copied to clipboard!', 'success');
                   }}

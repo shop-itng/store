@@ -962,7 +962,7 @@ export async function runMigration(): Promise<void> {
   if (adminEmail && adminInitialPassword) {
     try {
       const existingAdmin = await pool.query(
-        'SELECT id, email, role FROM shopit_users WHERE LOWER(email) = LOWER($1)',
+        'SELECT id, email, role, sub_role, is_verified_email FROM shopit_users WHERE LOWER(email) = LOWER($1)',
         [adminEmail]
       );
 
@@ -986,9 +986,14 @@ export async function runMigration(): Promise<void> {
         );
         console.log(`[Admin Setup] Initial administrator account provisioned in PostgreSQL from ADMIN_EMAIL.`);
       } else {
-        // Ensure role is admin
-        if (existingAdmin.rows[0].role !== 'admin') {
-          await pool.query('UPDATE shopit_users SET role = $1 WHERE id = $2', ['admin', existingAdmin.rows[0].id]);
+        const row = existingAdmin.rows[0];
+        const nextSubRole = row.sub_role && String(row.sub_role).trim() ? String(row.sub_role).trim() : 'superadmin';
+        if (row.role !== 'admin' || row.sub_role !== nextSubRole || !row.is_verified_email) {
+          await pool.query(
+            'UPDATE shopit_users SET role = $1, sub_role = $2, is_verified_email = true, updated_at = NOW() WHERE id = $3',
+            ['admin', nextSubRole, row.id]
+          );
+          console.log(`[Admin Setup] Updated ADMIN_EMAIL account (${adminEmail}) with role=admin, sub_role=${nextSubRole}.`);
         }
       }
     } catch (adminErr: any) {
