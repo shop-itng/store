@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Product } from '../types';
 import { useApp } from '../context/AppContext';
 import { formatNaira } from '../utils/pricing';
@@ -6,19 +6,19 @@ import {
   ArrowLeft,
   Heart,
   Share2,
+  Copy,
+  Check,
   Star,
   ShieldCheck,
   Truck,
   MapPin,
-  Clock,
   AlertCircle,
   CheckCircle2,
-  Send,
   Flag,
-  Sparkles,
   ShoppingBag,
-  Zap,
   MessageSquare,
+  MessageCircle,
+  ImageOff,
 } from 'lucide-react';
 import { ShareButtons } from './ShareButtons';
 import { ReportModal, ReportTarget } from './ReportModal';
@@ -30,7 +30,10 @@ interface ProductDetailViewProps {
 
 export const ProductDetailView: React.FC<ProductDetailViewProps> = ({ product, onBack }) => {
   const [imageLoaded, setImageLoaded] = useState(false);
+  const [imageError, setImageError] = useState(false);
+  const [copiedLink, setCopiedLink] = useState(false);
   const {
+    currentUser,
     getSellerById,
     openSellerShop,
     wishlist,
@@ -42,10 +45,19 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({ product, o
     openChat,
     getDeliveryFee,
     userLocation,
+    subscribeRestockAlert,
+    checkRestockAlert,
   } = useApp();
 
   const seller = getSellerById(product.sellerId);
   const isWishlisted = wishlist.includes(product.id);
+  const isOwnProduct = Boolean(
+    currentUser && (currentUser.id === product.sellerId || currentUser.sellerProfile?.id === product.sellerId)
+  );
+
+  const canonicalProductUrl =
+    (typeof window !== 'undefined' ? window.location.origin : 'https://shopitng.vercel.app') +
+    `/?product=${encodeURIComponent(product.id)}`;
 
   // Gallery
   const [selectedPhotoIndex, setSelectedPhotoIndex] = useState(0);
@@ -59,16 +71,33 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({ product, o
   );
   const [customNameInput, setCustomNameInput] = useState('');
 
-  // Delivery area preview selector (Mandatory feature: show delivery cost before add to cart)
-  const [deliveryArea, setDeliveryArea] = useState<string>('Campus Pickup Point');
   const [deliveryType, setDeliveryType] = useState<'pickup' | 'local_delivery'>('pickup');
-
-  // Quantity
   const [quantity, setQuantity] = useState(1);
 
-  // Notification state for sold out
+  // Notification state for sold out (hydrated from PostgreSQL)
   const [notifyMeSet, setNotifyMeSet] = useState(false);
+  const [notifyLoading, setNotifyLoading] = useState(false);
   const [reportTarget, setReportTarget] = useState<ReportTarget | null>(null);
+
+  useEffect(() => {
+    setSelectedPhotoIndex(0);
+    setImageLoaded(false);
+    setImageError(false);
+  }, [product.id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (product.isSoldOut && currentUser) {
+      checkRestockAlert(product.id).then(active => {
+        if (!cancelled) setNotifyMeSet(active);
+      });
+    } else {
+      setNotifyMeSet(false);
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [product.id, product.isSoldOut, currentUser?.id]);
 
   // Calculate dynamic delivery fee based on buyer vs seller location
   const dynamicDelivery = getDeliveryFee(product.location);
@@ -82,18 +111,32 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({ product, o
   const serviceFeeTotal = product.serviceFee * quantity;
   const grandTotal = itemTotal + serviceFeeTotal + deliveryFee;
 
-  // Rule from prompt: Warn buyer if delivery plus fee is more than 50% of the item price!
-  const overheadPercentage = ((serviceFeeTotal + deliveryFee) / itemTotal) * 100;
+  // Warn buyer if delivery plus fee is more than 50% of the item price
+  const overheadPercentage = itemTotal > 0 ? ((serviceFeeTotal + deliveryFee) / itemTotal) * 100 : 0;
   const isHighOverhead = overheadPercentage > 50 && itemTotal < 3000;
 
-  const handleShare = (platform: 'whatsapp' | 'copy') => {
-    const shareUrl = window.location.href;
+  const canNativeShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function';
+
+  const handleShare = async (platform: 'native' | 'whatsapp' | 'copy') => {
     const shareText = `Check out "${product.title}" by ${product.sellerShopName} for ${formatNaira(
       product.displayPrice
-    )} on Shop It Nigeria!`;
+    )} on Shop It!`;
+
+    if (platform === 'native' && canNativeShare) {
+      try {
+        await navigator.share({
+          title: `${product.title} · Shop It`,
+          text: shareText,
+          url: canonicalProductUrl,
+        });
+        return;
+      } catch (err: any) {
+        if (err?.name === 'AbortError') return;
+      }
+    }
 
     if (platform === 'whatsapp') {
-      const whatsappUrl = `https://wa.me/?text=${encodeURIComponent(`${shareText} ${shareUrl}`)}`;
+      const whatsappUrl = `https://api.whatsapp.com/send?text=${encodeURIComponent(`${shareText} ${canonicalProductUrl}`)}`;
       const link = document.createElement('a');
       link.href = whatsappUrl;
       link.target = '_blank';
@@ -103,8 +146,23 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({ product, o
       link.remove();
       notify('Opened WhatsApp share', 'info');
     } else {
-      navigator.clipboard?.writeText?.(`${shareText} ${shareUrl}`);
-      notify('Link copied to clipboard!', 'success');
+      try {
+        if (navigator.clipboard) {
+          await navigator.clipboard.writeText(canonicalProductUrl);
+        } else {
+          const input = document.createElement('input');
+          input.value = canonicalProductUrl;
+          document.body.appendChild(input);
+          input.select();
+          document.execCommand('copy');
+          document.body.removeChild(input);
+        }
+        setCopiedLink(true);
+        notify('Product link copied to clipboard!', 'success');
+        setTimeout(() => setCopiedLink(false), 2000);
+      } catch {
+        notify('Could not copy link automatically.', 'error');
+      }
     }
   };
 
@@ -127,43 +185,65 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({ product, o
     setActiveView('cart');
   };
 
+  const handleRestockSubscribe = async () => {
+    setNotifyLoading(true);
+    const res = await subscribeRestockAlert(product.id);
+    setNotifyLoading(false);
+    if (res.subscribed) {
+      setNotifyMeSet(true);
+    }
+  };
+
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 py-4 sm:py-8 space-y-8">
-      {/* Back button and breadcrumb */}
-      <div className="flex items-center justify-between">
+      {/* Back button and top bar actions */}
+      <div className="flex items-center justify-between gap-2">
         <button
           onClick={onBack}
-          className="flex items-center gap-1.5 text-xs sm:text-sm font-semibold text-slate-600 hover:text-slate-900 transition-colors min-h-[44px]"
+          className="flex items-center gap-1.5 text-xs sm:text-sm font-semibold text-slate-600 dark:text-[#A1A1AA] hover:text-slate-900 dark:hover:text-white transition-colors min-h-[44px]"
         >
           <ArrowLeft className="w-4 h-4" />
           <span>Back to Crafts</span>
         </button>
 
         <div className="flex items-center gap-2">
-          {/* Share Buttons */}
+          {canNativeShare && (
+            <button
+              type="button"
+              onClick={() => handleShare('native')}
+              title="Share product"
+              className="px-2.5 py-1.5 text-xs font-bold text-[#9FE870] bg-[#111111] hover:bg-stone-800 rounded-lg border border-[#111111] transition-colors flex items-center gap-1 min-h-[38px] whitespace-nowrap shrink-0"
+            >
+              <Share2 className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Share</span>
+            </button>
+          )}
           <button
+            type="button"
             onClick={() => handleShare('whatsapp')}
             title="Share to WhatsApp"
-            className="px-2.5 py-1.5 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 rounded-lg border border-emerald-200 transition-colors flex items-center gap-1 min-h-[38px]"
+            className="px-2.5 py-1.5 text-xs font-semibold text-emerald-800 dark:text-emerald-200 bg-emerald-50 dark:bg-emerald-950/50 hover:bg-emerald-100 rounded-lg border border-emerald-200 dark:border-emerald-800 transition-colors flex items-center gap-1 min-h-[38px] whitespace-nowrap shrink-0"
           >
-            <Share2 className="w-3.5 h-3.5" />
+            <MessageCircle className="w-3.5 h-3.5" />
             <span className="hidden sm:inline">WhatsApp</span>
           </button>
           <button
+            type="button"
             onClick={() => handleShare('copy')}
-            title="Copy link"
-            className="p-2 text-slate-500 hover:text-slate-800 rounded-lg border border-slate-200 hover:bg-slate-50 min-h-[38px] min-w-[38px] flex items-center justify-center"
+            title="Copy product link"
+            className="p-2 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white rounded-lg border border-slate-200 dark:border-[#27272A] hover:bg-slate-50 dark:hover:bg-[#1E2028] min-h-[38px] min-w-[38px] flex items-center justify-center"
           >
-            <Share2 className="w-4 h-4" />
+            {copiedLink ? <Check className="w-4 h-4 text-emerald-600" /> : <Copy className="w-4 h-4" />}
           </button>
           <button
+            type="button"
             onClick={() => toggleWishlist(product.id)}
             aria-label="Wishlist"
-            className="p-2 rounded-lg border border-slate-200 hover:bg-slate-50 min-h-[38px] min-w-[38px] flex items-center justify-center text-slate-700"
+            className="p-2 rounded-lg border border-slate-200 dark:border-[#27272A] hover:bg-slate-50 dark:hover:bg-[#1E2028] min-h-[38px] min-w-[38px] flex items-center justify-center text-slate-700 dark:text-slate-200"
           >
             <Heart
               className={`w-4 h-4 ${
-                isWishlisted ? 'fill-rose-500 text-rose-500' : 'text-slate-600'
+                isWishlisted ? 'fill-rose-500 text-rose-500' : 'text-slate-600 dark:text-slate-300'
               }`}
             />
           </button>
@@ -180,23 +260,28 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({ product, o
               )}
 
               {lowDataMode ? (
-                <div className="w-full h-full flex flex-col items-center justify-center p-6 bg-slate-100 text-center">
-                  <span className="text-4xl mb-2">✨</span>
-                  <span className="text-base font-semibold text-slate-800">{product.title}</span>
-                  <span className="text-xs text-amber-700 mt-2 bg-amber-50 px-3 py-1 rounded-full border border-amber-200">
+                <div className="w-full h-full flex flex-col items-center justify-center p-6 bg-slate-100 dark:bg-[#1E2028] text-center">
+                  <span className="text-base font-semibold text-slate-800 dark:text-white">{product.title}</span>
+                  <span className="text-xs text-amber-700 dark:text-amber-300 mt-2 bg-amber-50 dark:bg-amber-950/40 px-3 py-1 rounded-full border border-amber-200 dark:border-amber-800">
                     Low-Data Mode active: Image preview reduced
                   </span>
                 </div>
-              ) : (
+              ) : !imageError && (product.images[selectedPhotoIndex] || product.images[0]) ? (
                 <img
                   src={product.images[selectedPhotoIndex] || product.images[0]}
                   alt={product.title}
                   referrerPolicy="no-referrer"
                   onLoad={() => setImageLoaded(true)}
+                  onError={() => setImageError(true)}
                   className={`w-full h-full object-cover transition-opacity duration-300 ${
                     imageLoaded ? 'opacity-100' : 'opacity-0'
                   }`}
                 />
+              ) : (
+                <div className="w-full h-full flex flex-col items-center justify-center bg-slate-100 dark:bg-[#1E2028] text-slate-400">
+                  <ImageOff className="w-10 h-10 mb-2 stroke-1" />
+                  <span className="text-xs font-semibold">{product.title}</span>
+                </div>
               )}
 
               {product.isSoldOut && (
@@ -214,11 +299,14 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({ product, o
               {product.images.map((img, idx) => (
                 <button
                   key={idx}
-                  onClick={() => setSelectedPhotoIndex(idx)}
+                  onClick={() => {
+                    setSelectedPhotoIndex(idx);
+                    setImageError(false);
+                  }}
                   className={`w-20 h-20 rounded-xl overflow-hidden border-2 transition-all shrink-0 ${
                     selectedPhotoIndex === idx
-                      ? 'border-slate-900 ring-2 ring-slate-900/20'
-                      : 'border-slate-200 opacity-70 hover:opacity-100'
+                      ? 'border-slate-900 dark:border-[#FF6B00] ring-2 ring-slate-900/20'
+                      : 'border-slate-200 dark:border-[#27272A] opacity-70 hover:opacity-100'
                   }`}
                 >
                   <img
@@ -233,16 +321,16 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({ product, o
           )}
 
           {/* Product Story / Description */}
-          <div className="pt-6 border-t border-slate-200 space-y-4">
-            <h2 className="text-base font-bold text-slate-900">About this Handmade Item</h2>
-            <p className="text-sm text-slate-700 leading-relaxed whitespace-pre-line">
+          <div className="pt-6 border-t border-slate-200 dark:border-[#27272A] space-y-4">
+            <h2 className="text-base font-bold text-slate-900 dark:text-white">About this Handmade Item</h2>
+            <p className="text-sm text-slate-700 dark:text-[#D4D4D8] leading-relaxed whitespace-pre-line">
               {product.description}
             </p>
 
-            <div className="bg-slate-50 rounded-xl p-4 border border-slate-200/80 space-y-2 text-xs text-slate-600">
-              <div className="flex items-center gap-2 font-semibold text-slate-900">
-                <ShieldCheck className="w-4 h-4 text-emerald-600" />
-                <span>Shop It Escrow & Buyer Protection Included</span>
+            <div className="bg-slate-50 dark:bg-[#15161C] rounded-xl p-4 border border-slate-200/80 dark:border-[#27272A] space-y-2 text-xs text-slate-600 dark:text-[#A1A1AA]">
+              <div className="flex items-center gap-2 font-semibold text-slate-900 dark:text-white">
+                <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-[#9FE870]" />
+                <span>Shop It Escrow &amp; Buyer Protection Included</span>
               </div>
               <p>
                 Your payment is held safely until you confirm "Item Received" in person or on delivery.
@@ -253,14 +341,14 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({ product, o
         </div>
 
         {/* Right Column: Contiguous Purchase Module */}
-        <div className="lg:col-span-5 space-y-6 bg-white p-5 sm:p-6 rounded-2xl border border-slate-200 shadow-xs">
+        <div className="lg:col-span-5 space-y-6 bg-white dark:bg-[#15161C] p-5 sm:p-6 rounded-2xl border border-slate-200 dark:border-[#27272A] shadow-xs">
           {/* Seller Trust Bar */}
-          <div className="flex items-start justify-between pb-4 border-b border-slate-100">
+          <div className="flex items-start justify-between pb-4 border-b border-slate-100 dark:border-[#27272A]">
             <div>
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => openSellerShop(product.sellerId)}
-                  className="text-sm font-bold text-slate-900 hover:underline flex items-center gap-1"
+                  className="text-sm font-bold text-slate-900 dark:text-white hover:underline flex items-center gap-1"
                 >
                   <span>{product.sellerShopName}</span>
                 </button>
@@ -271,20 +359,19 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({ product, o
                   </span>
                 )}
               </div>
-              <div className="flex items-center gap-2 text-xs text-[#71717A] mt-1.5">
+              <div className="flex items-center gap-2 text-xs text-[#71717A] dark:text-[#A1A1AA] mt-1.5">
                 <span className="inline-flex items-center gap-1 font-bold text-[#111111] bg-[#9FE870] px-2.5 py-0.5 rounded-md text-[11px]">
                   <MapPin className="w-3 h-3 text-[#111111]" />
-                  <span>📍 {product.locationArea || 'Nigeria'}</span>
+                  <span>{product.locationArea || 'Nigeria'}</span>
                 </span>
                 <span aria-hidden="true">·</span>
-                <Clock className="w-3.5 h-3.5 text-[#71717A]" />
-                <span>Fast responder</span>
+                <span>{seller ? `${seller.salesCount} completed sales` : 'Escrow Protected'}</span>
               </div>
             </div>
 
             <button
               onClick={() => openSellerShop(product.sellerId)}
-              className="text-xs font-bold text-[#FF6B00] hover:underline"
+              className="text-xs font-bold text-[#FF6B00] hover:underline whitespace-nowrap shrink-0"
             >
               View Shop
             </button>
@@ -292,7 +379,7 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({ product, o
 
           {/* Title & Rating */}
           <div>
-            <h1 className="text-xl sm:text-2xl font-extrabold text-slate-900 leading-snug">
+            <h1 className="text-xl sm:text-2xl font-extrabold text-slate-900 dark:text-white leading-snug">
               {product.title}
             </h1>
             <div className="flex items-center gap-3 mt-2 text-xs text-slate-600">
@@ -507,24 +594,13 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({ product, o
                     <span>Buy Now · {formatNaira(grandTotal)}</span>
                   </button>
                 </div>
-
-                <button
-                  type="button"
-                  onClick={() => openChat(undefined, { productId: product.id, sellerId: product.sellerId })}
-                  className="w-full h-12 rounded-xl bg-[#111111] hover:bg-[#18181B] text-[#9FE870] border-2 border-[#111111] hover:border-[#FF6B00] font-black text-xs sm:text-sm flex items-center justify-center gap-2 transition-all shadow-[0_2px_0_#111111] active:translate-y-0.5"
-                >
-                  <MessageSquare className="w-4 h-4 text-[#FF6B00]" />
-                  <span>Chat with Seller (Safe Escrow)</span>
-                </button>
               </>
             ) : (
               <div className="space-y-2">
                 <button
-                  onClick={() => {
-                    setNotifyMeSet(true);
-                    notify('We will notify you when this item is restocked!', 'success');
-                  }}
-                  disabled={notifyMeSet}
+                  type="button"
+                  onClick={handleRestockSubscribe}
+                  disabled={notifyMeSet || notifyLoading}
                   className={`w-full h-12 rounded-xl font-bold text-xs sm:text-sm flex items-center justify-center gap-2 transition-all ${
                     notifyMeSet
                       ? 'bg-[#ecf5f0] text-[#123524] border border-[#bce0cc]'
@@ -532,16 +608,42 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({ product, o
                   }`}
                 >
                   <CheckCircle2 className="w-4 h-4" />
-                  <span>{notifyMeSet ? 'Notification set for restock' : 'Sold Out · Notify Me'}</span>
+                  <span>
+                    {notifyLoading
+                      ? 'Saving Restock Alert...'
+                      : notifyMeSet
+                      ? 'Restock Alert Active'
+                      : 'Sold Out · Notify Me When Restocked'}
+                  </span>
                 </button>
                 <p className="text-[11px] text-stone-500 text-center">
-                  Seller usually restocks within 3–5 days.
+                  We will send you an in-app &amp; email alert as soon as the seller adds stock.
                 </p>
               </div>
             )}
+
+            {/* Ask Seller Button (Available for both in-stock and sold-out products!) */}
+            {!isOwnProduct ? (
+              <button
+                type="button"
+                onClick={() => void openChat(undefined, { productId: product.id, sellerId: product.sellerId })}
+                className="w-full h-12 rounded-xl bg-[#111111] hover:bg-[#18181B] text-[#9FE870] border-2 border-[#111111] hover:border-[#FF6B00] font-black text-xs sm:text-sm flex items-center justify-center gap-2 transition-all shadow-[0_2px_0_#111111] active:translate-y-0.5 whitespace-nowrap"
+              >
+                <MessageSquare className="w-4 h-4 text-[#FF6B00]" />
+                <span>Ask Seller (Safe Escrow Chat)</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setActiveView('seller_dashboard')}
+                className="w-full h-12 rounded-xl bg-stone-100 hover:bg-stone-200 text-slate-900 border border-stone-300 font-bold text-xs sm:text-sm flex items-center justify-center gap-2 transition-all"
+              >
+                <span>Manage Your Listing in Seller Dashboard</span>
+              </button>
+            )}
           </div>
 
-          {/* Share Buttons (WhatsApp, Copy Link, Status Preview) (Part 2 Item 8) */}
+          {/* Share Buttons (Native Share, WhatsApp, Copy Link, Status Preview) */}
           <div className="pt-4 border-t border-slate-100 dark:border-stone-800 space-y-2">
             <span className="text-[11px] font-black text-slate-500 uppercase tracking-wide block">
               Share Item:
@@ -552,6 +654,7 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({ product, o
               sellerShopName={product.sellerShopName}
               campus={product.sellerCampus}
               imageUrl={product.images[0]}
+              url={canonicalProductUrl}
             />
           </div>
 

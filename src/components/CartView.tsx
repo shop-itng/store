@@ -78,6 +78,7 @@ export const CartView: React.FC = () => {
                     <img
                       src={item.product.images[0]}
                       alt={item.product.title}
+                      referrerPolicy="no-referrer"
                       className="w-full h-full object-cover"
                     />
                   </div>
@@ -207,7 +208,7 @@ export const CartView: React.FC = () => {
             onClick={() => setActiveView('catalog')}
             className="px-6 py-2.5 bg-[#FF6B00] hover:bg-[#ff7a1a] text-[#111111] border-2 border-[#111111] dark:border-stone-800 shadow-[0_3px_0_#111111] dark:shadow-none active:translate-y-0.5 text-xs font-black rounded-xl transition-all flex items-center justify-center gap-2 mx-auto"
           >
-            <span className="w-2 h-2 rounded-full bg-[#9FE870] border border-[#111111]" />
+            <ShoppingBag className="w-4 h-4 text-[#111111]" />
             <span>Start Browsing Marketplace</span>
           </button>
         </div>

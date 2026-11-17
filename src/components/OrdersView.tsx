@@ -141,12 +141,18 @@ export const OrdersView: React.FC = () => {
     setDisputeReason('');
   };
 
-  const handleReviewSubmit = (e: React.FormEvent) => {
+  const handleReviewSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedReviewOrder) return;
     const firstProduct = selectedReviewOrder.items[0];
     if (firstProduct) {
-      submitOrderReview(selectedReviewOrder.id, firstProduct.productId, reviewRating, reviewComment);
+      const ok = await submitOrderReview(
+        selectedReviewOrder.id,
+        firstProduct.productId,
+        reviewRating,
+        reviewComment
+      );
+      if (!ok) return;
     }
     setSelectedReviewOrder(null);
     setReviewComment('');
@@ -381,7 +387,7 @@ export const OrdersView: React.FC = () => {
                       </div>
                     </div>
                     <div className="px-3 py-1 bg-white dark:bg-[#15161C] border border-orange-300 dark:border-[#FF6B00] rounded-lg font-mono-numbers font-extrabold text-sm text-[#FF6B00] tracking-widest shadow-xs shrink-0">
-                      {order.handshakeOtp || '7429'}
+                      {order.handshakeOtp || 'Pending'}
                     </div>
                   </div>
                 )}
@@ -393,6 +399,7 @@ export const OrdersView: React.FC = () => {
                       <img
                         src={order.packedPhotoUrl}
                         alt="Proof of packing"
+                        referrerPolicy="no-referrer"
                         className="w-full h-full object-cover"
                       />
                     </div>
@@ -427,6 +434,7 @@ export const OrdersView: React.FC = () => {
                         <img
                           src={item.image}
                           alt={item.title}
+                          referrerPolicy="no-referrer"
                           className="w-full h-full object-cover"
                         />
                       </div>

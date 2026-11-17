@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Product } from '../types';
 import { useApp } from '../context/AppContext';
 import { formatNaira } from '../utils/pricing';
-import { Heart, Star, MapPin, ImageOff, ShieldCheck } from 'lucide-react';
+import { Heart, Star, MapPin, ImageOff, ShieldCheck, Share2, Check, MessageSquare } from 'lucide-react';
 
 interface ProductCardProps {
   product: Product;
@@ -10,14 +10,76 @@ interface ProductCardProps {
 }
 
 export const ProductCard: React.FC<ProductCardProps> = ({ product, index = 0 }) => {
-  const { openProduct, wishlist, toggleWishlist, lowDataMode, openSellerShop, getDeliveryFee } = useApp();
+  const {
+    openProduct,
+    wishlist,
+    toggleWishlist,
+    lowDataMode,
+    openSellerShop,
+    getDeliveryFee,
+    openChat,
+    notify,
+    currentUser,
+    setActiveView,
+  } = useApp();
   const [imageError, setImageError] = useState(false);
   const [imageLoaded, setImageLoaded] = useState(false);
+  const [copiedShare, setCopiedShare] = useState(false);
   const isWishlisted = wishlist.includes(product.id);
 
   const mainImage = product.images[0] || '';
   const areaName = product.locationArea || product.location?.area || 'Local Area';
   const delivery = getDeliveryFee(product.location);
+  const isOwnProduct = Boolean(
+    currentUser && (currentUser.id === product.sellerId || currentUser.sellerProfile?.id === product.sellerId)
+  );
+
+  const handleShareCard = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const origin = typeof window !== 'undefined' ? window.location.origin : 'https://shopitng.vercel.app';
+    const shareUrl = `${origin}/?product=${encodeURIComponent(product.id)}`;
+    const shareText = `Check out "${product.title}" (${formatNaira(product.displayPrice)}) on Shop It:`;
+
+    if (typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
+      try {
+        await navigator.share({
+          title: `${product.title} · Shop It`,
+          text: shareText,
+          url: shareUrl,
+        });
+        return;
+      } catch (err: any) {
+        if (err?.name === 'AbortError') return;
+      }
+    }
+
+    try {
+      if (navigator.clipboard) {
+        await navigator.clipboard.writeText(shareUrl);
+      } else {
+        const input = document.createElement('input');
+        input.value = shareUrl;
+        document.body.appendChild(input);
+        input.select();
+        document.execCommand('copy');
+        document.body.removeChild(input);
+      }
+      setCopiedShare(true);
+      notify('Product link copied! Share anywhere.', 'success');
+      setTimeout(() => setCopiedShare(false), 2000);
+    } catch {
+      notify('Unable to copy product link automatically.', 'error');
+    }
+  };
+
+  const handleAskSeller = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (isOwnProduct) {
+      setActiveView('seller_dashboard');
+      return;
+    }
+    void openChat(undefined, { productId: product.id, sellerId: product.sellerId });
+  };
 
   return (
     <article
@@ -91,7 +153,7 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product, index = 0 }) 
       {/* Card Content & Metadata */}
       <div className="p-4 flex flex-col flex-1 justify-between gap-2.5">
         <div>
-          {/* Public Area Location ONLY (User Rule: Show only the area publicly) */}
+          {/* Public Area Location ONLY */}
           <div className="flex items-center justify-between gap-1 text-xs mb-1.5">
             <span
               onClick={e => {
@@ -119,28 +181,63 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product, index = 0 }) 
           </h3>
         </div>
 
-        {/* Price & Delivery */}
-        <div className="pt-2.5 border-t border-[#F4F4F5] dark:border-[#27272A] flex items-baseline justify-between gap-2">
-          <div>
-            <div className="text-base font-black text-[#111111] dark:text-white tracking-tight">
-              {formatNaira(product.displayPrice)}
+        <div className="space-y-2.5">
+          {/* Price & Delivery */}
+          <div className="pt-2.5 border-t border-[#F4F4F5] dark:border-[#27272A] flex items-baseline justify-between gap-2">
+            <div>
+              <div className="text-base font-black text-[#111111] dark:text-white tracking-tight">
+                {formatNaira(product.displayPrice)}
+              </div>
+              <div className="text-[11px] text-[#71717A] dark:text-[#A1A1AA] font-medium">
+                Delivery from ₦{delivery.fee.toLocaleString()}
+              </div>
             </div>
-            <div className="text-[11px] text-[#71717A] dark:text-[#A1A1AA] font-medium">
-              Delivery from ₦{delivery.fee.toLocaleString()}
-            </div>
+
+            {product.reviewCount > 0 ? (
+              <div className="flex items-center gap-1 text-xs text-[#111111] dark:text-white font-bold">
+                <Star className="w-3.5 h-3.5 text-amber-500 fill-amber-400" />
+                <span>{product.rating.toFixed(1)}</span>
+              </div>
+            ) : (
+              <span className="text-[10px] font-black text-[#9FE870] bg-[#111111] dark:bg-[#1E2028] border border-[#FF6B00] px-2 py-0.5 rounded-md flex items-center gap-1 whitespace-nowrap shrink-0">
+                <ShieldCheck className="w-3 h-3 text-[#FF6B00]" />
+                <span>Escrow</span>
+              </span>
+            )}
           </div>
 
-          {product.reviewCount > 0 ? (
-            <div className="flex items-center gap-1 text-xs text-[#111111] dark:text-white font-bold">
-              <Star className="w-3.5 h-3.5 text-amber-500 fill-amber-400" />
-              <span>{product.rating.toFixed(1)}</span>
-            </div>
-          ) : (
-            <span className="text-[10px] font-black text-[#9FE870] bg-[#111111] dark:bg-[#1E2028] border border-[#FF6B00] px-2 py-0.5 rounded-md flex items-center gap-1">
-              <ShieldCheck className="w-3 h-3 text-[#FF6B00]" />
-              <span>Escrow</span>
-            </span>
-          )}
+          {/* Ask Seller & Share Quick Actions */}
+          <div className="flex items-center gap-1.5 pt-1">
+            <button
+              type="button"
+              onClick={handleAskSeller}
+              className="flex-1 h-8 px-2.5 rounded-xl bg-[#111111] hover:bg-[#18181B] text-[#9FE870] border border-[#111111] dark:border-[#27272A] text-[11px] font-black transition-all flex items-center justify-center gap-1 whitespace-nowrap shrink-0 active:scale-95"
+              title={isOwnProduct ? 'Manage this item in Seller Dashboard' : `Ask ${product.sellerShopName} about this item`}
+            >
+              <MessageSquare className="w-3.5 h-3.5 text-[#FF6B00] shrink-0" />
+              <span>{isOwnProduct ? 'Your Item' : 'Ask Seller'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleShareCard}
+              aria-label={`Share ${product.title}`}
+              title="Share product link"
+              className="h-8 px-2.5 rounded-xl bg-[#FAFAFA] hover:bg-[#FFF4EC] dark:bg-[#1E2028] dark:hover:bg-[#27272A] text-[#111111] dark:text-white border border-[#E4E4E7] dark:border-[#27272A] text-[11px] font-bold transition-all flex items-center justify-center gap-1 whitespace-nowrap shrink-0 active:scale-95"
+            >
+              {copiedShare ? (
+                <>
+                  <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                  <span>Copied</span>
+                </>
+              ) : (
+                <>
+                  <Share2 className="w-3.5 h-3.5 text-[#FF6B00] shrink-0" />
+                  <span>Share</span>
+                </>
+              )}
+            </button>
+          </div>
         </div>
       </div>
     </article>

@@ -127,6 +127,7 @@ export const OrderTrackingModal: React.FC<Props> = ({
               <img
                 src={order.items[0].image}
                 alt={order.items[0].title}
+                referrerPolicy="no-referrer"
                 className="w-11 h-11 rounded-lg object-cover border border-stone-300 dark:border-stone-700 shrink-0"
               />
             )}
@@ -153,6 +154,7 @@ export const OrderTrackingModal: React.FC<Props> = ({
             <img
               src={order.packedPhotoUrl}
               alt="Artisan Packaging Verification"
+              referrerPolicy="no-referrer"
               className="w-14 h-14 rounded-lg object-cover border border-blue-300 dark:border-blue-700 shrink-0"
             />
             <div className="text-xs">
@@ -188,7 +190,7 @@ export const OrderTrackingModal: React.FC<Props> = ({
                     st.done
                       ? 'bg-emerald-500 border-emerald-600 text-white shadow-xs'
                       : st.active
-                      ? 'bg-[#FF6B00] border-[#111111] text-[#111111] animate-pulse shadow-xs'
+                      ? 'bg-[#FF6B00] border-[#111111] text-[#111111] shadow-xs'
                       : 'bg-slate-100 dark:bg-stone-800 border-slate-300 dark:border-stone-700 text-slate-400'
                   }`}
                 >

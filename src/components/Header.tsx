@@ -158,7 +158,7 @@ export const Header: React.FC = () => {
             className="flex items-center gap-1.5 transition-colors hover:text-[#FF6B00] dark:hover:text-[#FF6B00] text-sm font-bold text-[#FF6B00]"
             title="List handmade crafts in 60 seconds"
           >
-            <span className="w-2 h-2 rounded-full bg-[#FF6B00] animate-pulse" />
+            <PlusCircle className="w-3.5 h-3.5 text-[#FF6B00]" />
             <span>Sell a Product</span>
           </button>
         </nav>
@@ -232,7 +232,7 @@ export const Header: React.FC = () => {
                 onClick={() => setActiveView('admin')}
                 className="px-2.5 py-1.5 sm:px-3.5 sm:py-2 text-[11px] sm:text-xs font-black text-[#9FE870] bg-[#111111] border-2 border-[#FF6B00] hover:bg-[#18181B] rounded-xl transition-colors shadow-xs flex items-center gap-1.5"
               >
-                <span className="w-2 h-2 rounded-full bg-[#9FE870] animate-pulse" />
+                <Shield className="w-3.5 h-3.5 text-[#FF6B00]" />
                 <span className="hidden xs:inline">Moderator</span>
                 <span className="xs:hidden">Admin</span>
               </button>

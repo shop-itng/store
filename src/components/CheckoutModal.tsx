@@ -266,7 +266,6 @@ export const CheckoutModal: React.FC = () => {
                 <h2 className="text-base font-extrabold text-slate-900 dark:text-white">Flutterwave Escrow Checkout</h2>
                 {isLiveMode ? (
                   <span className="text-[10px] font-black text-white bg-emerald-600 px-2 py-0.5 rounded-full border border-emerald-700 flex items-center gap-1">
-                    <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse" />
                     LIVE SECURE
                   </span>
                 ) : (

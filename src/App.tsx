@@ -27,11 +27,12 @@ import { Loading } from './components/Loading';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { NotFoundView } from './components/NotFoundView';
 import { ResetPasswordPage } from './components/ResetPasswordPage';
-import { Store, ShieldCheck, MapPin, Star, ArrowRight, PackageOpen, PlusCircle, ShoppingBag, ShieldAlert } from 'lucide-react';
+import { Store, ShieldCheck, MapPin, Star, ArrowRight, PackageOpen, ShoppingBag, ShieldAlert, ArrowLeft, Clock } from 'lucide-react';
 
 
 const MarketplaceContent: React.FC = () => {
   const [isInitialLoading, setIsInitialLoading] = React.useState(true);
+  const [selectedSpotCampus, setSelectedSpotCampus] = React.useState<string>('All');
 
   React.useEffect(() => {
     const timer = setTimeout(() => {
@@ -44,9 +45,12 @@ const MarketplaceContent: React.FC = () => {
     setActiveView,
     selectedProductId,
     selectedSellerId,
+    isCatalogLoading,
     products,
     filteredProducts,
     sellers,
+    safePickupSpots,
+    setSelectedCampus,
     openSellerShop,
     resetFilters,
     openQuickListModal,
@@ -57,6 +61,7 @@ const MarketplaceContent: React.FC = () => {
   } = useApp();
 
   const selectedProduct = products.find(p => p.id === selectedProductId);
+  const selectedSeller = sellers.find(s => s.id === selectedSellerId);
 
   // Full-page initial loader with smooth fade-out
   if (isInitialLoading) {
@@ -269,6 +274,7 @@ const MarketplaceContent: React.FC = () => {
                               <img
                                 src={seller.logoUrl}
                                 alt={seller.shopName}
+                                referrerPolicy="no-referrer"
                                 className="w-full h-full object-cover"
                               />
                             ) : (
@@ -323,6 +329,8 @@ const MarketplaceContent: React.FC = () => {
                 onBack={() => setActiveView('catalog')}
               />
             </div>
+          ) : isCatalogLoading ? (
+            <Loading fullPage text="Loading craft details..." />
           ) : (
             <NotFoundView
               title="Product Listing Not Found"
@@ -332,19 +340,113 @@ const MarketplaceContent: React.FC = () => {
         )}
 
         {activeView === 'seller_shop' && (
-          selectedSellerId ? (
+          selectedSellerId && selectedSeller ? (
             <div className="animate-fade-in-up">
               <SellerShopView
                 sellerId={selectedSellerId}
                 onBack={() => setActiveView('catalog')}
               />
             </div>
+          ) : isCatalogLoading && selectedSellerId ? (
+            <Loading fullPage text="Loading artisan shop..." />
           ) : (
             <NotFoundView
               title="Artisan Shop Not Found"
               message="We could not find this seller profile. The student shop may have closed or changed its address."
             />
           )
+        )}
+
+        {activeView === 'campus_logistics' && (
+          <div className="max-w-5xl mx-auto px-4 sm:px-6 py-6 sm:py-8 space-y-6 animate-fade-in-up">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div>
+                <button
+                  onClick={() => setActiveView('catalog')}
+                  className="flex items-center gap-1.5 text-xs sm:text-sm font-semibold text-slate-600 dark:text-[#A1A1AA] hover:text-slate-900 dark:hover:text-white transition-colors mb-2 min-h-[38px]"
+                >
+                  <ArrowLeft className="w-4 h-4" />
+                  <span>Back to Marketplace</span>
+                </button>
+                <h1 className="text-xl sm:text-2xl font-black text-slate-900 dark:text-white">
+                  Verified Safe Campus Pickup Spots
+                </h1>
+                <p className="text-xs text-slate-500 dark:text-[#A1A1AA] mt-0.5">
+                  Public, well-lit, security-patrolled campus hubs for inspecting crafts before releasing your 4-digit Handshake PIN.
+                </p>
+              </div>
+
+              <div className="shrink-0">
+                <select
+                  value={selectedSpotCampus}
+                  onChange={e => setSelectedSpotCampus(e.target.value)}
+                  className="h-10 px-3 rounded-xl border border-[#E4E4E7] dark:border-[#27272A] bg-white dark:bg-[#15161C] text-xs font-bold text-[#111111] dark:text-white"
+                >
+                  <option value="All">All Campuses ({safePickupSpots.length})</option>
+                  {Array.from(new Set(safePickupSpots.map(s => s.campus))).map(c => (
+                    <option key={c} value={c}>{c}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {safePickupSpots
+                .filter(spot => selectedSpotCampus === 'All' || spot.campus === selectedSpotCampus)
+                .map(spot => (
+                  <div
+                    key={spot.id}
+                    className="bg-white dark:bg-[#15161C] rounded-2xl border border-[#E4E4E7] dark:border-[#27272A] p-5 space-y-3 shadow-xs flex flex-col justify-between"
+                  >
+                    <div className="space-y-2.5">
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <span className="text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded bg-[#9FE870] text-[#111111]">
+                            {spot.campus}
+                          </span>
+                          <h2 className="text-base font-black text-[#111111] dark:text-white mt-1.5">
+                            {spot.name}
+                          </h2>
+                        </div>
+                        <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-emerald-50 dark:bg-emerald-950/50 text-emerald-800 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 whitespace-nowrap shrink-0">
+                          {spot.securityBadgeText || spot.securityLevel.replace(/_/g, ' ')}
+                        </span>
+                      </div>
+
+                      <div className="text-xs text-[#52525B] dark:text-[#A1A1AA] space-y-1">
+                        <div className="flex items-center gap-1.5">
+                          <MapPin className="w-3.5 h-3.5 text-[#FF6B00] shrink-0" />
+                          <span>{spot.landmark}{spot.contactPorterTitle ? ` · ${spot.contactPorterTitle}` : ''}</span>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <Clock className="w-3.5 h-3.5 text-[#71717A] shrink-0" />
+                          <span>Hours: {spot.operatingHours}</span>
+                        </div>
+                      </div>
+
+                      {spot.directionsTip && (
+                        <p className="text-[11px] bg-[#FAFAFA] dark:bg-[#1E2028] border border-[#E4E4E7] dark:border-[#27272A] rounded-xl p-2.5 text-[#52525B] dark:text-[#D4D4D8]">
+                          <strong>Tip:</strong> {spot.directionsTip}
+                        </p>
+                      )}
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        resetFilters();
+                        setSelectedCampus(spot.campus);
+                        setActiveView('catalog');
+                      }}
+                      className="w-full py-2 rounded-xl bg-[#111111] hover:bg-[#18181B] text-[#9FE870] font-black text-xs transition-all flex items-center justify-center gap-1.5"
+                    >
+                      <span>Browse Crafts at {spot.campus}</span>
+                      <ArrowRight className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ))}
+            </div>
+          </div>
         )}
 
         {activeView === 'seller_dashboard' && (

@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { Share2, Copy, Check, MessageCircle, ExternalLink, Image as ImageIcon } from 'lucide-react';
+import { Share2, Copy, Check, MessageCircle, Image as ImageIcon, ImageOff } from 'lucide-react';
 import { formatNaira } from '../utils/pricing';
+import { useApp } from '../context/AppContext';
 
 interface Props {
   title: string;
@@ -19,8 +20,10 @@ export const ShareButtons: React.FC<Props> = ({
   imageUrl,
   url,
 }) => {
+  const { notify } = useApp();
   const [copied, setCopied] = useState(false);
   const [showStatusPreview, setShowStatusPreview] = useState(false);
+  const [previewImgError, setPreviewImgError] = useState(false);
 
   const currentUrl = url || (typeof window !== 'undefined' ? window.location.href : 'https://shopitng.vercel.app');
   const priceText = price !== undefined ? `for ${formatNaira(price)}` : '';
@@ -29,6 +32,8 @@ export const ShareButtons: React.FC<Props> = ({
 
   const shareMessage = `Check out "${title}" ${priceText} ${sellerText} ${campusText} on Shop It! Safe escrow payments & campus delivery: ${currentUrl}`;
   const whatsappUrl = `https://api.whatsapp.com/send?text=${encodeURIComponent(shareMessage)}`;
+
+  const canNativeShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function';
 
   const handleCopy = async () => {
     try {
@@ -43,21 +48,52 @@ export const ShareButtons: React.FC<Props> = ({
         document.body.removeChild(input);
       }
       setCopied(true);
+      notify('Link copied to clipboard!', 'success');
       setTimeout(() => setCopied(false), 2000);
     } catch {
       setCopied(false);
+      notify('Could not copy link. Please copy from address bar.', 'error');
+    }
+  };
+
+  const handleNativeShare = async () => {
+    if (!canNativeShare) {
+      await handleCopy();
+      return;
+    }
+    try {
+      await navigator.share({
+        title: `${title} · Shop It`,
+        text: `Check out "${title}" ${priceText} ${sellerText} on Shop It!`,
+        url: currentUrl,
+      });
+    } catch (err: any) {
+      if (err?.name !== 'AbortError') {
+        await handleCopy();
+      }
     }
   };
 
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2">
+        {canNativeShare && (
+          <button
+            type="button"
+            onClick={handleNativeShare}
+            className="px-3.5 py-2 bg-[#111111] hover:bg-stone-800 text-[#9FE870] rounded-xl text-xs font-black transition-all flex items-center gap-1.5 shadow-xs active:translate-y-0.5 whitespace-nowrap shrink-0"
+          >
+            <Share2 className="w-3.5 h-3.5" />
+            <span>Share</span>
+          </button>
+        )}
+
         {/* WhatsApp Share Button */}
         <a
           href={whatsappUrl}
           target="_blank"
           rel="noopener noreferrer"
-          className="px-3.5 py-2 bg-[#25D366] hover:bg-[#20bd5a] text-white rounded-xl text-xs font-black transition-all flex items-center gap-1.5 shadow-xs active:translate-y-0.5"
+          className="px-3.5 py-2 bg-[#25D366] hover:bg-[#20bd5a] text-white rounded-xl text-xs font-black transition-all flex items-center gap-1.5 shadow-xs active:translate-y-0.5 whitespace-nowrap shrink-0"
         >
           <MessageCircle className="w-4 h-4 fill-white" />
           <span>Share to WhatsApp</span>
@@ -67,7 +103,7 @@ export const ShareButtons: React.FC<Props> = ({
         <button
           type="button"
           onClick={handleCopy}
-          className="px-3.5 py-2 bg-stone-100 hover:bg-stone-200 dark:bg-stone-800 dark:hover:bg-stone-700 text-slate-800 dark:text-white rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 border border-stone-200 dark:border-stone-700"
+          className="px-3.5 py-2 bg-stone-100 hover:bg-stone-200 dark:bg-stone-800 dark:hover:bg-stone-700 text-slate-800 dark:text-white rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 border border-stone-200 dark:border-stone-700 whitespace-nowrap shrink-0"
         >
           {copied ? (
             <>
@@ -86,7 +122,7 @@ export const ShareButtons: React.FC<Props> = ({
         <button
           type="button"
           onClick={() => setShowStatusPreview(!showStatusPreview)}
-          className="px-3 py-2 bg-stone-50 hover:bg-stone-100 dark:bg-stone-900 dark:hover:bg-stone-800 text-stone-600 dark:text-stone-300 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 border border-stone-200 dark:border-stone-800"
+          className="px-3 py-2 bg-stone-50 hover:bg-stone-100 dark:bg-stone-900 dark:hover:bg-stone-800 text-stone-600 dark:text-stone-300 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 border border-stone-200 dark:border-stone-800 whitespace-nowrap shrink-0"
         >
           <ImageIcon className="w-3.5 h-3.5 text-[#FF6B00]" />
           <span>{showStatusPreview ? 'Hide Card Preview' : 'Status Preview Card'}</span>
@@ -97,15 +133,24 @@ export const ShareButtons: React.FC<Props> = ({
       {showStatusPreview && (
         <div className="p-4 bg-stone-900 text-white rounded-2xl border-2 border-[#111111] space-y-3 shadow-lg max-w-sm animate-fade-in-up">
           <div className="flex items-center justify-between text-[11px] text-stone-400">
-            <span>WhatsApp Status & Story Card Preview</span>
+            <span>WhatsApp Status &amp; Story Card Preview</span>
             <span className="text-[#9FE870] font-black uppercase tracking-wider text-[10px]">Shop It Live</span>
           </div>
 
           <div className="relative rounded-xl overflow-hidden aspect-4/3 bg-stone-800 border border-stone-700 flex items-center justify-center">
-            {imageUrl ? (
-              <img src={imageUrl} alt={title} className="w-full h-full object-cover" />
+            {imageUrl && !previewImgError ? (
+              <img
+                src={imageUrl}
+                alt={title}
+                referrerPolicy="no-referrer"
+                onError={() => setPreviewImgError(true)}
+                className="w-full h-full object-cover"
+              />
             ) : (
-              <div className="text-stone-500 text-xs">Marketplace Item</div>
+              <div className="flex flex-col items-center gap-1 text-stone-400 text-xs">
+                <ImageOff className="w-6 h-6" />
+                <span>Marketplace Item</span>
+              </div>
             )}
             <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent flex flex-col justify-end p-3 text-left">
               <span className="text-[10px] text-[#9FE870] font-black uppercase tracking-wider bg-black/60 px-2 py-0.5 rounded w-max border border-stone-700">

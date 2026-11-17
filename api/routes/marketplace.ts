@@ -21,6 +21,8 @@ import {
   calculateConfiguredServiceFeeKobo,
   processUnshippedOrders,
   runLazyPendingOrderExpiry,
+  restoreOrderStockInTx,
+  sendBrevoDirect,
 } from '../lib/payments.js';
 
 const router = express.Router();
@@ -182,7 +184,7 @@ router.get('/products', async (req, res) => {
       stock: parseInt(row.stock, 10) || 0,
       rating: parseFloat(row.rating || 5.0),
       reviewCount: parseInt(row.review_count, 10) || 0,
-      reviews: [],
+      reviews: Array.isArray(row.reviews) ? row.reviews : [],
       delivery: {
         allowsPickup: true,
         pickupLocation: `${row.location_area || 'Hub'} Safe Handoff Spot`,
@@ -243,7 +245,7 @@ router.get('/products/:id', async (req, res) => {
         stock: parseInt(row.stock, 10),
         rating: parseFloat(row.rating || 5.0),
         reviewCount: parseInt(row.review_count, 10) || 0,
-        reviews: [],
+        reviews: Array.isArray(row.reviews) ? row.reviews : [],
         delivery: {
           allowsPickup: true,
           pickupLocation: `${row.location_area || 'Hub'} Safe Handoff Spot`,
@@ -356,7 +358,8 @@ router.post('/products', requireAuth, async (req: AuthenticatedRequest, res: Res
     const productId = `prod_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
     const imagesArray = imgCheck.urls;
 
-    const parsedStock = Math.max(0, Math.min(10000, parseInt(String(stock), 10) || 1));
+    const rawParsedStock = parseInt(String(stock), 10);
+    const parsedStock = Math.max(0, Math.min(10000, Number.isNaN(rawParsedStock) ? 1 : rawParsedStock));
     const pickupFee = Math.max(0, Math.min(1000000, parseFloat(delivery?.pickupFee ?? '0') || 0));
     const localDeliveryFee = Math.max(0, Math.min(1000000, parseFloat(delivery?.localDeliveryFee ?? '500') || 500));
 
@@ -472,6 +475,8 @@ router.put('/products/:id', requireAuth, async (req: AuthenticatedRequest, res: 
       images = JSON.stringify(imgUpdate.urls);
     }
 
+    const wasOutOfStock = Boolean(row.is_sold_out) || parseInt(String(row.stock || '0'), 10) <= 0;
+
     await dbQuery(
       `UPDATE shopit_products
        SET title = $1, description = $2, category = $3, seller_price = $4, service_fee = $5, display_price = $6,
@@ -479,6 +484,44 @@ router.put('/products/:id', requireAuth, async (req: AuthenticatedRequest, res: 
        WHERE id = $10`,
       [title, description, category, sellerPrice, serviceFee, displayPrice, stock, isSoldOut, images, id]
     );
+
+    if (wasOutOfStock && stock > 0) {
+      try {
+        const subs = await dbQuery(
+          'SELECT id, user_id, email FROM shopit_restock_alerts WHERE product_id = $1 AND notified = false',
+          [id]
+        );
+        for (const sub of subs.rows) {
+          await dbQuery(
+            `INSERT INTO shopit_notifications (id, user_id, title, message, type, is_read, link, created_at)
+             VALUES ($1, $2, $3, $4, 'success', false, $5, NOW())`,
+            [
+              `notif_restock_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
+              sub.user_id,
+              'Item Back in Stock!',
+              `"${title}" is now restocked (${stock} available) on Shop It.`,
+              `/?product=${encodeURIComponent(id)}`,
+            ]
+          );
+          if (sub.email) {
+            void sendBrevoDirect(
+              sub.email,
+              `Back in Stock: ${title} on Shop It`,
+              `Good news! "${title}" is back in stock on Shop It (${stock} available). Visit https://shopitng.vercel.app/?product=${encodeURIComponent(id)}`,
+              `<p>Good news!</p><p><strong>${title}</strong> is back in stock on Shop It (${stock} available).</p><p><a href="https://shopitng.vercel.app/?product=${encodeURIComponent(id)}">View Item on Shop It</a></p>`
+            ).catch(() => {});
+          }
+        }
+        if (subs.rows.length > 0) {
+          await dbQuery(
+            'UPDATE shopit_restock_alerts SET notified = true WHERE product_id = $1 AND notified = false',
+            [id]
+          );
+        }
+      } catch (notifErr: any) {
+        console.warn('[Restock Notification Warning]:', notifErr?.message || notifErr);
+      }
+    }
 
     await logAuditEvent({
       action: 'PRODUCT_UPDATED',
@@ -521,6 +564,63 @@ router.delete('/products/:id', requireAuth, async (req: AuthenticatedRequest, re
     });
 
     return res.json({ status: true, message: 'Product deleted successfully.' });
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: err.message });
+  }
+});
+
+// GET /api/products/:id/restock-alert - Check if authenticated user has active restock alert
+router.get('/products/:id/restock-alert', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const user = req.user!;
+    const { id } = req.params;
+    const resRow = await dbQuery(
+      'SELECT notified FROM shopit_restock_alerts WHERE product_id = $1 AND user_id = $2',
+      [id, user.userId]
+    );
+    const subscribed = resRow.rows.length > 0 && !resRow.rows[0].notified;
+    return res.json({ status: true, subscribed });
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: err.message });
+  }
+});
+
+// POST /api/products/:id/restock-alert - Subscribe authenticated user to restock alert
+router.post('/products/:id/restock-alert', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const user = req.user!;
+    const { id } = req.params;
+    const prodRes = await dbQuery('SELECT id, title, stock, is_sold_out FROM shopit_products WHERE id = $1', [id]);
+    if (prodRes.rows.length === 0) {
+      return res.status(404).json({ status: false, message: 'Product not found.' });
+    }
+    const prod = prodRes.rows[0];
+    if (!prod.is_sold_out && parseInt(String(prod.stock || '0'), 10) > 0) {
+      return res.json({ status: true, subscribed: false, inStock: true, message: 'This item is currently in stock.' });
+    }
+
+    const alertId = `rstk_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
+    await dbQuery(
+      `INSERT INTO shopit_restock_alerts (id, product_id, user_id, email, notified, created_at)
+       VALUES ($1, $2, $3, $4, false, NOW())
+       ON CONFLICT (product_id, user_id) DO UPDATE SET notified = false, email = $4, created_at = NOW()`,
+      [alertId, id, user.userId, user.email || null]
+    );
+
+    await logAuditEvent({
+      action: 'RESTOCK_ALERT_SUBSCRIBED',
+      actor: { id: user.userId, email: user.email, role: user.role },
+      target: { type: 'product', id },
+      details: { title: prod.title },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
+
+    return res.status(201).json({
+      status: true,
+      subscribed: true,
+      message: 'Restock alert saved. You will be notified when this item is restocked.',
+    });
   } catch (err: any) {
     return res.status(500).json({ status: false, message: err.message });
   }
@@ -961,7 +1061,7 @@ router.get('/orders', requireAuth, async (req: AuthenticatedRequest, res: Respon
         shippedAt: row.shipped_at,
         deliveredAt: row.delivered_at,
         completedAt: row.completed_at,
-        hasReview: false,
+        hasReview: Boolean(row.has_review),
       };
     });
 
@@ -1080,21 +1180,24 @@ router.patch('/orders/:id/status', requireAuth, async (req: AuthenticatedRequest
           return { code: 400, body: { status: false, message: `Cannot dispute an order in '${prevStatus}' status.` } };
         }
       } else if (newStatus === 'cancelled') {
-        if (!isAdmin) {
-          return { code: 403, body: { status: false, message: 'Only an administrator can cancel or refund a paid order.' } };
+        if (!isAdmin && !isBuyer) {
+          return { code: 403, body: { status: false, message: 'Only the buyer (before packing) or an administrator can cancel an order.' } };
+        }
+        if (!isAdmin && prevStatus !== 'paid') {
+          return { code: 403, body: { status: false, message: `Orders cannot be cancelled by the buyer once status is '${prevStatus}'. Please open a dispute if you have an issue.` } };
         }
         if (!['pending_payment', 'paid'].includes(prevStatus)) {
           return { code: 400, body: { status: false, message: `Cannot cancel order from status '${prevStatus}'.` } };
         }
       }
 
-      // If releasing escrow, block when an open dispute exists unless admin override
+      // If releasing escrow or buyer cancelling, block when an open dispute exists unless admin override
       const isReleasingEscrow =
         (newStatus === 'delivered' || newStatus === 'completed') &&
         prevStatus !== 'delivered' &&
         prevStatus !== 'completed';
 
-      if (isReleasingEscrow && !isAdmin) {
+      if ((isReleasingEscrow || newStatus === 'cancelled') && !isAdmin) {
         const disputeCheck = await client.query(
           `SELECT id FROM shopit_disputes WHERE order_id = $1 AND status IN ('open', 'investigating') FOR UPDATE`,
           [id]
@@ -1102,7 +1205,7 @@ router.patch('/orders/:id/status', requireAuth, async (req: AuthenticatedRequest
         if (disputeCheck.rows.length > 0) {
           return {
             code: 409,
-            body: { status: false, message: 'Cannot release escrow while an active dispute exists on this order.' },
+            body: { status: false, message: 'Cannot modify order status while an active dispute exists on this order.' },
           };
         }
       }
@@ -1207,12 +1310,120 @@ router.patch('/orders/:id/status', requireAuth, async (req: AuthenticatedRequest
         }
       }
 
+      if (newStatus === 'cancelled') {
+        await restoreOrderStockInTx(client, order);
+        await client.query(
+          'UPDATE shopit_orders SET auto_release_at = NULL, updated_at = NOW() WHERE id = $1',
+          [id]
+        );
+
+        if (prevStatus === 'paid') {
+          const sellerTotalsKobo: Record<string, number> = {};
+          for (const item of items) {
+            if (item.sellerId) {
+              const qty = Math.max(1, Math.floor(Number(item.quantity) || 1));
+              const kobo = (Number(item.sellerPriceKobo) || Math.round(Number(item.sellerPrice || 0) * 100)) * qty;
+              sellerTotalsKobo[item.sellerId] = (sellerTotalsKobo[item.sellerId] || 0) + kobo;
+            }
+          }
+          for (const [sId, amountKobo] of Object.entries(sellerTotalsKobo)) {
+            const wRes = await client.query(
+              'SELECT pending_balance_kobo FROM shopit_wallets WHERE seller_id = $1 FOR UPDATE',
+              [sId]
+            );
+            if (wRes.rows.length > 0) {
+              const currentPending = parseInt(String(wRes.rows[0].pending_balance_kobo || '0'), 10);
+              const debitKobo = Math.min(currentPending, amountKobo);
+              const nextPending = Math.max(0, currentPending - debitKobo);
+              const idempotencyKey = `order_cancel_refund:${id}:${sId}`;
+              const ledIns = await client.query(
+                `INSERT INTO shopit_ledger_entries (
+                  id, wallet_id, order_id, type, amount, fee, balance_after, balance_type, status,
+                  amount_kobo, fee_kobo, balance_after_kobo, description, reference, idempotency_key, created_at
+                ) VALUES (
+                  $1, $2, $3, 'refund', $4, 0, $5, 'pending', 'completed',
+                  $6, 0, $7, $8, $9, $10, NOW()
+                )
+                ON CONFLICT (idempotency_key) DO NOTHING
+                RETURNING id`,
+                [
+                  `CANCEL-REF-${id}-${sId.slice(-6)}`,
+                  sId,
+                  id,
+                  koboToNaira(debitKobo),
+                  koboToNaira(nextPending),
+                  debitKobo,
+                  nextPending,
+                  `Order #${id} cancelled before packing; escrow reversed for buyer refund`,
+                  order.payment_reference || id,
+                  idempotencyKey,
+                ]
+              );
+              if (ledIns.rows.length > 0) {
+                await client.query(
+                  `UPDATE shopit_wallets
+                   SET pending_balance_kobo = $1, pending_balance = $2, updated_at = NOW()
+                   WHERE seller_id = $3`,
+                  [nextPending, koboToNaira(nextPending), sId]
+                );
+              }
+            }
+          }
+        }
+      }
+
       return {
         code: 200,
         body: { status: true, message: `Order status updated to ${newStatus}.` },
         audit: { prevStatus, newStatus, isReleasingEscrow },
+        cancelledPaidOrder: newStatus === 'cancelled' && prevStatus === 'paid' ? order : null,
       };
     });
+
+    if (result.code === 200 && (result as any).cancelledPaidOrder) {
+      const ord = (result as any).cancelledPaidOrder;
+      const items: any[] = Array.isArray(ord.items) ? ord.items : [];
+      const flwSecret = (process.env.FLW_SECRET_KEY || '').trim().replace(/^["']|["']$/g, '');
+      if (process.env.PAYMENTS_ENABLED === 'true' && flwSecret && ord.payment_reference) {
+        try {
+          const payRes = await dbQuery('SELECT data FROM shopit_payments WHERE reference = $1 OR order_id = $2 LIMIT 1', [
+            ord.payment_reference,
+            id,
+          ]);
+          const payData = payRes.rows[0]?.data || {};
+          const flwTxId = payData?.flwTransactionId || payData?.id;
+          const refundNaira = Number(ord.grand_total_kobo) > 0 ? koboToNaira(ord.grand_total_kobo) : parseFloat(ord.grand_total || '0');
+          if (flwTxId && refundNaira > 0) {
+            const flwRes = await fetch(`https://api.flutterwave.com/v3/transactions/${encodeURIComponent(String(flwTxId))}/refund`, {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${flwSecret}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ amount: refundNaira, comments: `Buyer cancelled unpacked Order #${id}` }),
+            });
+            if (flwRes.ok) {
+              await dbQuery('UPDATE shopit_payments SET status = $1, updated_at = NOW() WHERE reference = $2', [
+                'refunded',
+                ord.payment_reference,
+              ]);
+            }
+          }
+        } catch (refundErr: any) {
+          console.warn('[Order Cancel Gateway Refund Warning]:', refundErr?.message || refundErr);
+        }
+      }
+      for (const sId of Array.from(new Set(items.map(i => i.sellerId).filter(Boolean)))) {
+        const sRow = await dbQuery('SELECT user_id FROM shopit_sellers WHERE id = $1 OR user_id = $1 LIMIT 1', [sId]).catch(() => ({ rows: [] }));
+        const targetUid = sRow.rows[0]?.user_id || sId;
+        await dbQuery(
+          `INSERT INTO shopit_notifications (id, user_id, title, message, type, is_read, link, created_at)
+           VALUES ($1, $2, 'Order Cancelled', $3, 'info', false, '/dashboard', NOW())`,
+          [
+            `notif_cancel_${Date.now()}_${crypto.randomBytes(2).toString('hex')}`,
+            targetUid,
+            `Order #${id} was cancelled by the buyer before packing. Item stock has been restored.`,
+          ]
+        ).catch(() => {});
+      }
+    }
 
     if (result.code === 200 && (result as any).audit) {
       await logAuditEvent({
@@ -1226,6 +1437,131 @@ router.patch('/orders/:id/status', requireAuth, async (req: AuthenticatedRequest
     }
 
     return res.status(result.code).json(result.body);
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: err.message });
+  }
+});
+
+// POST /api/orders/:id/review - Persist verified buyer review in PostgreSQL
+router.post('/orders/:id/review', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const user = req.user!;
+    const { id } = req.params;
+    const { productId, rating, comment } = req.body || {};
+
+    const numRating = Math.round(Number(rating));
+    if (!Number.isFinite(numRating) || numRating < 1 || numRating > 5) {
+      return res.status(400).json({ status: false, message: 'Rating must be between 1 and 5 stars.' });
+    }
+    const cleanComment = String(comment || '').trim().slice(0, 600);
+    if (cleanComment.length < 3) {
+      return res.status(400).json({ status: false, message: 'Please write at least a brief review comment.' });
+    }
+
+    const txResult = await withTransaction(async client => {
+      const ordRes = await client.query('SELECT * FROM shopit_orders WHERE id = $1 FOR UPDATE', [id]);
+      if (ordRes.rows.length === 0) {
+        return { code: 404, body: { status: false, message: 'Order not found.' } };
+      }
+      const order = ordRes.rows[0];
+      if (order.buyer_id !== user.userId && user.role !== 'admin') {
+        return { code: 403, body: { status: false, message: 'Only the buyer of this order can leave a review.' } };
+      }
+      if (!['delivered', 'completed'].includes(order.status)) {
+        return { code: 400, body: { status: false, message: 'You can review an order once it has been delivered or completed.' } };
+      }
+      if (order.has_review) {
+        return { code: 409, body: { status: false, message: 'You have already reviewed this order.' } };
+      }
+
+      const items: any[] = Array.isArray(order.items) ? order.items : [];
+      const targetItem = productId ? items.find(i => i.productId === productId) : items[0];
+      const targetProductId = targetItem?.productId || items[0]?.productId;
+      if (!targetProductId) {
+        return { code: 400, body: { status: false, message: 'No product associated with this order.' } };
+      }
+
+      const prodRes = await client.query('SELECT id, seller_id, reviews FROM shopit_products WHERE id = $1 FOR UPDATE', [targetProductId]);
+      if (prodRes.rows.length === 0) {
+        return { code: 404, body: { status: false, message: 'Product listing no longer exists.' } };
+      }
+
+      const prod = prodRes.rows[0];
+      const existingReviews: any[] = Array.isArray(prod.reviews) ? prod.reviews : [];
+      const reviewEntry = {
+        id: `rev_${Date.now()}_${crypto.randomBytes(2).toString('hex')}`,
+        productId: targetProductId,
+        buyerMaskedId: order.buyer_masked_id || `Buyer #${user.userId.slice(-4)}`,
+        rating: numRating,
+        comment: cleanComment,
+        date: new Date().toISOString().split('T')[0],
+        verifiedPurchase: true,
+      };
+      const updatedReviews = [reviewEntry, ...existingReviews];
+      const newCount = updatedReviews.length;
+      const newAvg = Number(
+        (updatedReviews.reduce((sum, r) => sum + Number(r.rating || 5), 0) / newCount).toFixed(2)
+      );
+
+      await client.query(
+        'UPDATE shopit_products SET reviews = $1, review_count = $2, rating = $3, updated_at = NOW() WHERE id = $4',
+        [JSON.stringify(updatedReviews), newCount, newAvg, targetProductId]
+      );
+      await client.query(
+        'UPDATE shopit_orders SET has_review = true, updated_at = NOW() WHERE id = $1',
+        [id]
+      );
+
+      if (prod.seller_id) {
+        const sellerProdsRes = await client.query(
+          'SELECT rating, review_count FROM shopit_products WHERE seller_id = $1 AND review_count > 0',
+          [prod.seller_id]
+        );
+        if (sellerProdsRes.rows.length > 0) {
+          let totalWeight = 0;
+          let weightedSum = 0;
+          for (const sp of sellerProdsRes.rows) {
+            const c = parseInt(String(sp.review_count || '0'), 10);
+            const r = parseFloat(String(sp.rating || '5'));
+            totalWeight += c;
+            weightedSum += c * r;
+          }
+          if (totalWeight > 0) {
+            const sellerAvg = Number((weightedSum / totalWeight).toFixed(2));
+            await client.query(
+              'UPDATE shopit_sellers SET rating = $1, updated_at = NOW() WHERE id = $2 OR user_id = $2',
+              [sellerAvg, prod.seller_id]
+            );
+          }
+        }
+      }
+
+      return {
+        code: 201,
+        body: {
+          status: true,
+          review: reviewEntry,
+          rating: newAvg,
+          reviewCount: newCount,
+          productId: targetProductId,
+          message: 'Thank you for rating your artisan!',
+        },
+        audit: { orderId: id, productId: targetProductId, rating: numRating },
+      };
+    });
+
+    if (txResult.code === 201 && (txResult as any).audit) {
+      await logAuditEvent({
+        action: 'ORDER_REVIEW_SUBMITTED',
+        actor: { id: user.userId, email: user.email, role: user.role },
+        target: { type: 'product', id: (txResult as any).audit.productId },
+        details: (txResult as any).audit,
+        ip: req.ip,
+        userAgent: req.get('user-agent'),
+      });
+    }
+
+    return res.status(txResult.code).json(txResult.body);
   } catch (err: any) {
     return res.status(500).json({ status: false, message: err.message });
   }
@@ -1648,6 +1984,27 @@ router.post('/wallet/payout-account', requirePaymentsEnabled, requireAuth, async
 // 6. CHAT & CONVERSATIONS API (Participant-Authorized)
 // ============================================================================
 
+function mapConversationRow(row: any) {
+  return {
+    id: row.id,
+    orderId: row.order_id,
+    productId: row.product_id,
+    productTitle: row.product_title || (row.order_id ? `Order #${row.order_id}` : 'Marketplace Craft Inquiry'),
+    productImage: row.product_image || undefined,
+    buyerId: row.buyer_id,
+    buyerMaskedId: row.buyer_masked_id || `Buyer #${String(row.id || '').slice(-4)}`,
+    sellerId: row.seller_id,
+    sellerShopName: row.seller_shop_name || 'Artisan',
+    lastMessage: row.last_message || 'Conversation started',
+    lastMessageAt: row.last_message_at || row.created_at,
+    unreadBuyer: 0,
+    unreadSeller: 0,
+    isChatLocked: Boolean(row.is_chat_locked),
+    bypassViolationsCount: parseInt(row.bypass_violations_count, 10) || 0,
+    createdAt: row.created_at,
+  };
+}
+
 router.get('/chat/conversations', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const user = req.user!;
@@ -1662,22 +2019,7 @@ router.get('/chat/conversations', requireAuth, async (req: AuthenticatedRequest,
             [user.userId, sellerLookup]
           );
 
-    const conversations = result.rows.map((row: any) => ({
-      id: row.id,
-      orderId: row.order_id,
-      productId: row.product_id,
-      productTitle: row.product_title,
-      productImage: row.product_image,
-      buyerId: row.buyer_id,
-      buyerMaskedId: row.buyer_masked_id || `Buyer #${row.id.slice(-4)}`,
-      sellerId: row.seller_id,
-      sellerShopName: row.seller_shop_name || 'Artisan',
-      lastMessage: row.last_message,
-      lastMessageAt: row.last_message_at,
-      isChatLocked: Boolean(row.is_chat_locked),
-      bypassViolationsCount: parseInt(row.bypass_violations_count, 10) || 0,
-      createdAt: row.created_at,
-    }));
+    const conversations = result.rows.map(mapConversationRow);
 
     return res.json({ status: true, conversations });
   } catch (err: any) {
@@ -1688,7 +2030,7 @@ router.get('/chat/conversations', requireAuth, async (req: AuthenticatedRequest,
 router.post('/chat/conversations', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const user = req.user!;
-    const { sellerId, productId, productTitle, productImage, orderId } = req.body;
+    const { sellerId, productId, productTitle, productImage, orderId } = req.body || {};
     if (!sellerId) {
       return res.status(400).json({ status: false, message: 'sellerId is required.' });
     }
@@ -1696,19 +2038,53 @@ router.post('/chat/conversations', requireAuth, async (req: AuthenticatedRequest
       return res.status(400).json({ status: false, message: 'You cannot open a chat conversation with your own shop.' });
     }
 
-    const existing = await dbQuery(
-      `SELECT * FROM shopit_chat_conversations WHERE buyer_id = $1 AND seller_id = $2`,
-      [user.userId, sellerId]
-    );
-    if (existing.rows.length > 0) {
-      return res.json({ status: true, conversation: existing.rows[0] });
+    const sellerRes = await dbQuery('SELECT id, user_id, shop_name FROM shopit_sellers WHERE id = $1 OR user_id = $1 LIMIT 1', [sellerId]);
+    const canonicalSellerId = sellerRes.rows[0]?.id || String(sellerId);
+    const sellerUserId = sellerRes.rows[0]?.user_id || canonicalSellerId;
+    if (sellerUserId === user.userId || isUserSellerOwner(user, canonicalSellerId)) {
+      return res.status(400).json({ status: false, message: 'You cannot open a chat conversation with your own shop.' });
     }
-
-    const sellerRes = await dbQuery('SELECT shop_name FROM shopit_sellers WHERE id = $1 OR user_id = $1', [sellerId]);
     const shopName = sellerRes.rows[0]?.shop_name || 'Artisan';
 
+    let resolvedTitle = productTitle ? String(productTitle).trim().slice(0, 200) : null;
+    let resolvedImage = productImage ? String(productImage).trim() : null;
+    if (productId && (!resolvedTitle || !resolvedImage)) {
+      const prodRes = await dbQuery('SELECT title, images FROM shopit_products WHERE id = $1', [productId]);
+      if (prodRes.rows.length > 0) {
+        resolvedTitle = resolvedTitle || prodRes.rows[0].title;
+        if (!resolvedImage && Array.isArray(prodRes.rows[0].images) && prodRes.rows[0].images[0]) {
+          resolvedImage = prodRes.rows[0].images[0];
+        }
+      }
+    }
+
+    const existing = await dbQuery(
+      `SELECT * FROM shopit_chat_conversations
+       WHERE buyer_id = $1 AND (seller_id = $2 OR seller_id = $3)
+       ORDER BY last_message_at DESC NULLS LAST LIMIT 1`,
+      [user.userId, String(sellerId), canonicalSellerId]
+    );
+    if (existing.rows.length > 0) {
+      let existingRow = existing.rows[0];
+      if (productId || orderId || resolvedTitle) {
+        const upd = await dbQuery(
+          `UPDATE shopit_chat_conversations
+           SET product_id = COALESCE($1, product_id),
+               product_title = COALESCE($2, product_title),
+               product_image = COALESCE($3, product_image),
+               order_id = COALESCE($4, order_id),
+               seller_shop_name = COALESCE($5, seller_shop_name)
+           WHERE id = $6
+           RETURNING *`,
+          [productId || null, resolvedTitle, resolvedImage, orderId || null, shopName, existingRow.id]
+        );
+        if (upd.rows.length > 0) existingRow = upd.rows[0];
+      }
+      return res.json({ status: true, conversation: mapConversationRow(existingRow) });
+    }
+
     const convId = `conv_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
-    const buyerMaskedId = `Buyer #${convId.slice(-4)}`;
+    const buyerMaskedId = `Buyer #${user.userId.slice(-4)}`;
 
     const insertRes = await dbQuery(
       `INSERT INTO shopit_chat_conversations (
@@ -1717,19 +2093,19 @@ router.post('/chat/conversations', requireAuth, async (req: AuthenticatedRequest
         last_message, last_message_at, created_at
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'Chat started', NOW(), NOW())
       RETURNING *`,
-      [convId, orderId || null, productId || null, productTitle || null, productImage || null, user.userId, buyerMaskedId, sellerId, shopName]
+      [convId, orderId || null, productId || null, resolvedTitle, resolvedImage, user.userId, buyerMaskedId, canonicalSellerId, shopName]
     );
 
     await logAuditEvent({
       action: 'CHAT_CONVERSATION_STARTED',
       actor: { id: user.userId, email: user.email, role: user.role },
       target: { type: 'conversation', id: convId },
-      details: { sellerId, shopName, productTitle: productTitle || null, orderId: orderId || null },
+      details: { sellerId: canonicalSellerId, shopName, productId: productId || null, productTitle: resolvedTitle, orderId: orderId || null },
       ip: req.ip,
       userAgent: req.get('user-agent'),
     });
 
-    return res.status(201).json({ status: true, conversation: insertRes.rows[0] });
+    return res.status(201).json({ status: true, conversation: mapConversationRow(insertRes.rows[0]) });
   } catch (err: any) {
     return res.status(500).json({ status: false, message: err.message });
   }
@@ -1763,8 +2139,9 @@ router.get('/chat/conversations/:id/messages', requireAuth, async (req: Authenti
         senderMaskedName: row.sender_masked_name,
         content: row.content,
         isBlockedBypass: Boolean(row.is_blocked_bypass),
-        presetOffer: row.preset_offer,
+        presetOffer: row.preset_offer || undefined,
         createdAt: row.created_at,
+        timestamp: row.created_at,
       })),
     });
   } catch (err: any) {
@@ -1776,7 +2153,7 @@ router.post('/chat/conversations/:id/messages', requireAuth, async (req: Authent
   try {
     const user = req.user!;
     const { id } = req.params;
-    const { content, presetOffer } = req.body;
+    const { content, presetOffer } = req.body || {};
 
     const convRes = await dbQuery('SELECT * FROM shopit_chat_conversations WHERE id = $1', [id]);
     if (convRes.rows.length === 0) {
@@ -1795,25 +2172,46 @@ router.post('/chat/conversations/:id/messages', requireAuth, async (req: Authent
     }
 
     const cleanContent = String(content).trim().slice(0, 1000);
+    const sanitizedPresetOffer =
+      presetOffer && typeof presetOffer === 'object' && Number.isFinite(Number(presetOffer.price)) && Number.isFinite(Number(presetOffer.quantity))
+        ? {
+            price: Math.max(100, Math.round(Number(presetOffer.price))),
+            quantity: Math.max(1, Math.min(100, Math.round(Number(presetOffer.quantity)))),
+            title: presetOffer.title ? String(presetOffer.title).trim().slice(0, 120) : undefined,
+          }
+        : undefined;
+
     const phoneRegex = /(\+?234|0)[789][01]\d{8}/;
     const bankRegex = /\b\d{10}\b/;
-    const whatsappRegex = /(wa\.me|whatsapp|dm me on ig|call me)/i;
+    const whatsappRegex = /(wa\.me|whatsapp|t\.me|telegram|ig\s*dm|dm\s*me\s*on\s*ig|instagram|snapchat|call\s*me|opay|palmpay|kuda|acct\s*no|account\s*number)/i;
+    const freeTextDigitRegex = !sanitizedPresetOffer ? /\d/ : /$^/;
 
-    const isBypass = phoneRegex.test(cleanContent) || bankRegex.test(cleanContent) || whatsappRegex.test(cleanContent);
+    const isBypass =
+      phoneRegex.test(cleanContent) ||
+      bankRegex.test(cleanContent) ||
+      whatsappRegex.test(cleanContent) ||
+      freeTextDigitRegex.test(cleanContent);
     const msgId = `msg_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
     const role = isUserSellerOwner(user, conv.seller_id) ? 'seller' : (user.role === 'admin' ? 'admin' : 'buyer');
-    const senderMaskedName = role === 'seller' ? 'Artisan' : (role === 'admin' ? 'Shop It Moderation' : `Buyer #${user.userId.slice(-4)}`);
+    const senderMaskedName =
+      role === 'seller'
+        ? conv.seller_shop_name || 'Artisan'
+        : role === 'admin'
+          ? 'Shop It Moderation'
+          : conv.buyer_masked_id || `Buyer #${user.userId.slice(-4)}`;
 
     const savedContent = isBypass
-      ? '[Security Notice: Direct phone numbers, account numbers, and off-platform payments are prohibited to protect your escrow security.]'
+      ? '[Security Notice: Numbers, phone numbers, account numbers, and off-platform payments are prohibited to protect your escrow security.]'
       : cleanContent;
+
+    const nowIso = new Date().toISOString();
 
     await dbQuery(
       `INSERT INTO shopit_chat_messages (
         id, conversation_id, sender_id, sender_role, sender_masked_name,
         content, is_blocked_bypass, preset_offer, created_at
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())`,
-      [msgId, id, user.userId, role, senderMaskedName, savedContent, isBypass, presetOffer ? JSON.stringify(presetOffer) : null]
+      [msgId, id, user.userId, role, senderMaskedName, savedContent, isBypass, sanitizedPresetOffer ? JSON.stringify(sanitizedPresetOffer) : null]
     );
 
     const nextViolations = (parseInt(conv.bypass_violations_count, 10) || 0) + (isBypass ? 1 : 0);
@@ -1825,6 +2223,29 @@ router.post('/chat/conversations/:id/messages', requireAuth, async (req: Authent
        WHERE id = $3`,
       [savedContent, nextViolations, id]
     );
+
+    // Notify recipient in shopit_notifications
+    try {
+      let recipientUserId: string | null = null;
+      if (role === 'buyer') {
+        const sRow = await dbQuery('SELECT user_id FROM shopit_sellers WHERE id = $1 OR user_id = $1 LIMIT 1', [conv.seller_id]);
+        recipientUserId = sRow.rows[0]?.user_id || conv.seller_id;
+      } else {
+        recipientUserId = conv.buyer_id;
+      }
+      if (recipientUserId && recipientUserId !== user.userId) {
+        await dbQuery(
+          `INSERT INTO shopit_notifications (id, user_id, title, message, type, is_read, link, created_at)
+           VALUES ($1, $2, $3, $4, 'info', false, '/chat', NOW())`,
+          [
+            `notif_chat_${Date.now()}_${crypto.randomBytes(2).toString('hex')}`,
+            recipientUserId,
+            `New Message from ${senderMaskedName}`,
+            isBypass ? 'A blocked safety notice was logged in your conversation.' : savedContent.slice(0, 140),
+          ]
+        );
+      }
+    } catch {}
 
     await logAuditEvent({
       action: isBypass ? 'CHAT_BYPASS_BLOCKED' : 'CHAT_MESSAGE_SENT',
@@ -1850,9 +2271,13 @@ router.post('/chat/conversations/:id/messages', requireAuth, async (req: Authent
         senderMaskedName,
         content: savedContent,
         isBlockedBypass: isBypass,
-        createdAt: new Date().toISOString(),
+        presetOffer: sanitizedPresetOffer,
+        createdAt: nowIso,
+        timestamp: nowIso,
       },
-      warning: isBypass ? 'Anti-bypass trigger: Personal contact info redacted to ensure buyer/seller escrow safety.' : undefined,
+      isChatLocked: nextViolations >= 2 || Boolean(conv.is_chat_locked),
+      bypassViolationsCount: nextViolations,
+      warning: isBypass ? 'Anti-bypass trigger: Personal contact info or numbers redacted to ensure buyer/seller escrow safety.' : undefined,
     });
   } catch (err: any) {
     return res.status(500).json({ status: false, message: err.message });

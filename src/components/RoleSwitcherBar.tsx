@@ -21,7 +21,7 @@ export const RoleSwitcherBar: React.FC = () => {
       <div className="max-w-7xl mx-auto flex items-center justify-between gap-2 min-w-0">
         <div className="flex items-center gap-2 min-w-0 shrink">
           <span className="flex items-center gap-1.5 text-white font-bold text-[10px] sm:text-[11px] shrink-0">
-            <span className="w-2 h-2 rounded-full bg-[#9FE870] animate-pulse shrink-0" />
+            <ShieldCheck className="w-3.5 h-3.5 text-[#9FE870] shrink-0" />
             <span className="hidden xs:inline">Shop It Escrow Protected</span>
             <span className="xs:hidden">Escrow Protected</span>
           </span>

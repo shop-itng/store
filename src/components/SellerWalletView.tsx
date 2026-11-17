@@ -38,8 +38,6 @@ export const SellerWalletView: React.FC = () => {
     sendWithdrawalOtp,
     sendPayoutAccountOtp,
     activeWithdrawalOtp,
-    securityProfile,
-    toggleTwoFactor,
     notify,
     payoutsEnabled,
   } = useApp();
@@ -317,7 +315,7 @@ export const SellerWalletView: React.FC = () => {
       {/* Escrow & Bank Payout Rules Banner */}
       <div className="bg-[#111111] text-white p-4 rounded-2xl border-2 border-[#111111] shadow-[0_3px_0_#111111] flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
         <div className="flex items-center gap-2.5">
-          <span className="w-2.5 h-2.5 rounded-full bg-[#9FE870] animate-pulse shrink-0" />
+          <span className="w-2.5 h-2.5 rounded-full bg-[#9FE870] shrink-0" />
           <div>
             <div className="flex items-center gap-2">
               <span className="text-xs font-black text-[#9FE870] uppercase tracking-wider">

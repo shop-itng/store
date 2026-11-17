@@ -513,6 +513,7 @@ async function runTests() {
       'shopit_disputes',
       'shopit_notifications',
       'shopit_platform_settings',
+      'shopit_restock_alerts',
     ];
     for (const tbl of requiredCoreTables) {
       assert.ok(
@@ -535,7 +536,198 @@ async function runTests() {
     const { loadLocalEnvSafely } = await import('./migrate.js');
     assert.strictEqual(loadLocalEnvSafely({ NODE_ENV: 'production' } as NodeJS.ProcessEnv), false);
     assert.strictEqual(loadLocalEnvSafely({ VERCEL: '1' } as NodeJS.ProcessEnv), false);
-    console.log('   ✓ CORE_SCHEMA_TABLES (27 tables), index failure reporting & migrate.ts env safety verified');
+    console.log('   ✓ CORE_SCHEMA_TABLES (28 tables), index failure reporting & migrate.ts env safety verified');
+
+    // 6. Ask Seller Chat, Sold-Out Restock Alerts, Verified Order Reviews & Paid Order Cancellation
+    const chatBuyerEmail = `buyer_chat_flow_${ts}@test.edu.ng`;
+    const chatBuyerProof = await issueSignupVerificationToken(chatBuyerEmail);
+    const reg2Res = await fetch(`${baseUrl}/api/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: chatBuyerEmail,
+        password: 'Buyer2Pass123!',
+        name: 'Chidi Buyer',
+        role: 'buyer',
+        age: 21,
+        signupVerificationToken: chatBuyerProof,
+      }),
+    });
+    const reg2Data: any = await reg2Res.json();
+    assert.strictEqual(reg2Res.status, 201, `chat buyer register failed: ${reg2Data.message}`);
+    const chatBuyerToken = reg2Data.sessionToken;
+    const chatBuyerId = reg2Data.user.id;
+
+    // Reset seller 1 vacation mode off and create a sold-out product
+    await fetch(`${baseUrl}/api/sellers/${encodeURIComponent(userId)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${userToken}` },
+      body: JSON.stringify({ vacationMode: false }),
+    });
+
+    const soldOutProdRes = await fetch(`${baseUrl}/api/products`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${userToken}` },
+      body: JSON.stringify({
+        title: 'Sold Out Bead Set',
+        description: 'Hand-strung glass waist beads',
+        category: 'beads',
+        sellerPrice: 3000,
+        stock: 0,
+        images: ['/shopit-logo.png'],
+      }),
+    });
+    const soldOutProdData: any = await soldOutProdRes.json();
+    assert.strictEqual(soldOutProdRes.status, 201);
+    const soldOutProdId = soldOutProdData.productId;
+
+    // Buyer starts Ask Seller chat on Seller 1's product
+    const chatStartRes = await fetch(`${baseUrl}/api/chat/conversations`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${chatBuyerToken}` },
+      body: JSON.stringify({ sellerId: userId, productId: soldOutProdId }),
+    });
+    const chatStartData: any = await chatStartRes.json();
+    assert.strictEqual(chatStartRes.status, 201, `start chat failed: ${chatStartData.message}`);
+    const convId = chatStartData.conversation.id;
+
+    // Send preset offer in chat
+    const offerMsgRes = await fetch(`${baseUrl}/api/chat/conversations/${encodeURIComponent(convId)}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${chatBuyerToken}` },
+      body: JSON.stringify({
+        content: 'Offer Proposed: 2 units at ₦3,000',
+        presetOffer: { price: 3000, quantity: 2, title: 'Sold Out Bead Set' },
+      }),
+    });
+    const offerMsgData: any = await offerMsgRes.json();
+    assert.strictEqual(offerMsgRes.status, 201);
+    assert.strictEqual(offerMsgData.message.isBlockedBypass, false);
+    assert.strictEqual(offerMsgData.message.presetOffer.price, 3000);
+
+    // Typed digits in free text must trigger anti-bypass block
+    const bypassMsgRes = await fetch(`${baseUrl}/api/chat/conversations/${encodeURIComponent(convId)}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${chatBuyerToken}` },
+      body: JSON.stringify({ content: 'Call me on 08031234567' }),
+    });
+    const bypassMsgData: any = await bypassMsgRes.json();
+    assert.strictEqual(bypassMsgRes.status, 201);
+    assert.strictEqual(bypassMsgData.message.isBlockedBypass, true);
+
+    // Fetch messages & verify Seller 1 received notification
+    const msgsGetRes = await fetch(`${baseUrl}/api/chat/conversations/${encodeURIComponent(convId)}/messages`, {
+      headers: { Authorization: `Bearer ${userToken}` },
+    });
+    const msgsGetData: any = await msgsGetRes.json();
+    assert.strictEqual(msgsGetRes.status, 200);
+    assert.strictEqual(msgsGetData.messages.length, 2);
+
+    const sellerNotifsRes = await fetch(`${baseUrl}/api/notifications`, {
+      headers: { Authorization: `Bearer ${userToken}` },
+    });
+    const sellerNotifsData: any = await sellerNotifsRes.json();
+    assert.strictEqual(sellerNotifsRes.status, 200);
+    assert.ok(
+      sellerNotifsData.notifications.some((n: any) => String(n.title).includes('New Message')),
+      'Expected seller notification for Ask Seller chat message'
+    );
+
+    // Buyer subscribes to restock alert on sold-out item, then seller restocks it
+    const subAlertRes = await fetch(`${baseUrl}/api/products/${encodeURIComponent(soldOutProdId)}/restock-alert`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${chatBuyerToken}` },
+    });
+    const subAlertData: any = await subAlertRes.json();
+    assert.strictEqual(subAlertRes.status, 201);
+    assert.strictEqual(subAlertData.subscribed, true);
+
+    const restockRes = await fetch(`${baseUrl}/api/products/${encodeURIComponent(soldOutProdId)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${userToken}` },
+      body: JSON.stringify({ stock: 4, isSoldOut: false }),
+    });
+    assert.strictEqual(restockRes.status, 200);
+
+    const chatBuyerNotifsRes = await fetch(`${baseUrl}/api/notifications`, {
+      headers: { Authorization: `Bearer ${chatBuyerToken}` },
+    });
+    const chatBuyerNotifsData: any = await chatBuyerNotifsRes.json();
+    assert.ok(
+      chatBuyerNotifsData.notifications.some((n: any) => String(n.title).includes('Back in Stock')),
+      'Expected Buyer notification when sold-out product restocked'
+    );
+
+    // Buyer leaves verified review on a completed order -> persisted on product
+    const completedOrderId = `ORD-REV-${ts}`;
+    await dbQuery(
+      `INSERT INTO shopit_orders (
+        id, buyer_id, buyer_name, buyer_email, items,
+        subtotal, service_fee_total, delivery_total, discount_total, grand_total,
+        subtotal_kobo, service_fee_kobo, delivery_fee_kobo, discount_total_kobo, grand_total_kobo,
+        payment_method, payment_reference, status, has_review, stock_reserved, paid_at, created_at, updated_at
+      ) VALUES (
+        $1, $2, 'Chidi Buyer', $3, $4::jsonb,
+        3000, 300, 0, 0, 3300,
+        300000, 30000, 0, 0, 330000,
+        'flutterwave_card', $5, 'completed', false, true, NOW(), NOW(), NOW()
+      )`,
+      [
+        completedOrderId,
+        chatBuyerId,
+        chatBuyerEmail,
+        JSON.stringify([{ productId: soldOutProdId, title: 'Sold Out Bead Set', price: 3300, sellerPrice: 3000, serviceFee: 300, quantity: 1, sellerId: userId, sellerShopName: 'Temi Crochet Studio' }]),
+        `REF-REV-${ts}`,
+      ]
+    );
+    const revRes = await fetch(`${baseUrl}/api/orders/${encodeURIComponent(completedOrderId)}/review`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${chatBuyerToken}` },
+      body: JSON.stringify({ productId: soldOutProdId, rating: 5, comment: 'Crisp beads and fast campus meetup!' }),
+    });
+    assert.strictEqual(revRes.status, 201);
+
+    const revProdCheck = await fetch(`${baseUrl}/api/products/${encodeURIComponent(soldOutProdId)}`);
+    const revProdData: any = await revProdCheck.json();
+    assert.strictEqual(revProdData.product.reviewCount, 1);
+    assert.strictEqual(revProdData.product.reviews.length, 1);
+
+    // Buyer cancels a paid order -> restores product stock & reverses seller pending balance
+    const cancelOrderId = `ORD-CXL-${ts}`;
+    await dbQuery('UPDATE shopit_products SET stock = 3 WHERE id = $1', [soldOutProdId]);
+    await dbQuery('UPDATE shopit_wallets SET pending_balance = 3000, pending_balance_kobo = 300000 WHERE seller_id = $1', [userId]);
+    await dbQuery(
+      `INSERT INTO shopit_orders (
+        id, buyer_id, buyer_name, buyer_email, items,
+        subtotal, service_fee_total, delivery_total, discount_total, grand_total,
+        subtotal_kobo, service_fee_kobo, delivery_fee_kobo, discount_total_kobo, grand_total_kobo,
+        payment_method, payment_reference, status, stock_reserved, paid_at, created_at, updated_at
+      ) VALUES (
+        $1, $2, 'Chidi Buyer', $3, $4::jsonb,
+        3000, 300, 0, 0, 3300,
+        300000, 30000, 0, 0, 330000,
+        'flutterwave_card', $5, 'paid', true, NOW(), NOW(), NOW()
+      )`,
+      [
+        cancelOrderId,
+        chatBuyerId,
+        chatBuyerEmail,
+        JSON.stringify([{ productId: soldOutProdId, title: 'Sold Out Bead Set', price: 3300, sellerPrice: 3000, serviceFee: 300, quantity: 1, sellerId: userId, sellerShopName: 'Temi Crochet Studio' }]),
+        `REF-CXL-${ts}`,
+      ]
+    );
+    const cancelRes = await fetch(`${baseUrl}/api/orders/${encodeURIComponent(cancelOrderId)}/status`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${chatBuyerToken}` },
+      body: JSON.stringify({ status: 'cancelled' }),
+    });
+    assert.strictEqual(cancelRes.status, 200);
+    const stockAfterCxl = await dbQuery('SELECT stock FROM shopit_products WHERE id = $1', [soldOutProdId]);
+    assert.strictEqual(parseInt(stockAfterCxl.rows[0].stock, 10), 4);
+    const walletAfterCxl = await dbQuery('SELECT pending_balance_kobo FROM shopit_wallets WHERE seller_id = $1', [userId]);
+    assert.strictEqual(parseInt(walletAfterCxl.rows[0].pending_balance_kobo, 10), 0);
+
+    console.log('   ✓ Ask Seller chat, restock alerts, verified order reviews & paid cancellation persisted in PostgreSQL');
 
     console.log('\n=== VERIFY DB & FLOWS PASSED (100%) ===');
   } finally {

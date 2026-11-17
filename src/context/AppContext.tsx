@@ -165,11 +165,15 @@ interface AppContextType {
   // Navigation views
   activeView: AppView;
   setActiveView: (view: AppView) => void;
-  requestAccountDeletion: () => void;
+  isCatalogLoading: boolean;
   selectedProductId: string | null;
   selectedSellerId: string | null;
   openProduct: (id: string) => void;
   openSellerShop: (sellerId: string) => void;
+
+  // Restock alerts
+  subscribeRestockAlert: (productId: string) => Promise<{ subscribed: boolean; inStock?: boolean }>;
+  checkRestockAlert: (productId: string) => Promise<boolean>;
 
   // Wishlist & Cart
   wishlist: string[];
@@ -190,7 +194,7 @@ interface AppContextType {
   confirmItemReceived: (orderId: string) => void;
   cancelOrder: (orderId: string) => void;
   openDispute: (orderId: string, reason: string, evidencePhotoUrl?: string) => void;
-  submitOrderReview: (orderId: string, productId: string, rating: number, comment: string) => void;
+  submitOrderReview: (orderId: string, productId: string, rating: number, comment: string) => Promise<boolean>;
   buyerActiveOrdersCount: number;
 
   // Phase 4: Campus Safe Logistics & Handshake OTP Verification
@@ -198,8 +202,6 @@ interface AppContextType {
   campusRunners: CampusRunner[];
   runnerTrips: RunnerTrip[];
   verifyHandshakeOtp: (orderId: string, inputOtp: string) => Promise<{ success: boolean; message: string }>;
-  assignCampusRunner: (orderId: string, runnerId: string, pickupSpotId: string, dropoffSpotId: string) => void;
-  updateTripStatus: (tripId: string, status: RunnerTrip['status']) => void;
 
   // Phase 5: Student Artisan Growth, Bespoke Commissions & Social Drops
   commissions: CustomCommissionRequest[];
@@ -214,38 +216,32 @@ interface AppContextType {
     status: CustomCommissionRequest['status'],
     wipPhoto?: string
   ) => void;
-  claimDropPreorder: (dropId: string) => void;
   toggleLikeStylePost: (postId: string) => void;
-  submitStylePost: (
-    post: Omit<CampusStylePost, 'id' | 'timeAgo' | 'likesCount' | 'userHasLiked' | 'buyerMaskedId'>
-  ) => void;
 
   // Phase 6: Campus Ambassador Network & Hall Leaderboard
   ambassadors: CampusAmbassador[];
   hallLeaderboard: HallLeaderboardEntry[];
   referralRewards: ReferralReward[];
   activeAmbassadorCode: string | null;
-  applyReferralCode: (code: string) => boolean;
 
   // Quick-List Product & Catalog Management
   isQuickListModalOpen: boolean;
   openQuickListModal: () => void;
   closeQuickListModal: () => void;
-  quickListFromTemplate: (templateIndex: number, overrides?: { price?: number; title?: string }) => void;
-  clearAllProducts: () => void;
 
   // Phase 3: Locked Chat & Privacy Anti-Bypass
   conversations: Conversation[];
   messages: Record<string, ChatMessage[]>;
   activeConversationId: string | null;
   setActiveConversationId: (id: string | null) => void;
-  openChat: (conversationId?: string, targetInfo?: { orderId?: string; productId?: string; sellerId?: string }) => void;
+  loadConversationMessages: (conversationId: string) => Promise<void>;
+  openChat: (conversationId?: string, targetInfo?: { orderId?: string; productId?: string; sellerId?: string }) => Promise<void>;
   sendMessage: (
     conversationId: string,
     content: string,
     customOrder?: any,
     presetOffer?: { price: number; quantity: number; title?: string }
-  ) => { success: boolean; isBlocked?: boolean; warning?: string };
+  ) => Promise<{ success: boolean; isBlocked?: boolean; warning?: string }>;
 
   // Phase 3: Admin Command Center (Moderator, Finance, Support)
   adminSubRole: AdminSubRole;
@@ -287,7 +283,6 @@ interface AppContextType {
   updateEmergencyControls: (controls: Partial<EmergencyControls>) => Promise<boolean>;
   adminAuditLogs: AdminAuditLog[];
   addAdminAuditLog: (action: string, details: string, targetId?: string) => void;
-  clearMarketplaceDatabase: () => void;
 
   // Phase 3: Report Problem Modal
   isReportProblemModalOpen: boolean;
@@ -310,8 +305,6 @@ interface AppContextType {
 
   // Security Hardening
   securityProfile: SecurityProfile;
-  toggleTwoFactor: () => void;
-  revokeSession: (sessionId: string) => void;
 
   // Safety switch flags
   paymentsEnabled: boolean;
@@ -498,6 +491,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (params.get('view') === 'orders' || params.has('payment_ref') || params.has('tx_ref')) {
         return 'orders';
       }
+      if (params.get('product')) {
+        return 'product_detail';
+      }
+      if (params.get('shop')) {
+        return 'seller_shop';
+      }
       if (LEGAL_SLUGS.includes(path as AppView)) {
         return path as AppView;
       }
@@ -507,6 +506,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Navigation states
   const [activeView, _setActiveView] = useState<AppView>(getInitialView);
+  const [isCatalogLoading, setIsCatalogLoading] = useState<boolean>(true);
+  const [selectedProductId, setSelectedProductId] = useState<string | null>(() => {
+    if (typeof window !== 'undefined') {
+      return new URLSearchParams(window.location.search).get('product');
+    }
+    return null;
+  });
+  const [selectedSellerId, setSelectedSellerId] = useState<string | null>(() => {
+    if (typeof window !== 'undefined') {
+      return new URLSearchParams(window.location.search).get('shop');
+    }
+    return null;
+  });
 
   const getOrCreateVisitorId = useCallback((): string => {
     try {
@@ -558,7 +570,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           window.history.pushState({ view }, '', `/${view}`);
         }
       } else if (view === 'catalog') {
-        if (window.location.pathname !== '/' && window.location.pathname !== '') {
+        if (window.location.pathname !== '/' || window.location.search !== '') {
           window.history.pushState({ view: 'catalog' }, '', '/');
         }
       }
@@ -568,11 +580,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   useEffect(() => {
     const onPopState = () => {
       const path = window.location.pathname.replace(/^\//, '').toLowerCase();
+      const params = new URLSearchParams(window.location.search);
+      const productParam = params.get('product');
+      const shopParam = params.get('shop');
       if (path === 'reset-password' || path === 'forgot-password') {
         _setActiveView('reset-password');
+      } else if (productParam) {
+        setSelectedProductId(productParam);
+        _setActiveView('product_detail');
+      } else if (shopParam) {
+        setSelectedSellerId(shopParam);
+        _setActiveView('seller_shop');
       } else if (LEGAL_SLUGS.includes(path as AppView)) {
         _setActiveView(path as AppView);
       } else if (path === '' || path === '/') {
+        setSelectedProductId(null);
+        setSelectedSellerId(null);
         _setActiveView('catalog');
       }
     };
@@ -616,9 +639,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const interval = setInterval(checkUnpaidOrders, 60 * 1000);
     return () => clearInterval(interval);
   }, []);
-
-  const [selectedProductId, setSelectedProductId] = useState<string | null>(null);
-  const [selectedSellerId, setSelectedSellerId] = useState<string | null>(null);
 
   // Phase 4: Campus Safe Logistics & Handshake States
   const [safePickupSpots, setSafePickupSpots] = useState<SafePickupSpot[]>(() => {
@@ -668,16 +688,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const openVerificationModal = () => setIsVerificationModalOpen(true);
   const closeVerificationModal = () => setIsVerificationModalOpen(false);
 
-  // Phase 3: Locked Chat States
-  const [conversations, setConversations] = useState<Conversation[]>(() => {
-    const saved = localStorage.getItem('shopit_conversations');
-    return saved ? JSON.parse(saved) : INITIAL_CONVERSATIONS;
-  });
-  const [messages, setMessages] = useState<Record<string, ChatMessage[]>>(() => {
-    const saved = localStorage.getItem('shopit_messages');
-    return saved ? JSON.parse(saved) : INITIAL_MESSAGES;
-  });
-  const [activeConversationId, setActiveConversationId] = useState<string | null>('conv_1');
+  // Phase 3: Locked Chat States (hydrated from PostgreSQL)
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [messages, setMessages] = useState<Record<string, ChatMessage[]>>({});
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+  const [pendingChatTarget, setPendingChatTarget] = useState<{
+    conversationId?: string;
+    targetInfo?: { orderId?: string; productId?: string; sellerId?: string };
+  } | null>(null);
 
   // Phase 3: Admin & Moderation States (populated strictly from server DB for admins)
   const [adminSubRole, setAdminSubRole] = useState<AdminSubRole>('activity');
@@ -861,12 +879,41 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       await refreshAdminData();
     } catch (err: any) {
       console.warn('[PostgreSQL Sync Warning]:', err.message);
+    } finally {
+      setIsCatalogLoading(false);
     }
   }, [fetchPlatformConfig, refreshAdminData]);
 
   useEffect(() => {
     fetchMarketplaceData();
   }, [fetchMarketplaceData, currentUser?.id, currentUser?.role]);
+
+  // Direct single-item/seller fetch fallback when deep-linked (?product=... or ?shop=...)
+  useEffect(() => {
+    if (activeView === 'product_detail' && selectedProductId && !products.some(p => p.id === selectedProductId)) {
+      fetch(`/api/products/${encodeURIComponent(selectedProductId)}`, { credentials: 'include' })
+        .then(r => r.json())
+        .then(d => {
+          if (d.status && d.product) {
+            setProducts(prev => (prev.some(p => p.id === d.product.id) ? prev : [d.product, ...prev]));
+          }
+        })
+        .catch(() => {});
+    }
+  }, [activeView, selectedProductId, products]);
+
+  useEffect(() => {
+    if (activeView === 'seller_shop' && selectedSellerId && !sellers.some(s => s.id === selectedSellerId)) {
+      fetch(`/api/sellers/${encodeURIComponent(selectedSellerId)}`, { credentials: 'include' })
+        .then(r => r.json())
+        .then(d => {
+          if (d.status && d.seller) {
+            setSellers(prev => (prev.some(s => s.id === d.seller.id) ? prev : [d.seller, ...prev]));
+          }
+        })
+        .catch(() => {});
+    }
+  }, [activeView, selectedSellerId, sellers]);
 
   // Keep broadcast & emergency killswitches synchronized across all active visitor sessions
   useEffect(() => {
@@ -1098,25 +1145,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return () => clearInterval(interval);
   }, []);
 
-  const requestAccountDeletion = () => {
-    if (!currentUser) return;
-    const scheduledDate = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toLocaleDateString('en-NG', {
-      day: 'numeric',
-      month: 'long',
-      year: 'numeric',
-    });
-    notify(
-      `Account deletion scheduled. As guaranteed by our Privacy Policy, your account and personal data will be permanently purged in 14 days (${scheduledDate}).`,
-      'info'
-    );
-    const updatedUser: User = {
-      ...currentUser,
-      deletionRequestedAt: new Date().toISOString(),
-      scheduledDeletionDate: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(),
-    };
-    setCurrentUser(updatedUser);
-  };
-
   const notify = (message: string, type: 'success' | 'info' | 'error' = 'info') => {
     const id = Date.now().toString() + Math.random().toString().slice(2, 5);
     setNotifications(prev => [...prev, { id, message, type }]);
@@ -1198,6 +1226,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setVerificationRequests([]);
     setAdminAuditLogs([]);
     setDbNotifications([]);
+    setConversations([]);
+    setMessages({});
+    setActiveConversationId(null);
+    setPendingChatTarget(null);
     localStorage.removeItem('shopit_session_token');
     setActiveView('catalog');
     notify('Logged out successfully', 'info');
@@ -2058,45 +2090,95 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  const submitOrderReview = (orderId: string, productId: string, rating: number, comment: string) => {
-    const reviewId = `rev_${Date.now()}`;
-    const newReview = {
-      id: reviewId,
-      productId,
-      buyerMaskedId: currentUser?.name ? `Buyer #${Math.floor(1000 + Math.random() * 9000)}` : 'Verified Buyer',
-      rating,
-      comment,
-      date: 'Just now',
-      verifiedPurchase: true,
-    };
+  const submitOrderReview = async (
+    orderId: string,
+    productId: string,
+    rating: number,
+    comment: string
+  ): Promise<boolean> => {
+    try {
+      const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}/review`, {
+        method: 'POST',
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        credentials: 'include',
+        body: JSON.stringify({ productId, rating, comment }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.status) {
+        notify(data.message || 'Could not submit review.', 'error');
+        return false;
+      }
 
-    setProducts(prev =>
-      prev.map(p => {
-        if (p.id === productId) {
-          const updatedReviews = [newReview, ...p.reviews];
-          const newAvg = updatedReviews.reduce((sum, r) => sum + r.rating, 0) / updatedReviews.length;
-          return {
-            ...p,
-            reviews: updatedReviews,
-            reviewCount: updatedReviews.length,
-            rating: Number(newAvg.toFixed(1)),
-          };
-        }
-        return p;
-      })
-    );
+      if (data.review) {
+        setProducts(prev =>
+          prev.map(p => {
+            if (p.id === (data.productId || productId)) {
+              return {
+                ...p,
+                reviews: [data.review, ...(p.reviews || [])],
+                reviewCount: data.reviewCount ?? (p.reviews?.length || 0) + 1,
+                rating: data.rating ?? p.rating,
+              };
+            }
+            return p;
+          })
+        );
+      }
 
-    setOrders(prev =>
-      prev.map(o => (o.id === orderId ? { ...o, hasReview: true } : o))
-    );
+      setOrders(prev => prev.map(o => (o.id === orderId ? { ...o, hasReview: true } : o)));
+      notify(data.message || 'Thank you for rating your artisan!', 'success');
+      return true;
+    } catch (err: any) {
+      notify(err?.message || 'Unable to save review right now.', 'error');
+      return false;
+    }
+  };
 
-    trackActivity('REVIEW_SUBMITTED', {
-      targetType: 'product',
-      targetId: productId,
-      details: { orderId, rating, commentLength: comment.length },
-    });
+  const checkRestockAlert = useCallback(
+    async (productId: string): Promise<boolean> => {
+      if (!currentUser?.id || !productId) return false;
+      try {
+        const res = await fetch(`/api/products/${encodeURIComponent(productId)}/restock-alert`, {
+          headers: getAuthHeaders(),
+          credentials: 'include',
+        });
+        const data = await res.json().catch(() => ({}));
+        return Boolean(res.ok && data.status && data.subscribed);
+      } catch {
+        return false;
+      }
+    },
+    [currentUser?.id]
+  );
 
-    notify('Thank you for rating your campus artisan!', 'success');
+  const subscribeRestockAlert = async (
+    productId: string
+  ): Promise<{ subscribed: boolean; inStock?: boolean }> => {
+    if (!currentUser?.id) {
+      openAuthModal('login');
+      notify('Please sign in to be notified when this item restocks.', 'info');
+      return { subscribed: false };
+    }
+    try {
+      const res = await fetch(`/api/products/${encodeURIComponent(productId)}/restock-alert`, {
+        method: 'POST',
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        credentials: 'include',
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.status) {
+        notify(data.message || 'Could not save restock alert.', 'error');
+        return { subscribed: false };
+      }
+      notify(
+        data.message || 'We will notify you when this item is restocked!',
+        data.inStock ? 'info' : 'success'
+      );
+      return { subscribed: Boolean(data.subscribed), inStock: Boolean(data.inStock) };
+    } catch (err: any) {
+      notify(err?.message || 'Network error setting restock alert.', 'error');
+      return { subscribed: false };
+    }
   };
 
   // Rule 4: Send an Email OTP before every withdrawal
@@ -2348,37 +2430,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  const toggleTwoFactor = () => {
-    if (!currentUser) return;
-    setSecurityProfiles(prev => {
-      const p = prev[currentUser.id] || prev['user_tobi_buyer'];
-      const nextVal = !p.twoFactorEnabled;
-      notify(nextVal ? 'Two-Factor Authentication (2FA via Email) enabled!' : 'Two-Factor Authentication disabled.', 'info');
-      return {
-        ...prev,
-        [currentUser.id]: {
-          ...p,
-          twoFactorEnabled: nextVal,
-        },
-      };
-    });
-  };
-
-  const revokeSession = (sessionId: string) => {
-    if (!currentUser) return;
-    setSecurityProfiles(prev => {
-      const p = prev[currentUser.id] || prev['user_tobi_buyer'];
-      return {
-        ...prev,
-        [currentUser.id]: {
-          ...p,
-          sessions: p.sessions.filter(s => s.id !== sessionId),
-        },
-      };
-    });
-    notify('Session logged out on other device.', 'info');
-  };
-
   const buyerActiveOrdersCount = orders.filter(
     o => o.status !== 'completed' && o.status !== 'cancelled'
   ).length;
@@ -2393,76 +2444,123 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setActiveReportOrderId(null);
   };
 
-  // Phase 3: Locked Chat Handlers
-  const openChat = (
-    conversationId?: string,
-    targetInfo?: { orderId?: string; productId?: string; sellerId?: string }
-  ) => {
-    if (conversationId) {
-      setActiveConversationId(conversationId);
-      setActiveView('chat');
-      window.scrollTo({ top: 0, behavior: 'smooth' });
-      return;
-    }
+  // Phase 3: Locked Chat Handlers (PostgreSQL-persisted)
+  const loadConversationMessages = useCallback(
+    async (conversationId: string) => {
+      if (!currentUser?.id || !conversationId) return;
+      try {
+        const res = await fetch(`/api/chat/conversations/${encodeURIComponent(conversationId)}/messages`, {
+          headers: getAuthHeaders(),
+          credentials: 'include',
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.status && Array.isArray(data.messages)) {
+          const formatted: ChatMessage[] = data.messages.map((m: any) => ({
+            ...m,
+            timestamp: m.createdAt
+              ? new Date(m.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+              : m.timestamp || 'Just now',
+          }));
+          setMessages(prev => ({ ...prev, [conversationId]: formatted }));
+        }
+      } catch {}
+    },
+    [currentUser?.id]
+  );
 
-    if (targetInfo) {
-      const existing = conversations.find(
-        c => (targetInfo.orderId && c.orderId === targetInfo.orderId) ||
-             (targetInfo.productId && c.productId === targetInfo.productId && c.sellerId === targetInfo.sellerId)
-      );
-
-      if (existing) {
-        setActiveConversationId(existing.id);
-      } else {
-        const product = targetInfo.productId ? products.find(p => p.id === targetInfo.productId) : undefined;
-        const seller = targetInfo.sellerId ? getSellerById(targetInfo.sellerId) : undefined;
-        const newConvId = `conv_${Date.now()}`;
-        const newConv: Conversation = {
-          id: newConvId,
-          orderId: targetInfo.orderId,
-          productId: targetInfo.productId,
-          productTitle: product?.title || (targetInfo.orderId ? `Order #${targetInfo.orderId}` : 'Campus Craft Inquiry'),
-          productImage: product?.images[0],
-          buyerId: currentUser?.id || 'user_tobi_buyer',
-          buyerMaskedId: currentUser?.name ? `Buyer #${Math.floor(1000 + Math.random() * 9000)}` : 'Buyer #7821',
-          sellerId: targetInfo.sellerId || product?.sellerId || 'seller_amaka',
-          sellerShopName: seller?.shopName || product?.sellerShopName || 'Artisan Shop',
-          lastMessage: 'Conversation opened',
-          lastMessageAt: 'Just now',
-          unreadBuyer: 0,
-          unreadSeller: 0,
-          isChatLocked: false,
-          bypassViolationsCount: 0,
-        };
-
-        setConversations(prev => [newConv, ...prev]);
-        setMessages(prev => ({
-          ...prev,
-          [newConvId]: [
-            {
-              id: `msg_${Date.now()}`,
-              conversationId: newConvId,
-              senderRole: 'system',
-              senderMaskedName: 'Shop It Safety Bot',
-              senderId: 'system',
-              content: 'Locked Chat Active: Never pay or chat outside Shop It. Escrow protection is only guaranteed for in-app payments.',
-              timestamp: 'Just now',
-            },
-          ],
-        }));
-        setActiveConversationId(newConvId);
+  const openChat = useCallback(
+    async (
+      conversationId?: string,
+      targetInfo?: { orderId?: string; productId?: string; sellerId?: string }
+    ) => {
+      if (!currentUser?.id) {
+        setPendingChatTarget({ conversationId, targetInfo });
+        openAuthModal('login');
+        notify('Please sign in to ask the seller via Escrow Chat.', 'info');
+        return;
       }
-    }
-    setActiveView('chat');
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  };
 
-  const sendMessage = (
+      if (conversationId) {
+        setActiveConversationId(conversationId);
+        _setActiveView('chat');
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        await loadConversationMessages(conversationId);
+        return;
+      }
+
+      if (targetInfo) {
+        const product = targetInfo.productId ? products.find(p => p.id === targetInfo.productId) : undefined;
+        const resolvedSellerId = targetInfo.sellerId || product?.sellerId;
+        if (!resolvedSellerId) {
+          notify('Seller details are unavailable for this listing.', 'error');
+          return;
+        }
+        if (resolvedSellerId === currentUser.id || resolvedSellerId === currentUser.sellerProfile?.id) {
+          notify('You cannot start a buyer chat with your own shop.', 'info');
+          return;
+        }
+
+        try {
+          const res = await fetch('/api/chat/conversations', {
+            method: 'POST',
+            headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+            credentials: 'include',
+            body: JSON.stringify({
+              sellerId: resolvedSellerId,
+              productId: targetInfo.productId,
+              productTitle: product?.title,
+              productImage: product?.images?.[0],
+              orderId: targetInfo.orderId,
+            }),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok || !data.status || !data.conversation) {
+            notify(data.message || 'Unable to open seller chat right now.', 'error');
+            return;
+          }
+
+          const conv: Conversation = data.conversation;
+          setConversations(prev => [conv, ...prev.filter(c => c.id !== conv.id)]);
+          setActiveConversationId(conv.id);
+          await loadConversationMessages(conv.id);
+        } catch (err: any) {
+          notify(err?.message || 'Unable to reach chat server.', 'error');
+          return;
+        }
+      }
+
+      _setActiveView('chat');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    },
+    [currentUser?.id, currentUser?.sellerProfile?.id, products, loadConversationMessages]
+  );
+
+  // Automatically resume pending Ask Seller chat right after user signs in
+  useEffect(() => {
+    if (currentUser?.id && pendingChatTarget) {
+      const target = pendingChatTarget;
+      setPendingChatTarget(null);
+      void openChat(target.conversationId, target.targetInfo);
+    }
+  }, [currentUser?.id, pendingChatTarget, openChat]);
+
+  useEffect(() => {
+    if (!isAuthModalOpen && !currentUser?.id && pendingChatTarget) {
+      setPendingChatTarget(null);
+    }
+  }, [isAuthModalOpen, currentUser?.id, pendingChatTarget]);
+
+  const sendMessage = async (
     conversationId: string,
     content: string,
     customOrder?: any,
     presetOffer?: { price: number; quantity: number; title?: string }
-  ): { success: boolean; isBlocked?: boolean; warning?: string } => {
+  ): Promise<{ success: boolean; isBlocked?: boolean; warning?: string }> => {
+    if (!currentUser?.id) {
+      openAuthModal('login');
+      return { success: false, warning: 'Sign in required' };
+    }
+
     const conv = conversations.find(c => c.id === conversationId);
     if (!conv) return { success: false };
 
@@ -2471,9 +2569,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { success: false, isBlocked: true, warning: 'Chat locked by moderation' };
     }
 
-    // STRICT USER REQUIREMENT: Block all numbers (digits and number words) in chat text!
-    // Prices and quantities are picked from preset buttons, never typed.
-    if (content.trim()) {
+    // Block typed digits and number words in regular text messages (presetOffer uses curated chip values)
+    if (content.trim() && !presetOffer) {
       const numCheck = checkNumbersInText(content);
       if (numCheck.hasNumber) {
         notify('Numbers and number words are blocked in chat. Please use the preset price and quantity chips below!', 'error');
@@ -2485,79 +2582,59 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     }
 
-    const check = filterAntiBypass(content);
-    let newViolationsCount = conv.bypassViolationsCount;
+    try {
+      const res = await fetch(`/api/chat/conversations/${encodeURIComponent(conversationId)}/messages`, {
+        method: 'POST',
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        credentials: 'include',
+        body: JSON.stringify({ content, presetOffer, customOrder }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.status || !data.message) {
+        notify(data.message || 'Unable to send message.', 'error');
+        return { success: false, isBlocked: res.status === 403, warning: data.message };
+      }
 
-    if (check.isViolated) {
-      newViolationsCount += 1;
-      const isLockedNow = newViolationsCount >= 2;
-
-      const newFlag: AntiBypassFlag = {
-        id: `flag_${Date.now()}`,
-        conversationId,
-        senderId: currentUser?.id || 'user_anon',
-        senderRole: currentUser?.role === 'seller' ? 'seller' : 'buyer',
-        senderMaskedName: currentUser?.role === 'seller' ? (currentUser.sellerProfile?.shopName || 'Seller') : 'Buyer #7821',
-        offendingText: content,
-        maskedText: check.sanitizedText,
-        detectedPatterns: check.detectedViolations,
-        timestamp: 'Just now',
-        status: isLockedNow ? 'chat_locked' : 'warning_issued',
+      const savedMsg: ChatMessage = {
+        ...data.message,
+        timestamp: data.message.createdAt
+          ? new Date(data.message.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+          : 'Just now',
       };
 
-      setAntiBypassFlags(prev => [newFlag, ...prev]);
+      setMessages(prev => {
+        const list = prev[conversationId] || [];
+        if (list.some(m => m.id === savedMsg.id)) return prev;
+        return { ...prev, [conversationId]: [...list, savedMsg] };
+      });
 
-      if (isLockedNow) {
-        setConversations(prev =>
-          prev.map(c => c.id === conversationId ? { ...c, isChatLocked: true, bypassViolationsCount: newViolationsCount } : c)
-        );
-        notify('Chat locked! Repeated off-platform contact attempts detected. Sent to Admin Moderator.', 'error');
-      } else {
-        notify('Safety Warning: Off-platform contact details detected & masked! Never trade outside Shop It.', 'error');
+      setConversations(prev =>
+        prev.map(c =>
+          c.id === conversationId
+            ? {
+                ...c,
+                lastMessage: savedMsg.content,
+                lastMessageAt: savedMsg.timestamp,
+                isChatLocked: Boolean(data.isChatLocked ?? c.isChatLocked),
+                bypassViolationsCount: data.bypassViolationsCount ?? c.bypassViolationsCount,
+              }
+            : c
+        )
+      );
+
+      if (data.warning || savedMsg.isBlockedBypass) {
+        notify(data.warning || 'Safety Warning: Off-platform contact details blocked!', 'error');
       }
+
+      return {
+        success: true,
+        isBlocked: Boolean(savedMsg.isBlockedBypass),
+        warning: data.warning,
+      };
+    } catch (err: any) {
+      notify(err?.message || 'Network error sending message.', 'error');
+      return { success: false };
     }
-
-    const newMsg: ChatMessage = {
-      id: `msg_${Date.now()}`,
-      conversationId,
-      senderRole: currentUser?.role === 'seller' ? 'seller' : (currentUser?.role === 'admin' ? 'admin' : 'buyer'),
-      senderMaskedName: currentUser?.role === 'seller'
-        ? (currentUser.sellerProfile?.shopName || 'Seller')
-        : (currentUser?.role === 'admin' ? 'Shop It Admin Support' : (conv.buyerMaskedId || 'Buyer #7821')),
-      senderId: currentUser?.id || 'anon',
-      content: check.isViolated ? check.sanitizedText : content,
-      originalContent: check.isViolated ? content : undefined,
-      isBlockedBypass: check.isViolated,
-      blockedTokens: check.detectedViolations,
-      timestamp: 'Just now',
-      customOrderDetails: customOrder,
-      presetOffer,
-    };
-
-    setMessages(prev => ({
-      ...prev,
-      [conversationId]: [...(prev[conversationId] || []), newMsg],
-    }));
-
-    setConversations(prev =>
-      prev.map(c => {
-        if (c.id === conversationId) {
-          return {
-            ...c,
-            lastMessage: newMsg.content,
-            lastMessageAt: 'Just now',
-            bypassViolationsCount: newViolationsCount,
-          };
-        }
-        return c;
-      })
-    );
-
-    return {
-      success: true,
-      isBlocked: check.isViolated,
-      warning: check.isViolated ? `Blocked patterns: ${check.detectedViolations.join(', ')}` : undefined,
-    };
   };
 
   // Phase 3: Admin & Moderation Handlers
@@ -3336,8 +3413,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const openProduct = (id: string) => {
     setSelectedProductId(id);
-    setActiveView('product_detail');
+    _setActiveView('product_detail');
+    if (typeof window !== 'undefined') {
+      const targetSearch = `?product=${encodeURIComponent(id)}`;
+      if (window.location.pathname !== '/' || window.location.search !== targetSearch) {
+        window.history.pushState({ view: 'product_detail', productId: id }, '', `/${targetSearch}`);
+      }
+    }
     const prod = products.find(p => p.id === id);
+    if (!prod) {
+      fetch(`/api/products/${encodeURIComponent(id)}`, { credentials: 'include' })
+        .then(r => r.json())
+        .then(d => {
+          if (d.status && d.product) {
+            setProducts(prev => (prev.some(p => p.id === d.product.id) ? prev : [d.product, ...prev]));
+          }
+        })
+        .catch(() => {});
+    }
     trackActivity('PRODUCT_VIEWED', {
       targetType: 'product',
       targetId: id,
@@ -3348,8 +3441,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const openSellerShop = (sellerId: string) => {
     setSelectedSellerId(sellerId);
-    setActiveView('seller_shop');
+    _setActiveView('seller_shop');
+    if (typeof window !== 'undefined') {
+      const targetSearch = `?shop=${encodeURIComponent(sellerId)}`;
+      if (window.location.pathname !== '/' || window.location.search !== targetSearch) {
+        window.history.pushState({ view: 'seller_shop', sellerId }, '', `/${targetSearch}`);
+      }
+    }
     const sel = sellers.find(s => s.id === sellerId);
+    if (!sel) {
+      fetch(`/api/sellers/${encodeURIComponent(sellerId)}`, { credentials: 'include' })
+        .then(r => r.json())
+        .then(d => {
+          if (d.status && d.seller) {
+            setSellers(prev => (prev.some(s => s.id === d.seller.id) ? prev : [d.seller, ...prev]));
+          }
+        })
+        .catch(() => {});
+    }
     trackActivity('SELLER_SHOP_VIEWED', {
       targetType: 'seller',
       targetId: sellerId,
@@ -3481,68 +3590,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  const assignCampusRunner = (
-    orderId: string,
-    runnerId: string,
-    pickupSpotId: string,
-    dropoffSpotId: string
-  ) => {
-    const runner = campusRunners.find(r => r.id === runnerId);
-    const pickupSpot = safePickupSpots.find(s => s.id === pickupSpotId);
-    const dropoffSpot = safePickupSpots.find(s => s.id === dropoffSpotId);
-
-    const tripId = `trip_${Date.now()}`;
-    const newTrip: RunnerTrip = {
-      id: tripId,
-      orderId,
-      runnerId,
-      runnerName: runner ? runner.name : 'Campus Runner',
-      pickupSpot: pickupSpot ? pickupSpot.name : 'Campus Porter Lodge',
-      dropoffSpot: dropoffSpot ? dropoffSpot.name : 'Student Union Building',
-      status: 'assigned',
-      etaMinutes: 15,
-      otpCode: Math.floor(1000 + Math.random() * 9000).toString(),
-      lastCheckpointTime: 'Just now',
-    };
-
-    setRunnerTrips(prev => [newTrip, ...prev]);
-
-    setOrders(prev =>
-      prev.map(o => {
-        if (o.id === orderId) {
-          return {
-            ...o,
-            runnerId,
-            runnerName: runner?.name,
-            safeMeetingSpotId: dropoffSpotId,
-            safeMeetingSpotName: dropoffSpot?.name,
-            status: 'shipped',
-          };
-        }
-        return o;
-      })
-    );
-
-    notify(`Campus Runner ${runner?.name || 'Runner'} assigned to deliver Order #${orderId}!`, 'success');
-  };
-
-  const updateTripStatus = (tripId: string, status: RunnerTrip['status']) => {
-    setRunnerTrips(prev =>
-      prev.map(t => {
-        if (t.id === tripId) {
-          return {
-            ...t,
-            status,
-            lastCheckpointTime: 'Just now',
-            etaMinutes: status === 'handed_over' ? 0 : Math.max(0, t.etaMinutes - 5),
-          };
-        }
-        return t;
-      })
-    );
-    notify(`Runner trip status updated to: ${status.replace('_', ' ')}`, 'info');
-  };
-
   // ==========================================
   // PHASE 5: ARTISAN COMMISSIONS & SOCIAL DROPS
   // ==========================================
@@ -3588,22 +3635,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     notify(`Commission #${commissionId.slice(-4)} status updated: ${status.replace('_', ' ')}`, 'info');
   };
 
-  const claimDropPreorder = (dropId: string) => {
-    setCampusDrops(prev =>
-      prev.map(d => {
-        if (d.id === dropId) {
-          if (d.claimedCount >= d.batchSize) {
-            notify('This batch is sold out!', 'error');
-            return d;
-          }
-          notify(`Pre-order spot reserved for "${d.title}"! Escrow deposit secured.`, 'success');
-          return { ...d, claimedCount: d.claimedCount + 1 };
-        }
-        return d;
-      })
-    );
-  };
-
   const toggleLikeStylePost = (postId: string) => {
     setStylePosts(prev =>
       prev.map(p => {
@@ -3620,99 +3651,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
   };
 
-  const submitStylePost = (
-    postData: Omit<CampusStylePost, 'id' | 'timeAgo' | 'likesCount' | 'userHasLiked' | 'buyerMaskedId'>
-  ) => {
-    const id = `post_${Date.now()}`;
-    const newPost: CampusStylePost = {
-      ...postData,
-      id,
-      buyerMaskedId: currentUser?.name ? `Buyer #${currentUser.id.slice(-4)}` : 'Buyer #7821',
-      timeAgo: 'Just now',
-      likesCount: 1,
-      userHasLiked: true,
-    };
-    setStylePosts(prev => [newPost, ...prev]);
-    trackActivity('STYLE_POST_SUBMITTED', {
-      targetType: 'style_post',
-      targetId: id,
-      details: { caption: postData.caption?.slice(0, 80) },
-    });
-    notify('Your campus craft style photo has been shared to the Campus Wall!', 'success');
-  };
-
-  // ==========================================
-  // PHASE 6: AMBASSADOR & QUICK-LIST HANDLERS
-  // ==========================================
-
-  const applyReferralCode = (code: string): boolean => {
-    const clean = code.trim().toUpperCase();
-    const amb = ambassadors.find(a => a.referralCode === clean);
-    if (!amb) {
-      notify('Ambassador code not found. Check hall code spelling!', 'error');
-      return false;
-    }
-    setActiveAmbassadorCode(clean);
-    trackActivity('REFERRAL_CODE_APPLIED', {
-      targetType: 'ambassador',
-      targetId: clean,
-      details: { code: clean },
-    });
-    notify(`Ambassador code "${clean}" applied! ₦500 referral credit active for your hall.`, 'success');
-    return true;
-  };
-
   const openQuickListModal = () => setIsQuickListModalOpen(true);
   const closeQuickListModal = () => setIsQuickListModalOpen(false);
-
-  const quickListFromTemplate = () => {
-    openQuickListModal();
-  };
-
-  const clearAllProducts = () => {
-    setProducts([]);
-    localStorage.setItem('shopit_products_ready_made', JSON.stringify([]));
-    localStorage.removeItem('shopit_products');
-    notify('All products removed. Ready for new student artisans to put products!', 'info');
-  };
-
-  const clearMarketplaceDatabase = () => {
-    if (currentUser?.role !== 'admin') return;
-    fetch('/api/admin/users/wipe-non-admins', {
-      method: 'POST',
-      headers: getAuthHeaders(),
-      credentials: 'include',
-    }).catch(err => {
-      console.warn('Wipe non-admins API warning:', err.message);
-    });
-
-    // 1. Wipe all products and listings
-    setProducts([]);
-    // 2. Wipe all sellers and shops
-    setSellers([]);
-    // 3. Wipe all orders
-    setOrders([]);
-    // 4. Wipe all wallets
-    setWallets({});
-    // 5. Wipe shopping cart and wishlist
-    setCart([]);
-    setWishlist([]);
-    // 6. Wipe all conversations and messages
-    setConversations([]);
-    setMessages({});
-    // 7. Wipe verification requests, disputes, anti-bypass flags
-    setVerificationRequests([]);
-    setDisputes([]);
-    setAntiBypassFlags([]);
-    // 8. Wipe ledgers and webhooks
-    setLedgerEntries([]);
-    setPaymentWebhooks([]);
-    // 9. Wipe commissions, drops, style posts
-    setCommissions([]);
-    setCampusDrops([]);
-    setStylePosts([]);
-    notify('Database wipe has been permanently disabled for security and data protection compliance.', 'info');
-  };
 
   return (
     <AppContext.Provider
@@ -3765,11 +3705,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         resetFilters,
         activeView,
         setActiveView,
-        requestAccountDeletion,
+        isCatalogLoading,
         selectedProductId,
         selectedSellerId,
         openProduct,
         openSellerShop,
+        subscribeRestockAlert,
+        checkRestockAlert,
         wishlist,
         toggleWishlist,
         cart,
@@ -3789,6 +3731,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         messages,
         activeConversationId,
         setActiveConversationId,
+        loadConversationMessages,
         openChat,
         sendMessage,
         // Phase 3: Admin & Moderation
@@ -3822,14 +3765,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updateEmergencyControls,
         adminAuditLogs,
         addAdminAuditLog,
-        clearMarketplaceDatabase,
         // Phase 4: Campus Safe Logistics & Handshake OTP
         safePickupSpots,
         campusRunners,
         runnerTrips,
         verifyHandshakeOtp,
-        assignCampusRunner,
-        updateTripStatus,
         // Phase 5: Student Artisan Growth & Social Commerce
         commissions,
         campusDrops,
@@ -3837,20 +3777,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         artisanTiers,
         submitCommissionRequest,
         updateCommissionStatus,
-        claimDropPreorder,
         toggleLikeStylePost,
-        submitStylePost,
         // Phase 6: Campus Ambassador & Quick-List
         ambassadors,
         hallLeaderboard,
         referralRewards,
         activeAmbassadorCode,
-        applyReferralCode,
         isQuickListModalOpen,
         openQuickListModal,
         closeQuickListModal,
-        quickListFromTemplate,
-        clearAllProducts,
         // Phase 3: Problem Modal
         isReportProblemModalOpen,
         activeReportOrderId,
@@ -3868,8 +3803,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         resendSignupOtp,
         toggleWalletFreeze,
         securityProfile: currentSecurityProfile,
-        toggleTwoFactor,
-        revokeSession,
         paymentsEnabled,
         payoutsEnabled,
         isCheckoutModalOpen,

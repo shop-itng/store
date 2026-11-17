@@ -327,8 +327,15 @@ export const SellerDashboard: React.FC = () => {
             </span>
           </div>
           <p className="text-xs text-slate-500 dark:text-[#A1A1AA] mt-1">
-            Campus: <strong className="text-slate-800 dark:text-white">{currentSeller.campus}</strong> · Payouts: Verified Account ·{' '}
-            {currentSeller.under18 ? 'Guardian Consent Active' : 'NIN Slip Verified'}
+            Campus: <strong className="text-slate-800 dark:text-white">{currentSeller.campus}</strong> · Payouts:{' '}
+            {isVerified ? 'Verified Account' : 'Complete NIN Verification'} ·{' '}
+            {currentSeller.under18
+              ? 'Guardian Consent Track'
+              : isVerified
+              ? 'NIN Verified'
+              : isVerifPending
+              ? 'NIN In Review'
+              : 'NIN Pending'}
           </p>
         </div>
 
@@ -438,7 +445,7 @@ export const SellerDashboard: React.FC = () => {
                     isVerified
                       ? 'bg-emerald-100 dark:bg-emerald-950 text-emerald-900 dark:text-emerald-300 border-emerald-300 dark:border-emerald-700'
                       : isVerifPending
-                      ? 'bg-amber-100 dark:bg-amber-950 text-amber-900 dark:text-amber-300 border-amber-300 dark:border-amber-700 animate-pulse'
+                      ? 'bg-amber-100 dark:bg-amber-950 text-amber-900 dark:text-amber-300 border-amber-300 dark:border-amber-700'
                       : isVerifRejected
                       ? 'bg-red-100 dark:bg-red-950 text-red-900 dark:text-red-300 border-red-300 dark:border-red-700'
                       : isVerifNeedsResubmit

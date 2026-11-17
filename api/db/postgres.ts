@@ -67,6 +67,7 @@ export const CORE_SCHEMA_TABLES = [
   'shopit_carts',
   'shopit_wishlists',
   'shopit_notifications',
+  'shopit_restock_alerts',
   'shopit_commissions',
   'shopit_otps',
   'shopit_rate_limits',
@@ -471,6 +472,7 @@ export async function runMigration(): Promise<void> {
       seller_badges JSONB DEFAULT '[]'::jsonb,
       rating NUMERIC(3,2) DEFAULT 5.0,
       review_count INTEGER DEFAULT 0,
+      reviews JSONB DEFAULT '[]'::jsonb,
       is_sold_out BOOLEAN DEFAULT false,
       is_new_arrival BOOLEAN DEFAULT true,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -520,6 +522,7 @@ export async function runMigration(): Promise<void> {
       shipped_at TIMESTAMPTZ,
       delivered_at TIMESTAMPTZ,
       completed_at TIMESTAMPTZ,
+      has_review BOOLEAN DEFAULT false,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
@@ -719,6 +722,19 @@ export async function runMigration(): Promise<void> {
     );
 
     CREATE INDEX IF NOT EXISTS idx_shopit_notif_user ON shopit_notifications (user_id, created_at DESC);
+
+    -- 17b. Product Restock Alerts Table (Sold Out -> Notify Me)
+    CREATE TABLE IF NOT EXISTS shopit_restock_alerts (
+      id VARCHAR(64) PRIMARY KEY,
+      product_id VARCHAR(64) NOT NULL,
+      user_id VARCHAR(64) NOT NULL,
+      email VARCHAR(255),
+      notified BOOLEAN NOT NULL DEFAULT false,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (product_id, user_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_shopit_restock_product ON shopit_restock_alerts (product_id, notified);
 
     -- 18. Custom Craft Commissions Table
     CREATE TABLE IF NOT EXISTS shopit_commissions (
@@ -931,6 +947,7 @@ export async function runMigration(): Promise<void> {
     'ALTER TABLE shopit_products ADD COLUMN IF NOT EXISTS seller_badges JSONB DEFAULT \'[]\'::jsonb;',
     'ALTER TABLE shopit_products ADD COLUMN IF NOT EXISTS rating NUMERIC(3,2) DEFAULT 5.0;',
     'ALTER TABLE shopit_products ADD COLUMN IF NOT EXISTS review_count INTEGER DEFAULT 0;',
+    'ALTER TABLE shopit_products ADD COLUMN IF NOT EXISTS reviews JSONB DEFAULT \'[]\'::jsonb;',
     'ALTER TABLE shopit_products ADD COLUMN IF NOT EXISTS is_sold_out BOOLEAN DEFAULT false;',
     'ALTER TABLE shopit_products ADD COLUMN IF NOT EXISTS is_new_arrival BOOLEAN DEFAULT true;',
     'ALTER TABLE shopit_products ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();',
@@ -973,6 +990,7 @@ export async function runMigration(): Promise<void> {
     'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS shipped_at TIMESTAMPTZ;',
     'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ;',
     'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;',
+    'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS has_review BOOLEAN DEFAULT false;',
     'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();',
     'ALTER TABLE shopit_orders ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();',
     'CREATE UNIQUE INDEX IF NOT EXISTS idx_shopit_orders_ref_unique ON shopit_orders (payment_reference);',

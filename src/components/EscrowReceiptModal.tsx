@@ -109,13 +109,14 @@ export const EscrowReceiptModal: React.FC<EscrowReceiptModalProps> = ({
             </div>
 
             <div className="flex items-center justify-between gap-3 bg-white p-3 rounded-xl border border-amber-300 shadow-2xs">
-              <div className="font-mono text-3xl sm:text-4xl font-black tracking-widest text-[#111111]">
-                {order.handshakeOtp || '4912'}
+              <div className="font-mono text-2xl sm:text-3xl font-black tracking-widest text-[#111111]">
+                {order.handshakeOtp || 'Pending'}
               </div>
               <button
                 type="button"
+                disabled={!order.handshakeOtp}
                 onClick={handleCopyOtp}
-                className="px-3 py-2 rounded-xl bg-stone-100 hover:bg-stone-200 text-xs font-bold text-stone-800 transition-colors flex items-center gap-1 print:hidden"
+                className="px-3 py-2 rounded-xl bg-stone-100 hover:bg-stone-200 disabled:opacity-40 text-xs font-bold text-stone-800 transition-colors flex items-center gap-1 print:hidden"
               >
                 {copiedOtp ? (
                   <>
@@ -175,6 +176,7 @@ export const EscrowReceiptModal: React.FC<EscrowReceiptModalProps> = ({
                     <img
                       src={item.image}
                       alt={item.title}
+                      referrerPolicy="no-referrer"
                       className="w-10 h-10 rounded-lg object-cover border border-stone-200 shrink-0"
                     />
                     <div className="min-w-0">
@@ -243,15 +245,17 @@ export const EscrowReceiptModal: React.FC<EscrowReceiptModalProps> = ({
                 <span className="text-stone-500 block">Payment Reference</span>
                 <div className="flex items-center gap-1">
                   <code className="text-stone-800 font-mono text-[10px] truncate">
-                    {order.paymentReference || 'flw_ref_auto'}
+                    {order.paymentReference || 'N/A'}
                   </code>
-                  <button
-                    type="button"
-                    onClick={handleCopyRef}
-                    className="text-stone-500 hover:text-stone-900 print:hidden"
-                  >
-                    {copiedRef ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
-                  </button>
+                  {order.paymentReference && (
+                    <button
+                      type="button"
+                      onClick={handleCopyRef}
+                      className="text-stone-500 hover:text-stone-900 print:hidden"
+                    >
+                      {copiedRef ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
+                    </button>
+                  )}
                 </div>
               </div>
               <div>
