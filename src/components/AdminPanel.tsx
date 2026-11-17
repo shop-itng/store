@@ -196,6 +196,24 @@ export const AdminPanel: React.FC = () => {
     tone: broadcastAnnouncement.tone,
     isActive: broadcastAnnouncement.isActive,
   });
+  const [isSavingBroadcast, setIsSavingBroadcast] = useState(false);
+  const [isSavingKillswitch, setIsSavingKillswitch] = useState<string | null>(null);
+  const [feeDraft, setFeeDraft] = useState(feeSettings);
+  const [isSavingFees, setIsSavingFees] = useState(false);
+
+  useEffect(() => {
+    setBroadcastForm({
+      title: broadcastAnnouncement.title,
+      message: broadcastAnnouncement.message,
+      tone: broadcastAnnouncement.tone,
+      isActive: broadcastAnnouncement.isActive,
+    });
+  }, [broadcastAnnouncement.id, broadcastAnnouncement.title, broadcastAnnouncement.message, broadcastAnnouncement.tone, broadcastAnnouncement.isActive]);
+
+  useEffect(() => {
+    setFeeDraft(feeSettings);
+  }, [feeSettings.firstMonthPromoFree, feeSettings.tierLowFee, feeSettings.tierMidFee, feeSettings.tierHighPercentage, feeSettings.minWithdrawal]);
+
   const [selectedAdminReceiptOrder, setSelectedAdminReceiptOrder] = useState<Order | null>(null);
 
   // Flutterwave Live Payments audit state
@@ -2175,8 +2193,13 @@ export const AdminPanel: React.FC = () => {
                 <span className="text-xs font-semibold text-stone-700">First-Month Zero-Fee Promo:</span>
                 <button
                   type="button"
-                  onClick={() => updateFeeSettings({ firstMonthPromoFree: !feeSettings.firstMonthPromoFree })}
-                  className={`px-3 py-1 rounded-xl text-xs font-bold transition-all ${
+                  disabled={isSavingFees}
+                  onClick={async () => {
+                    setIsSavingFees(true);
+                    await updateFeeSettings({ firstMonthPromoFree: !feeSettings.firstMonthPromoFree });
+                    setIsSavingFees(false);
+                  }}
+                  className={`px-3 py-1 rounded-xl text-xs font-bold transition-all disabled:opacity-60 ${
                     feeSettings.firstMonthPromoFree
                       ? 'bg-emerald-600 text-white shadow-xs'
                       : 'bg-stone-200 text-stone-700'
@@ -2195,8 +2218,8 @@ export const AdminPanel: React.FC = () => {
                   <span className="text-stone-400 font-mono-numbers">₦</span>
                   <input
                     type="number"
-                    value={feeSettings.tierLowFee}
-                    onChange={e => updateFeeSettings({ tierLowFee: Number(e.target.value) })}
+                    value={feeDraft.tierLowFee}
+                    onChange={e => setFeeDraft(prev => ({ ...prev, tierLowFee: Number(e.target.value) }))}
                     className="w-full p-2 rounded-lg bg-white border border-stone-300 font-mono-numbers text-sm font-bold"
                   />
                 </div>
@@ -2209,8 +2232,8 @@ export const AdminPanel: React.FC = () => {
                   <span className="text-stone-400 font-mono-numbers">₦</span>
                   <input
                     type="number"
-                    value={feeSettings.tierMidFee}
-                    onChange={e => updateFeeSettings({ tierMidFee: Number(e.target.value) })}
+                    value={feeDraft.tierMidFee}
+                    onChange={e => setFeeDraft(prev => ({ ...prev, tierMidFee: Number(e.target.value) }))}
                     className="w-full p-2 rounded-lg bg-white border border-stone-300 font-mono-numbers text-sm font-bold"
                   />
                 </div>
@@ -2223,14 +2246,29 @@ export const AdminPanel: React.FC = () => {
                   <input
                     type="number"
                     step="0.01"
-                    value={feeSettings.tierHighPercentage * 100}
-                    onChange={e => updateFeeSettings({ tierHighPercentage: Number(e.target.value) / 100 })}
+                    value={Number((feeDraft.tierHighPercentage * 100).toFixed(2))}
+                    onChange={e => setFeeDraft(prev => ({ ...prev, tierHighPercentage: Number(e.target.value) / 100 }))}
                     className="w-full p-2 rounded-lg bg-white border border-stone-300 font-mono-numbers text-sm font-bold"
                   />
                   <span className="text-stone-500 font-bold">%</span>
                 </div>
                 <p className="text-[11px] text-stone-500">Percentage fee for luxury artisanal collections</p>
               </div>
+            </div>
+
+            <div className="flex justify-end">
+              <button
+                type="button"
+                disabled={isSavingFees}
+                onClick={async () => {
+                  setIsSavingFees(true);
+                  await updateFeeSettings(feeDraft);
+                  setIsSavingFees(false);
+                }}
+                className="px-4 py-2 rounded-xl bg-stone-950 hover:bg-black text-[#9FE870] font-black text-xs transition-all shadow-xs disabled:opacity-60 cursor-pointer"
+              >
+                {isSavingFees ? 'Saving to PostgreSQL...' : 'Save Fee Policy to Database'}
+              </button>
             </div>
 
             {/* Live Interactive Fee Sandbox */}
@@ -3090,18 +3128,23 @@ export const AdminPanel: React.FC = () => {
                 <span className="text-xs font-semibold text-stone-700">Broadcast Status:</span>
                 <button
                   type="button"
-                  onClick={() => {
+                  disabled={isSavingBroadcast}
+                  onClick={async () => {
                     const nextActive = !broadcastForm.isActive;
-                    setBroadcastForm(prev => ({ ...prev, isActive: nextActive }));
-                    updateBroadcastAnnouncement({ isActive: nextActive, title: broadcastForm.title, message: broadcastForm.message, tone: broadcastForm.tone });
+                    setIsSavingBroadcast(true);
+                    const ok = await updateBroadcastAnnouncement({ isActive: nextActive, title: broadcastForm.title, message: broadcastForm.message, tone: broadcastForm.tone });
+                    setIsSavingBroadcast(false);
+                    if (ok) {
+                      setBroadcastForm(prev => ({ ...prev, isActive: nextActive }));
+                    }
                   }}
-                  className={`px-3 py-1.5 rounded-xl text-xs font-black transition-all border ${
+                  className={`px-3 py-1.5 rounded-xl text-xs font-black transition-all border disabled:opacity-60 cursor-pointer ${
                     broadcastForm.isActive
                       ? 'bg-red-600 hover:bg-red-700 text-white border-red-700 shadow-xs'
                       : 'bg-stone-200 hover:bg-stone-300 text-stone-700 border-stone-300'
                   }`}
                 >
-                  {broadcastForm.isActive ? 'DEACTIVATE BANNER' : 'ACTIVATE LIVE ON SITE'}
+                  {isSavingBroadcast ? 'SAVING...' : broadcastForm.isActive ? 'DEACTIVATE BANNER' : 'ACTIVATE LIVE ON SITE'}
                 </button>
               </div>
             </div>
@@ -3115,63 +3158,60 @@ export const AdminPanel: React.FC = () => {
                 <div className="flex flex-wrap gap-2">
                   <button
                     type="button"
-                    onClick={() => {
-                      setBroadcastForm({
+                    disabled={isSavingBroadcast}
+                    onClick={async () => {
+                      const nextPayload = {
                         title: 'Campus Safe Handshake Protocol',
                         message: 'Always verify your 4-digit Handshake OTP in person at a daylight porter station before accepting orders.',
-                        tone: 'warning',
+                        tone: 'warning' as const,
                         isActive: true,
-                      });
-                      updateBroadcastAnnouncement({
-                        title: 'Campus Safe Handshake Protocol',
-                        message: 'Always verify your 4-digit Handshake OTP in person at a daylight porter station before accepting orders.',
-                        tone: 'warning',
-                        isActive: true,
-                      });
+                      };
+                      setBroadcastForm(nextPayload);
+                      setIsSavingBroadcast(true);
+                      await updateBroadcastAnnouncement(nextPayload);
+                      setIsSavingBroadcast(false);
                     }}
-                    className="px-3 py-1.5 rounded-xl border border-amber-300 bg-amber-50 hover:bg-amber-100 text-xs font-semibold text-amber-950 transition-colors"
+                    className="px-3 py-1.5 rounded-xl border border-amber-300 bg-amber-50 hover:bg-amber-100 text-xs font-semibold text-amber-950 transition-colors disabled:opacity-60"
                   >
                     Handshake OTP Safety Protocol
                   </button>
 
                   <button
                     type="button"
-                    onClick={() => {
-                      setBroadcastForm({
+                    disabled={isSavingBroadcast}
+                    onClick={async () => {
+                      const nextPayload = {
                         title: 'Banking Network Advisory',
                         message: 'Flutterwave bank transfers are experiencing slight delays. Card payments clear immediately into safe escrow.',
-                        tone: 'info',
+                        tone: 'info' as const,
                         isActive: true,
-                      });
-                      updateBroadcastAnnouncement({
-                        title: 'Banking Network Advisory',
-                        message: 'Flutterwave bank transfers are experiencing slight delays. Card payments clear immediately into safe escrow.',
-                        tone: 'info',
-                        isActive: true,
-                      });
+                      };
+                      setBroadcastForm(nextPayload);
+                      setIsSavingBroadcast(true);
+                      await updateBroadcastAnnouncement(nextPayload);
+                      setIsSavingBroadcast(false);
                     }}
-                    className="px-3 py-1.5 rounded-xl border border-blue-300 bg-blue-50 hover:bg-blue-100 text-xs font-semibold text-blue-950 transition-colors"
+                    className="px-3 py-1.5 rounded-xl border border-blue-300 bg-blue-50 hover:bg-blue-100 text-xs font-semibold text-blue-950 transition-colors disabled:opacity-60"
                   >
                     Bank Network Notice
                   </button>
 
                   <button
                     type="button"
-                    onClick={() => {
-                      setBroadcastForm({
+                    disabled={isSavingBroadcast}
+                    onClick={async () => {
+                      const nextPayload = {
                         title: 'Urgent Safety Advisory',
                         message: 'Moderator Notice: Deliveries after 7:00 PM are suspended. Please reschedule handoffs for daylight hours.',
-                        tone: 'emergency',
+                        tone: 'emergency' as const,
                         isActive: true,
-                      });
-                      updateBroadcastAnnouncement({
-                        title: 'Urgent Safety Advisory',
-                        message: 'Moderator Notice: Deliveries after 7:00 PM are suspended. Please reschedule handoffs for daylight hours.',
-                        tone: 'emergency',
-                        isActive: true,
-                      });
+                      };
+                      setBroadcastForm(nextPayload);
+                      setIsSavingBroadcast(true);
+                      await updateBroadcastAnnouncement(nextPayload);
+                      setIsSavingBroadcast(false);
                     }}
-                    className="px-3 py-1.5 rounded-xl border border-red-300 bg-red-50 hover:bg-red-100 text-xs font-semibold text-red-950 transition-colors"
+                    className="px-3 py-1.5 rounded-xl border border-red-300 bg-red-50 hover:bg-red-100 text-xs font-semibold text-red-950 transition-colors disabled:opacity-60"
                   >
                     Night Delivery Restriction
                   </button>
@@ -3260,18 +3300,21 @@ export const AdminPanel: React.FC = () => {
               <div className="flex items-center justify-end gap-2 pt-1">
                 <button
                   type="button"
-                  onClick={() => {
-                    updateBroadcastAnnouncement({
+                  disabled={isSavingBroadcast}
+                  onClick={async () => {
+                    setIsSavingBroadcast(true);
+                    await updateBroadcastAnnouncement({
                       title: broadcastForm.title,
                       message: broadcastForm.message,
                       tone: broadcastForm.tone,
                       isActive: broadcastForm.isActive,
                     });
+                    setIsSavingBroadcast(false);
                   }}
-                  className="px-5 py-2.5 rounded-xl bg-stone-950 hover:bg-black text-[#9FE870] font-black text-xs transition-all shadow-md active:scale-95 flex items-center gap-2"
+                  className="px-5 py-2.5 rounded-xl bg-stone-950 hover:bg-black text-[#9FE870] font-black text-xs transition-all shadow-md active:scale-95 flex items-center gap-2 disabled:opacity-60 cursor-pointer"
                 >
                   <Megaphone className="w-4 h-4" />
-                  <span>Save & Push Broadcast</span>
+                  <span>{isSavingBroadcast ? 'Saving to PostgreSQL...' : 'Save & Push Broadcast'}</span>
                 </button>
               </div>
             </div>
@@ -3285,7 +3328,7 @@ export const AdminPanel: React.FC = () => {
                 <span>Marketplace Emergency Killswitches</span>
               </h3>
               <p className="text-xs text-stone-500 mt-0.5">
-                Instant operational controls to protect campus marketplace integrity during emergencies.
+                Instant operational controls backed by PostgreSQL to protect campus marketplace integrity during emergencies.
               </p>
             </div>
 
@@ -3304,14 +3347,19 @@ export const AdminPanel: React.FC = () => {
                   </div>
                   <button
                     type="button"
-                    onClick={() => updateEmergencyControls({ maintenanceMode: !emergencyControls.maintenanceMode })}
-                    className={`px-3 py-1 rounded-xl text-xs font-black transition-all border ${
+                    disabled={isSavingKillswitch === 'maintenanceMode'}
+                    onClick={async () => {
+                      setIsSavingKillswitch('maintenanceMode');
+                      await updateEmergencyControls({ maintenanceMode: !emergencyControls.maintenanceMode });
+                      setIsSavingKillswitch(null);
+                    }}
+                    className={`px-3 py-1 rounded-xl text-xs font-black transition-all border disabled:opacity-60 cursor-pointer ${
                       emergencyControls.maintenanceMode
                         ? 'bg-red-600 text-white border-red-700 shadow-xs'
                         : 'bg-white text-stone-800 border-stone-300'
                     }`}
                   >
-                    {emergencyControls.maintenanceMode ? 'ACTIVE' : 'OFF'}
+                    {isSavingKillswitch === 'maintenanceMode' ? '...' : emergencyControls.maintenanceMode ? 'ACTIVE' : 'OFF'}
                   </button>
                 </div>
                 <div>
@@ -3336,20 +3384,25 @@ export const AdminPanel: React.FC = () => {
                   </div>
                   <button
                     type="button"
-                    onClick={() => updateEmergencyControls({ pauseNewOrders: !emergencyControls.pauseNewOrders })}
-                    className={`px-3 py-1 rounded-xl text-xs font-black transition-all border ${
+                    disabled={isSavingKillswitch === 'pauseNewOrders'}
+                    onClick={async () => {
+                      setIsSavingKillswitch('pauseNewOrders');
+                      await updateEmergencyControls({ pauseNewOrders: !emergencyControls.pauseNewOrders });
+                      setIsSavingKillswitch(null);
+                    }}
+                    className={`px-3 py-1 rounded-xl text-xs font-black transition-all border disabled:opacity-60 cursor-pointer ${
                       emergencyControls.pauseNewOrders
                         ? 'bg-amber-600 text-white border-amber-700 shadow-xs'
                         : 'bg-white text-stone-800 border-stone-300'
                     }`}
                   >
-                    {emergencyControls.pauseNewOrders ? 'PAUSED' : 'ACTIVE'}
+                    {isSavingKillswitch === 'pauseNewOrders' ? '...' : emergencyControls.pauseNewOrders ? 'PAUSED' : 'ACTIVE'}
                   </button>
                 </div>
                 <div>
                   <h4 className="text-sm font-bold text-stone-950">Pause New Orders</h4>
                   <p className="text-[11px] text-stone-500 mt-1 leading-relaxed">
-                    Temporarily halts new Flutterwave checkout sessions if courier networks or campus banking has widespread downtime.
+                    Temporarily halts new Flutterwave checkout sessions on both UI and server API if courier networks or banking has downtime.
                   </p>
                 </div>
               </div>
@@ -3368,14 +3421,19 @@ export const AdminPanel: React.FC = () => {
                   </div>
                   <button
                     type="button"
-                    onClick={() => updateEmergencyControls({ pauseSellerSignups: !emergencyControls.pauseSellerSignups })}
-                    className={`px-3 py-1 rounded-xl text-xs font-black transition-all border ${
+                    disabled={isSavingKillswitch === 'pauseSellerSignups'}
+                    onClick={async () => {
+                      setIsSavingKillswitch('pauseSellerSignups');
+                      await updateEmergencyControls({ pauseSellerSignups: !emergencyControls.pauseSellerSignups });
+                      setIsSavingKillswitch(null);
+                    }}
+                    className={`px-3 py-1 rounded-xl text-xs font-black transition-all border disabled:opacity-60 cursor-pointer ${
                       emergencyControls.pauseSellerSignups
                         ? 'bg-stone-900 text-white border-stone-950 shadow-xs'
                         : 'bg-white text-stone-800 border-stone-300'
                     }`}
                   >
-                    {emergencyControls.pauseSellerSignups ? 'CLOSED' : 'OPEN'}
+                    {isSavingKillswitch === 'pauseSellerSignups' ? '...' : emergencyControls.pauseSellerSignups ? 'CLOSED' : 'OPEN'}
                   </button>
                 </div>
                 <div>

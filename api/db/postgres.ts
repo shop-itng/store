@@ -53,6 +53,7 @@ const CORE_SCHEMA_TABLES = [
   'shopit_verified_signups',
   'shopit_audit_logs',
   'shopit_rate_limits',
+  'shopit_platform_settings',
 ] as const;
 
 export function getDatabaseUrl(): string {
@@ -751,6 +752,14 @@ export async function runMigration(): Promise<void> {
       alert_key VARCHAR(255) PRIMARY KEY,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+
+    -- 27. Persistent Platform Settings Table (Broadcasts, Killswitches, Fee Policy)
+    CREATE TABLE IF NOT EXISTS shopit_platform_settings (
+      key VARCHAR(100) PRIMARY KEY,
+      value JSONB NOT NULL DEFAULT '{}'::jsonb,
+      updated_by VARCHAR(255),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
   `;
 
   // Comprehensive column healing: ensures every table has all required columns regardless of initial creation schema
@@ -1078,6 +1087,50 @@ export async function runMigration(): Promise<void> {
     await pool.query(`SELECT 1 FROM ${coreTable} LIMIT 0`);
   }
 
+  // Seed default platform settings (broadcast, emergency killswitches, fee policy)
+  const defaultPlatformSettings: Array<{ key: string; value: Record<string, any> }> = [
+    {
+      key: 'broadcast',
+      value: {
+        id: 'broad_default',
+        isActive: false,
+        title: 'Campus Safety & Verified Handshake Advisory',
+        message: 'All campus craft handoffs must be verified using the 4-digit Handshake OTP in daylight safe spots.',
+        tone: 'info',
+        createdAt: new Date().toISOString(),
+        author: 'Shop It Safety Desk',
+      },
+    },
+    {
+      key: 'emergency_controls',
+      value: {
+        maintenanceMode: false,
+        pauseNewOrders: false,
+        pauseSellerSignups: false,
+      },
+    },
+    {
+      key: 'fee_settings',
+      value: {
+        firstMonthPromoFree: false,
+        tierLowFee: 200,
+        tierMidFee: 500,
+        tierHighPercentage: 0.05,
+        minWithdrawal: 1000,
+      },
+    },
+  ];
+  for (const ps of defaultPlatformSettings) {
+    try {
+      await pool.query(
+        `INSERT INTO shopit_platform_settings (key, value, updated_by, updated_at)
+         VALUES ($1, $2, 'system', NOW())
+         ON CONFLICT (key) DO NOTHING`,
+        [ps.key, JSON.stringify(ps.value)]
+      );
+    } catch {}
+  }
+
   // Seed default coupons into PostgreSQL (DB-authoritative coupon validation)
   const seedCoupons = [
     { code: 'TEEDS', discountKobo: 50000, minSubtotalKobo: 250000 },
@@ -1154,4 +1207,63 @@ export async function runMigration(): Promise<void> {
   });
 
   return migrationPromise;
+}
+
+export const DEFAULT_BROADCAST_SETTING = {
+  id: 'broad_default',
+  isActive: false,
+  title: 'Campus Safety & Verified Handshake Advisory',
+  message: 'All campus craft handoffs must be verified using the 4-digit Handshake OTP in daylight safe spots.',
+  tone: 'info',
+  createdAt: new Date().toISOString(),
+  author: 'Shop It Safety Desk',
+};
+
+export const DEFAULT_EMERGENCY_CONTROLS = {
+  maintenanceMode: false,
+  pauseNewOrders: false,
+  pauseSellerSignups: false,
+};
+
+export const DEFAULT_FEE_SETTINGS_DB = {
+  firstMonthPromoFree: false,
+  tierLowFee: 200,
+  tierMidFee: 500,
+  tierHighPercentage: 0.05,
+  minWithdrawal: 1000,
+};
+
+export async function getPlatformSetting<T = Record<string, any>>(key: string, fallback: T): Promise<T> {
+  try {
+    const res = await query('SELECT value FROM shopit_platform_settings WHERE key = $1', [key]);
+    if (res.rows.length > 0 && res.rows[0].value && typeof res.rows[0].value === 'object') {
+      return { ...fallback, ...res.rows[0].value };
+    }
+  } catch (err: any) {
+    console.warn(`[Platform Setting Read Warning (${key})]:`, err?.message || err);
+  }
+  return fallback;
+}
+
+export async function setPlatformSetting<T = Record<string, any>>(
+  key: string,
+  value: T,
+  updatedBy: string
+): Promise<T> {
+  await query(
+    `INSERT INTO shopit_platform_settings (key, value, updated_by, updated_at)
+     VALUES ($1, $2, $3, NOW())
+     ON CONFLICT (key) DO UPDATE SET value = $2, updated_by = $3, updated_at = NOW()`,
+    [key, JSON.stringify(value), updatedBy]
+  );
+  return value;
+}
+
+export async function getAllPlatformConfig() {
+  const [broadcastAnnouncement, emergencyControls, feeSettings] = await Promise.all([
+    getPlatformSetting('broadcast', DEFAULT_BROADCAST_SETTING),
+    getPlatformSetting('emergency_controls', DEFAULT_EMERGENCY_CONTROLS),
+    getPlatformSetting('fee_settings', DEFAULT_FEE_SETTINGS_DB),
+  ]);
+  return { broadcastAnnouncement, emergencyControls, feeSettings };
 }

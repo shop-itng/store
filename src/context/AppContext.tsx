@@ -265,11 +265,11 @@ interface AppContextType {
   openVerificationModal: () => void;
   closeVerificationModal: () => void;
   disputes: DisputeTicket[];
-  resolveDispute: (disputeId: string, resolution: 'refund_full' | 'release_seller' | 'partial', amount?: number, notes?: string) => void;
+  resolveDispute: (disputeId: string, resolution: 'refund_full' | 'release_seller' | 'partial', amount?: number, notes?: string) => Promise<boolean>;
   antiBypassFlags: AntiBypassFlag[];
   updateFlagStatus: (flagId: string, action: 'warn' | 'lock_chat' | 'freeze_account' | 'dismiss') => void;
   feeSettings: FeeSettings;
-  updateFeeSettings: (settings: Partial<FeeSettings>) => void;
+  updateFeeSettings: (settings: Partial<FeeSettings>) => Promise<boolean>;
 
   // Moderator Super-Powers & Account Governance
   registeredUsers: User[];
@@ -282,9 +282,9 @@ interface AppContextType {
   adminForceReleaseEscrow: (orderId: string) => void;
   adminForceRefundOrder: (orderId: string, notes?: string) => void;
   broadcastAnnouncement: BroadcastAnnouncement;
-  updateBroadcastAnnouncement: (data: Partial<BroadcastAnnouncement>) => void;
+  updateBroadcastAnnouncement: (data: Partial<BroadcastAnnouncement>) => Promise<boolean>;
   emergencyControls: EmergencyControls;
-  updateEmergencyControls: (controls: Partial<EmergencyControls>) => void;
+  updateEmergencyControls: (controls: Partial<EmergencyControls>) => Promise<boolean>;
   adminAuditLogs: AdminAuditLog[];
   addAdminAuditLog: (action: string, details: string, targetId?: string) => void;
   clearMarketplaceDatabase: () => void;
@@ -306,7 +306,7 @@ interface AppContextType {
   addPayoutAccount: (bankCode: string, bankName: string, accountNumber: string, accountName: string, otpCode?: string) => Promise<boolean>;
   sendPayoutAccountOtp: (accountInfo?: { bank_name?: string; last4?: string }) => Promise<{ success: boolean; error?: string; waitSeconds?: number }>;
   resendSignupOtp: () => Promise<{ success: boolean; error?: string; waitSeconds?: number }>;
-  toggleWalletFreeze: (sellerId: string, freeze: boolean, reason?: string) => void;
+  toggleWalletFreeze: (sellerId: string, freeze: boolean, reason?: string) => Promise<boolean>;
 
   // Security Hardening
   securityProfile: SecurityProfile;
@@ -690,59 +690,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const saved = localStorage.getItem('shopit_anti_bypass_flags');
     return saved ? JSON.parse(saved) : INITIAL_ANTI_BYPASS_FLAGS;
   });
-  const [feeSettings, setFeeSettings] = useState<FeeSettings>(() => {
-    const saved = localStorage.getItem('shopit_fee_settings');
-    return saved ? JSON.parse(saved) : DEFAULT_FEE_SETTINGS;
-  });
+  const [feeSettings, setFeeSettings] = useState<FeeSettings>(DEFAULT_FEE_SETTINGS);
 
   // Registered users repository (loaded exclusively from server database for admins)
   const [registeredUsers, setRegisteredUsers] = useState<User[]>([]);
 
-  // Site-wide Broadcast, Platform Killswitches & Audit Trail
-  const [broadcastAnnouncement, setBroadcastAnnouncement] = useState<BroadcastAnnouncement>(() => {
-    try {
-      const saved = localStorage.getItem('shopit_broadcast_announcement');
-      return saved
-        ? JSON.parse(saved)
-        : {
-            id: 'broad_default',
-            isActive: false,
-            title: 'Campus Safety & Verified Handshake Advisory',
-            message: 'All campus craft handoffs must be verified using the 4-digit Handshake OTP in daylight safe spots.',
-            tone: 'info',
-            createdAt: new Date().toISOString(),
-            author: 'Shop It Safety Desk',
-          };
-    } catch {
-      return {
-        id: 'broad_default',
-        isActive: false,
-        title: 'Campus Safety & Verified Handshake Advisory',
-        message: 'All campus craft handoffs must be verified using the 4-digit Handshake OTP in daylight safe spots.',
-        tone: 'info',
-        createdAt: new Date().toISOString(),
-        author: 'Shop It Safety Desk',
-      };
-    }
+  // Site-wide Broadcast, Platform Killswitches & Audit Trail (hydrated authoritatively from PostgreSQL)
+  const [broadcastAnnouncement, setBroadcastAnnouncement] = useState<BroadcastAnnouncement>({
+    id: 'broad_default',
+    isActive: false,
+    title: 'Campus Safety & Verified Handshake Advisory',
+    message: 'All campus craft handoffs must be verified using the 4-digit Handshake OTP in daylight safe spots.',
+    tone: 'info',
+    createdAt: new Date().toISOString(),
+    author: 'Shop It Safety Desk',
   });
 
-  const [emergencyControls, setEmergencyControls] = useState<EmergencyControls>(() => {
-    try {
-      const saved = localStorage.getItem('shopit_emergency_controls');
-      return saved
-        ? JSON.parse(saved)
-        : {
-            maintenanceMode: false,
-            pauseNewOrders: false,
-            pauseSellerSignups: false,
-          };
-    } catch {
-      return {
-        maintenanceMode: false,
-        pauseNewOrders: false,
-        pauseSellerSignups: false,
-      };
-    }
+  const [emergencyControls, setEmergencyControls] = useState<EmergencyControls>({
+    maintenanceMode: false,
+    pauseNewOrders: false,
+    pauseSellerSignups: false,
   });
 
   const [adminAuditLogs, setAdminAuditLogs] = useState<AdminAuditLog[]>([]);
@@ -855,12 +822,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     [currentUser?.role]
   );
 
-  // PostgreSQL Single Source of Truth: Fetch public marketplace products/sellers and (for admins only) admin data
+  const fetchPlatformConfig = useCallback(async () => {
+    try {
+      const res = await fetch('/api/platform/config', { credentials: 'include' });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.status) {
+        if (data.broadcastAnnouncement) setBroadcastAnnouncement(data.broadcastAnnouncement);
+        if (data.emergencyControls) setEmergencyControls(data.emergencyControls);
+        if (data.feeSettings) setFeeSettings(data.feeSettings);
+      }
+    } catch {}
+  }, []);
+
+  // PostgreSQL Single Source of Truth: Fetch public marketplace products/sellers, live platform config, and (for admins) admin data
   const fetchMarketplaceData = useCallback(async () => {
     try {
       const [prodRes, sellRes] = await Promise.all([
         fetch('/api/products?limit=100', { credentials: 'include' }).catch(() => null),
         fetch('/api/sellers', { credentials: 'include' }).catch(() => null),
+        fetchPlatformConfig(),
       ]);
 
       if (prodRes && prodRes.ok) {
@@ -881,11 +862,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     } catch (err: any) {
       console.warn('[PostgreSQL Sync Warning]:', err.message);
     }
-  }, [refreshAdminData]);
+  }, [fetchPlatformConfig, refreshAdminData]);
 
   useEffect(() => {
     fetchMarketplaceData();
   }, [fetchMarketplaceData, currentUser?.id, currentUser?.role]);
+
+  // Keep broadcast & emergency killswitches synchronized across all active visitor sessions
+  useEffect(() => {
+    const onFocus = () => {
+      void fetchPlatformConfig();
+    };
+    window.addEventListener('focus', onFocus);
+    const interval = setInterval(() => {
+      void fetchPlatformConfig();
+    }, 30000);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      clearInterval(interval);
+    };
+  }, [fetchPlatformConfig]);
 
   const refreshFinancials = useCallback(async () => {
     if (!currentUser?.id) return;
@@ -2308,34 +2304,48 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  // Rule 5: Admin can freeze a wallet
-  const toggleWalletFreeze = (sellerId: string, freeze: boolean, reason?: string) => {
-    setWallets(prev => {
-      const w = prev[sellerId] || {
-        sellerId,
-        pendingBalance: 0,
-        availableBalance: 0,
-        totalWithdrawn: 0,
-        isFrozen: false,
-        payoutAccounts: [],
-        ledger: [],
-        transactions: [],
-      };
-      return {
-        ...prev,
-        [sellerId]: {
-          ...w,
-          isFrozen: freeze,
-          freezeReason: freeze ? (reason || 'Admin Security Review') : undefined,
-        },
-      };
-    });
-    addAdminAuditLog(
-      'WALLET_FREEZE_UPDATED',
-      `${freeze ? 'Froze' : 'Unfroze'} wallet for seller ${sellerId}${reason ? ` (${reason})` : ''}`,
-      sellerId
-    );
-    notify(freeze ? `Wallet for ${sellerId} frozen by Admin.` : `Wallet for ${sellerId} unfrozen.`, 'info');
+  // Rule 5: Admin can freeze a wallet (persisted in PostgreSQL)
+  const toggleWalletFreeze = async (sellerId: string, freeze: boolean, reason?: string): Promise<boolean> => {
+    try {
+      const res = await fetch(`/api/admin/wallets/${encodeURIComponent(sellerId)}/freeze`, {
+        method: 'PATCH',
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        credentials: 'include',
+        body: JSON.stringify({ isFrozen: freeze, reason }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.status) {
+        notify(data.message || 'Failed to update wallet freeze status in database.', 'error');
+        return false;
+      }
+
+      setWallets(prev => {
+        const w = prev[sellerId] || {
+          sellerId,
+          pendingBalance: 0,
+          availableBalance: 0,
+          totalWithdrawn: 0,
+          isFrozen: false,
+          payoutAccounts: [],
+          ledger: [],
+          transactions: [],
+        };
+        return {
+          ...prev,
+          [sellerId]: {
+            ...w,
+            isFrozen: freeze,
+            freezeReason: freeze ? (reason || 'Admin Security Review') : undefined,
+          },
+        };
+      });
+      notify(freeze ? `Wallet for ${sellerId} frozen in database.` : `Wallet for ${sellerId} unfrozen in database.`, 'info');
+      void refreshAdminData();
+      return true;
+    } catch (err: any) {
+      notify(err?.message || 'Unable to reach database to update wallet status.', 'error');
+      return false;
+    }
   };
 
   const toggleTwoFactor = () => {
@@ -2816,162 +2826,70 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     notify('ID & selfie submitted for review! Our moderator will review it within 24 hours.', 'success');
   };
 
-  const resolveDispute = (
+  const resolveDispute = async (
     disputeId: string,
     resolution: 'refund_full' | 'release_seller' | 'partial',
     amount?: number,
     notes?: string
-  ) => {
+  ): Promise<boolean> => {
     const disp = disputes.find(d => d.id === disputeId);
-    if (!disp) return;
-
+    if (!disp) return false;
     const ord = orders.find(o => o.id === disp.orderId);
 
-    if (resolution === 'refund_full') {
-      if (ord) updateOrderStatus(ord.id, 'cancelled');
-      setWallets(prev => {
-        const w = prev[disp.sellerId] || prev['seller_amaka'];
-        if (!w) return prev;
-        return {
-          ...prev,
-          [disp.sellerId]: {
-            ...w,
-            pendingBalance: Math.max(0, w.pendingBalance - disp.amountHeldInEscrow),
-            transactions: [
-              {
-                id: `TXN-${Math.floor(10000 + Math.random() * 90000)}`,
-                type: 'refund',
-                amount: disp.amountHeldInEscrow,
-                fee: 0,
-                balanceAfter: w.availableBalance,
-                status: 'completed',
-                description: `Dispute Resolved · Full Refund of ₦${disp.amountHeldInEscrow.toLocaleString()} to Buyer`,
-                reference: disp.orderId,
-                createdAt: 'Just now',
-              },
-              ...w.transactions,
-            ],
-          },
-        };
+    try {
+      const res = await fetch(`/api/disputes/${encodeURIComponent(disputeId)}/resolve`, {
+        method: 'PATCH',
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        credentials: 'include',
+        body: JSON.stringify({ resolution, partialRefundAmount: amount, notes }),
       });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.status) {
+        notify(data.message || 'Failed to resolve dispute in database.', 'error');
+        return false;
+      }
 
       setDisputes(prev =>
-        prev.map(d => d.id === disputeId ? { ...d, status: 'resolved_refunded', resolutionNotes: notes } : d)
+        prev.map(d =>
+          d.id === disputeId
+            ? {
+                ...d,
+                status: data.disputeStatus || d.status,
+                refundAmount: data.refundNaira,
+                resolutionNotes: data.resolutionNotes || notes,
+              }
+            : d
+        )
       );
-      notify(`Dispute resolved: Full refund of ₦${disp.amountHeldInEscrow.toLocaleString()} returned to buyer.`, 'success');
-    } else if (resolution === 'release_seller') {
-      if (ord) updateOrderStatus(ord.id, 'completed');
-      setWallets(prev => {
-        const w = prev[disp.sellerId] || prev['seller_amaka'];
-        if (!w) return prev;
-        const newAvailable = w.availableBalance + disp.amountHeldInEscrow;
-        return {
-          ...prev,
-          [disp.sellerId]: {
-            ...w,
-            availableBalance: newAvailable,
-            pendingBalance: Math.max(0, w.pendingBalance - disp.amountHeldInEscrow),
-            transactions: [
-              {
-                id: `TXN-${Math.floor(10000 + Math.random() * 90000)}`,
-                type: 'escrow_release',
-                amount: disp.amountHeldInEscrow,
-                fee: 0,
-                balanceAfter: newAvailable,
-                status: 'completed',
-                description: `Dispute Resolved · Escrow released in seller favor`,
-                reference: disp.orderId,
-                createdAt: 'Just now',
-              },
-              ...w.transactions,
-            ],
-          },
-        };
-      });
 
-      setDisputes(prev =>
-        prev.map(d => d.id === disputeId ? { ...d, status: 'resolved_released', resolutionNotes: notes } : d)
-      );
-      notify(`Dispute resolved: ₦${disp.amountHeldInEscrow.toLocaleString()} released to seller wallet!`, 'success');
-    } else if (resolution === 'partial') {
-      const refundVal = amount || Math.round(disp.amountHeldInEscrow / 2);
-      const sellerVal = disp.amountHeldInEscrow - refundVal;
-      if (ord) updateOrderStatus(ord.id, 'completed');
+      await Promise.all([refreshFinancials(), refreshAdminData()]);
 
-      setWallets(prev => {
-        const w = prev[disp.sellerId] || prev['seller_amaka'];
-        if (!w) return prev;
-        const newAvailable = w.availableBalance + sellerVal;
-        return {
-          ...prev,
-          [disp.sellerId]: {
-            ...w,
-            availableBalance: newAvailable,
-            pendingBalance: Math.max(0, w.pendingBalance - disp.amountHeldInEscrow),
-            transactions: [
-              {
-                id: `TXN-${Math.floor(10000 + Math.random() * 90000)}`,
-                type: 'escrow_release',
-                amount: sellerVal,
-                fee: 0,
-                balanceAfter: newAvailable,
-                status: 'completed',
-                description: `Dispute Partial Resolution · ₦${sellerVal.toLocaleString()} released to seller`,
-                reference: disp.orderId,
-                createdAt: 'Just now',
-              },
-              ...w.transactions,
-            ],
-          },
-        };
-      });
+      let decisionText = data.resolutionNotes || 'Dispute reviewed and resolved';
+      const buyerEmail = ord?.buyerEmail || '';
+      const buyerName = disp.buyerName || ord?.buyerName || 'Customer';
+      if (buyerEmail) {
+        sendTransactionalEmail(buyerEmail, 'dispute_resolved', {
+          name: buyerName,
+          order_id: disp.orderId,
+          decision: decisionText,
+        });
+      }
 
-      setDisputes(prev =>
-        prev.map(d => d.id === disputeId ? { ...d, status: 'resolved_partial', refundAmount: refundVal, resolutionNotes: notes } : d)
-      );
-      notify(`Partial resolution: ₦${refundVal.toLocaleString()} refunded to buyer, ₦${sellerVal.toLocaleString()} released to seller.`, 'success');
+      const targetSeller = sellers.find(s => s.id === disp.sellerId);
+      if (targetSeller?.email) {
+        sendTransactionalEmail(targetSeller.email, 'dispute_resolved', {
+          name: targetSeller.shopName || targetSeller.ownerName || 'Seller',
+          order_id: disp.orderId,
+          decision: decisionText,
+        });
+      }
+
+      notify(data.message || 'Dispute resolved and saved in database.', 'success');
+      return true;
+    } catch (err: any) {
+      notify(err?.message || 'Unable to reach database server to resolve dispute.', 'error');
+      return false;
     }
-
-    // 12. DISPUTE RESOLVED (notify both buyer & seller)
-    let decisionText = 'Dispute reviewed and resolved';
-    if (resolution === 'release_seller') {
-      decisionText = 'Funds released to seller after review';
-    } else if (resolution === 'refund_full') {
-      decisionText = `Full refund of ₦${disp.amountHeldInEscrow.toLocaleString()} returned to buyer`;
-    } else if (resolution === 'partial') {
-      const refundVal = amount || Math.round(disp.amountHeldInEscrow / 2);
-      decisionText = `Partial resolution: ₦${refundVal.toLocaleString()} refunded to buyer, remaining released to seller`;
-    }
-    if (notes) {
-      decisionText += ` (${notes})`;
-    }
-
-    const buyerEmail = ord?.buyerEmail || currentUser?.email || '';
-    const buyerName = disp.buyerName || ord?.buyerName || 'Customer';
-    if (buyerEmail) {
-      sendTransactionalEmail(buyerEmail, 'dispute_resolved', {
-        name: buyerName,
-        order_id: disp.orderId,
-        decision: decisionText,
-      });
-    }
-
-    const targetSeller = sellers.find(s => s.id === disp.sellerId);
-    const sellerEmail = targetSeller?.email || '';
-    const sellerName = targetSeller?.shopName || targetSeller?.ownerName || 'Seller';
-    if (sellerEmail) {
-      sendTransactionalEmail(sellerEmail, 'dispute_resolved', {
-        name: sellerName,
-        order_id: disp.orderId,
-        decision: decisionText,
-      });
-    }
-
-    addAdminAuditLog(
-      'DISPUTE_RESOLVED',
-      `Dispute ${disputeId} (Order ${disp.orderId}) resolved via ${resolution}: ${decisionText}`,
-      disputeId
-    );
   };
 
   const updateFlagStatus = (flagId: string, action: 'warn' | 'lock_chat' | 'freeze_account' | 'dismiss') => {
@@ -2989,13 +2907,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const flag = antiBypassFlags.find(f => f.id === flagId);
     if (flag && action === 'lock_chat') {
+      fetch(`/api/admin/chat/conversations/${encodeURIComponent(flag.conversationId)}/lock`, {
+        method: 'PATCH',
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        credentials: 'include',
+        body: JSON.stringify({ isChatLocked: true }),
+      }).catch(() => {});
       setConversations(prev =>
         prev.map(c => c.id === flag.conversationId ? { ...c, isChatLocked: true } : c)
       );
       notify(`Chat locked for flag #${flagId}.`, 'info');
     } else if (flag && action === 'freeze_account') {
       if (flag.senderRole === 'seller') {
-        toggleWalletFreeze(flag.senderId, true, 'Anti-bypass repeated violation');
+        void toggleWalletFreeze(flag.senderId, true, 'Anti-bypass repeated violation');
       }
       notify(`Account for sender ${flag.senderMaskedName} frozen for safety review.`, 'error');
     } else {
@@ -3004,17 +2928,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     addAdminAuditLog('FLAG_ACTION_APPLIED', `Anti-bypass flag #${flagId} updated with action: ${action}`, flagId);
   };
 
-  const updateFeeSettings = (newSettings: Partial<FeeSettings>) => {
-    setFeeSettings(prev => {
-      const updated = { ...prev, ...newSettings };
-      notify('Platform fee settings updated successfully!', 'success');
-      return updated;
-    });
-    addAdminAuditLog(
-      'FEE_SETTINGS_UPDATED',
-      `Platform fee settings updated: ${Object.entries(newSettings).map(([k, v]) => `${k}=${v}`).join(', ')}`,
-      'fee_settings'
-    );
+  const updateFeeSettings = async (newSettings: Partial<FeeSettings>): Promise<boolean> => {
+    const merged = { ...feeSettings, ...newSettings };
+    try {
+      const res = await fetch('/api/admin/fee-settings', {
+        method: 'PUT',
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        credentials: 'include',
+        body: JSON.stringify(merged),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.status) {
+        notify(data.message || 'Failed to save fee settings in database.', 'error');
+        return false;
+      }
+      if (data.feeSettings) {
+        setFeeSettings(data.feeSettings);
+      } else {
+        setFeeSettings(merged);
+      }
+      notify('Platform fee settings saved to database!', 'success');
+      void refreshAdminData();
+      return true;
+    } catch (err: any) {
+      notify(err?.message || 'Unable to reach database server to save fee settings.', 'error');
+      return false;
+    }
   };
 
   // ==========================================
@@ -3309,30 +3248,60 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  const updateBroadcastAnnouncement = (data: Partial<BroadcastAnnouncement>) => {
-    setBroadcastAnnouncement(prev => {
-      const updated = { ...prev, ...data };
-      localStorage.setItem('shopit_broadcast_announcement', JSON.stringify(updated));
-      return updated;
-    });
-    addAdminAuditLog(
-      data.isActive !== undefined ? (data.isActive ? 'BROADCAST_ACTIVATED' : 'BROADCAST_DEACTIVATED') : 'BROADCAST_UPDATED',
-      `Live site broadcast announcement updated: "${data.title || broadcastAnnouncement.title}"`
-    );
-    notify(data.isActive ? 'Site-wide broadcast is now live!' : 'Broadcast settings updated.', 'info');
+  const updateBroadcastAnnouncement = async (data: Partial<BroadcastAnnouncement>): Promise<boolean> => {
+    const payload = { ...broadcastAnnouncement, ...data };
+    try {
+      const res = await fetch('/api/admin/broadcast', {
+        method: 'PUT',
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        credentials: 'include',
+        body: JSON.stringify(payload),
+      });
+      const result = await res.json().catch(() => ({}));
+      if (!res.ok || !result.status) {
+        notify(result.message || 'Failed to save broadcast in database.', 'error');
+        return false;
+      }
+      if (result.broadcastAnnouncement) {
+        setBroadcastAnnouncement(result.broadcastAnnouncement);
+      } else {
+        setBroadcastAnnouncement(payload);
+      }
+      notify(payload.isActive ? 'Site-wide broadcast saved and live for all visitors!' : 'Broadcast settings saved in database.', 'success');
+      void refreshAdminData();
+      return true;
+    } catch (err: any) {
+      notify(err?.message || 'Unable to reach database server to update broadcast.', 'error');
+      return false;
+    }
   };
 
-  const updateEmergencyControls = (controls: Partial<EmergencyControls>) => {
-    setEmergencyControls(prev => {
-      const updated = { ...prev, ...controls };
-      localStorage.setItem('shopit_emergency_controls', JSON.stringify(updated));
-      return updated;
-    });
-    const changed = Object.entries(controls)
-      .map(([k, v]) => `${k}=${v}`)
-      .join(', ');
-    addAdminAuditLog('KILLSWITCH_TOGGLED', `Emergency platform killswitches updated: ${changed}`);
-    notify('Emergency platform control updated.', 'info');
+  const updateEmergencyControls = async (controls: Partial<EmergencyControls>): Promise<boolean> => {
+    const merged = { ...emergencyControls, ...controls };
+    try {
+      const res = await fetch('/api/admin/emergency-controls', {
+        method: 'PUT',
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        credentials: 'include',
+        body: JSON.stringify(merged),
+      });
+      const result = await res.json().catch(() => ({}));
+      if (!res.ok || !result.status) {
+        notify(result.message || 'Failed to save emergency killswitch in database.', 'error');
+        return false;
+      }
+      if (result.emergencyControls) {
+        setEmergencyControls(result.emergencyControls);
+      } else {
+        setEmergencyControls(merged);
+      }
+      notify('Emergency platform control saved & enforced in database.', 'success');
+      void refreshAdminData();
+      return true;
+    } catch (err: any) {
+      notify(err?.message || 'Unable to reach database server to update emergency controls.', 'error');
+      return false;
+    }
   };
 
   const openCheckoutModal = () => {

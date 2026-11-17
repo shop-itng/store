@@ -4,9 +4,9 @@ import { AlertTriangle, Info, Bell, Sparkles, X, ShieldAlert } from 'lucide-reac
 
 export const BroadcastBanner: React.FC = () => {
   const { broadcastAnnouncement } = useApp();
-  const [isDismissed, setIsDismissed] = useState(false);
+  const [dismissedId, setDismissedId] = useState<string | null>(null);
 
-  if (!broadcastAnnouncement?.isActive || isDismissed) {
+  if (!broadcastAnnouncement?.isActive || dismissedId === broadcastAnnouncement.id) {
     return null;
   }
 
@@ -88,7 +88,7 @@ export const BroadcastBanner: React.FC = () => {
           </span>
           <button
             type="button"
-            onClick={() => setIsDismissed(true)}
+            onClick={() => setDismissedId(broadcastAnnouncement.id)}
             aria-label="Dismiss banner"
             className="p-1 rounded-md hover:bg-black/20 text-white/80 hover:text-white transition-colors"
           >

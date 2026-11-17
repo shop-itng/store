@@ -36,6 +36,7 @@ const PUBLIC_ALLOW_LIST = new Set([
   'POST /activity/track',
   'GET /payments/config',
   'GET /payments/webhook-info',
+  'GET /platform/config',
 ]);
 
 function extractStackRoutes(stack: any[], prefix = '', out: DiscoveredRoute[] = []): DiscoveredRoute[] {

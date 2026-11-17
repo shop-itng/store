@@ -30,6 +30,12 @@ import {
   pingRedis,
   runMigration,
   getDatabaseUrl,
+  getAllPlatformConfig,
+  getPlatformSetting,
+  setPlatformSetting,
+  DEFAULT_BROADCAST_SETTING,
+  DEFAULT_EMERGENCY_CONTROLS,
+  DEFAULT_FEE_SETTINGS_DB,
 } from './db/postgres.js';
 import {
   createSession,
@@ -58,6 +64,7 @@ import {
   nairaToKobo,
   koboToNaira,
   calculateTieredServiceFeeKobo,
+  calculateConfiguredServiceFeeKobo,
   encryptSensitiveData,
   decryptSensitiveData,
   sendBrevoDirect,
@@ -97,15 +104,38 @@ const APP_URL = (
   PRODUCTION_APP_URL
 ).replace(/\/$/, '');
 
-function getAllowedOrigins(): string[] {
+function getAllowedOrigins(req?: express.Request): string[] {
   const extra = (process.env.ALLOWED_ORIGINS || '')
     .split(',')
     .map(s => s.trim().replace(/\/$/, ''))
     .filter(Boolean);
 
+  const ngAllowedHosts = (process.env.NG_ALLOWED_HOSTS || '')
+    .split(',')
+    .map(s => s.trim().toLowerCase())
+    .filter(Boolean);
+
+  const hostHeader = req ? String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim().toLowerCase() : '';
+  const protoHeader = req ? String(req.headers['x-forwarded-proto'] || req.protocol || 'https').split(',')[0].trim().toLowerCase() : 'https';
+  const sameHostOrigins: string[] = [];
+  if (hostHeader) {
+    const cleanHost = hostHeader.replace(/:\d+$/, '');
+    const isTrustedDeploymentHost =
+      cleanHost.endsWith('.run.app') ||
+      cleanHost.endsWith('.vercel.app') ||
+      cleanHost === 'shopitng.vercel.app' ||
+      cleanHost === 'localhost' ||
+      cleanHost === '127.0.0.1' ||
+      ngAllowedHosts.includes(cleanHost);
+    if (isTrustedDeploymentHost) {
+      sameHostOrigins.push(`${protoHeader === 'http' ? 'http' : 'https'}://${hostHeader}`);
+    }
+  }
+
   const defaults = [
     APP_URL,
     PRODUCTION_APP_URL,
+    ...sameHostOrigins,
     ...(process.env.VERCEL_PROJECT_PRODUCTION_URL
       ? [`https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`.replace(/\/$/, '')]
       : []),
@@ -151,7 +181,7 @@ app.use(
 // Strict CORS + CSRF Origin enforcement
 app.use((req, res, next) => {
   const originHeader = req.headers.origin ? String(req.headers.origin).replace(/\/$/, '') : '';
-  const allowedOrigins = getAllowedOrigins();
+  const allowedOrigins = getAllowedOrigins(req);
   const isWebhookPath =
     req.path === '/webhooks/flutterwave' ||
     req.path === '/api/webhooks/flutterwave';
@@ -267,14 +297,29 @@ router.get(['/health', '/api/health'], async (_req, res) => {
   }
 
   const failingServices: string[] = [];
-  if (!isPgOk) failingServices.push('Neon Postgres');
+  if (!isPgOk) failingServices.push('PostgreSQL');
   if (!isRedisOk) failingServices.push('Upstash Redis');
+  const safeDbError = pgPing.error
+    ? String(pgPing.error).replace(/postgres(ql)?:\/\/[^\s]+/gi, '[redacted-url]').slice(0, 180)
+    : undefined;
   return res.status(503).json({
     status: 'ERROR',
     failing: failingServices.join(', '),
     schemaOk: Boolean(pgPing.schemaOk),
+    ...(safeDbError ? { error: safeDbError } : {}),
     timestamp: new Date().toISOString(),
   });
+});
+
+// Public live platform configuration (PostgreSQL source of truth for broadcast banner, killswitches, and fee policy)
+router.get('/platform/config', async (_req, res) => {
+  try {
+    const config = await getAllPlatformConfig();
+    return res.json({ status: true, ...config });
+  } catch (err: any) {
+    console.error('[Platform Config Read Error]:', err.message);
+    return res.status(500).json({ status: false, message: 'Failed to load platform configuration from database.' });
+  }
 });
 
 // ============================================================================
@@ -350,9 +395,20 @@ router.post(['/auth/register', '/auth/signup'], async (req, res) => {
       });
     }
 
+    const userRole = role === 'seller' ? 'seller' : 'buyer';
+    if (userRole === 'seller') {
+      const emergency = await getPlatformSetting('emergency_controls', DEFAULT_EMERGENCY_CONTROLS);
+      if (emergency.pauseSellerSignups) {
+        return res.status(503).json({
+          status: false,
+          error: 'SELLER_SIGNUPS_PAUSED',
+          message: 'New seller registrations are temporarily paused by administration. You can still register as a buyer.',
+        });
+      }
+    }
+
     const userId = `user_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
     const passwordHash = hashPassword(cleanPassword);
-    const userRole = role === 'seller' ? 'seller' : 'buyer';
 
     const txResult = await withTransaction(async client => {
       const existing = await client.query('SELECT id FROM shopit_users WHERE LOWER(email) = LOWER($1)', [cleanEmail]);
@@ -1571,6 +1627,111 @@ router.post('/admin/audit', requireModerator, async (req: AuthenticatedRequest, 
   }
 });
 
+// Persistent Platform Controls: Site-Wide Broadcast, Emergency Killswitches, Fee Policy (PostgreSQL-backed)
+router.put('/admin/broadcast', requireModerator, async (req: AuthenticatedRequest, res) => {
+  try {
+    const user = req.user!;
+    const current = await getPlatformSetting('broadcast', DEFAULT_BROADCAST_SETTING);
+    const body = req.body || {};
+    const validTones = new Set(['info', 'warning', 'emergency', 'promo']);
+    const nextTone = body.tone && validTones.has(String(body.tone)) ? String(body.tone) : current.tone;
+    const nextTitle = body.title !== undefined ? String(body.title).trim().slice(0, 140) : current.title;
+    const nextMessage = body.message !== undefined ? String(body.message).trim().slice(0, 500) : current.message;
+    const nextActive = body.isActive !== undefined ? Boolean(body.isActive) : Boolean(current.isActive);
+
+    const updated = {
+      id: `broad_${Date.now()}`,
+      isActive: nextActive,
+      title: nextTitle || 'Platform Notice',
+      message: nextMessage || '',
+      tone: nextTone as 'info' | 'warning' | 'emergency' | 'promo',
+      createdAt: new Date().toISOString(),
+      author: user.name || user.email || 'Shop It Safety Desk',
+    };
+
+    await setPlatformSetting('broadcast', updated, user.email);
+
+    await logAuditEvent({
+      action: body.isActive !== undefined ? (nextActive ? 'BROADCAST_ACTIVATED' : 'BROADCAST_DEACTIVATED') : 'BROADCAST_UPDATED',
+      actor: { id: user.userId, email: user.email, role: user.role },
+      target: { type: 'platform_setting', id: 'broadcast' },
+      details: { isActive: updated.isActive, tone: updated.tone, title: updated.title },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
+
+    return res.json({ status: true, broadcastAnnouncement: updated, message: 'Broadcast saved in PostgreSQL.' });
+  } catch (err: any) {
+    console.error('[Broadcast Update Error]:', err.message);
+    return res.status(500).json({ status: false, message: 'Failed to save broadcast announcement in database.' });
+  }
+});
+
+router.put('/admin/emergency-controls', requireModerator, async (req: AuthenticatedRequest, res) => {
+  try {
+    const user = req.user!;
+    const current = await getPlatformSetting('emergency_controls', DEFAULT_EMERGENCY_CONTROLS);
+    const body = req.body || {};
+    const updated = {
+      maintenanceMode: body.maintenanceMode !== undefined ? Boolean(body.maintenanceMode) : Boolean(current.maintenanceMode),
+      pauseNewOrders: body.pauseNewOrders !== undefined ? Boolean(body.pauseNewOrders) : Boolean(current.pauseNewOrders),
+      pauseSellerSignups: body.pauseSellerSignups !== undefined ? Boolean(body.pauseSellerSignups) : Boolean(current.pauseSellerSignups),
+    };
+
+    await setPlatformSetting('emergency_controls', updated, user.email);
+
+    await logAuditEvent({
+      action: 'KILLSWITCH_TOGGLED',
+      actor: { id: user.userId, email: user.email, role: user.role },
+      target: { type: 'platform_setting', id: 'emergency_controls' },
+      details: updated,
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
+
+    return res.json({ status: true, emergencyControls: updated, message: 'Emergency killswitches saved in PostgreSQL.' });
+  } catch (err: any) {
+    console.error('[Emergency Controls Error]:', err.message);
+    return res.status(500).json({ status: false, message: 'Failed to update emergency killswitches in database.' });
+  }
+});
+
+router.put('/admin/fee-settings', requireModerator, async (req: AuthenticatedRequest, res) => {
+  try {
+    const user = req.user!;
+    const current = await getPlatformSetting('fee_settings', DEFAULT_FEE_SETTINGS_DB);
+    const body = req.body || {};
+    const parsedLow = body.tierLowFee !== undefined ? Math.max(0, Math.min(50000, Number(body.tierLowFee) || 0)) : current.tierLowFee;
+    const parsedMid = body.tierMidFee !== undefined ? Math.max(0, Math.min(100000, Number(body.tierMidFee) || 0)) : current.tierMidFee;
+    const parsedHigh = body.tierHighPercentage !== undefined ? Math.max(0, Math.min(0.25, Number(body.tierHighPercentage) || 0)) : current.tierHighPercentage;
+    const parsedMinWd = body.minWithdrawal !== undefined ? Math.max(100, Math.min(100000, Number(body.minWithdrawal) || 1000)) : current.minWithdrawal;
+
+    const updated = {
+      firstMonthPromoFree: body.firstMonthPromoFree !== undefined ? Boolean(body.firstMonthPromoFree) : Boolean(current.firstMonthPromoFree),
+      tierLowFee: parsedLow,
+      tierMidFee: parsedMid,
+      tierHighPercentage: parsedHigh,
+      minWithdrawal: parsedMinWd,
+    };
+
+    await setPlatformSetting('fee_settings', updated, user.email);
+
+    await logAuditEvent({
+      action: 'FEE_SETTINGS_UPDATED',
+      actor: { id: user.userId, email: user.email, role: user.role },
+      target: { type: 'platform_setting', id: 'fee_settings' },
+      details: updated,
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
+
+    return res.json({ status: true, feeSettings: updated, message: 'Fee settings saved in PostgreSQL.' });
+  } catch (err: any) {
+    console.error('[Fee Settings Error]:', err.message);
+    return res.status(500).json({ status: false, message: 'Failed to update fee settings in database.' });
+  }
+});
+
 // Allow-listed Website Activity Tracker (Captures visitor & logged-in user browsing, search, cart/wishlist, reviews)
 const ALLOWED_WEBSITE_ACTIVITY_ACTIONS = new Set([
   'PAGE_VIEWED',
@@ -1818,6 +1979,15 @@ router.post('/payments/resolve-account', requireAuth, async (req: AuthenticatedR
 router.post('/payments/initialize', requirePaymentsEnabled, requireAuth, async (req: AuthenticatedRequest, res) => {
   try {
     const user = req.user!;
+    const emergency = await getPlatformSetting('emergency_controls', DEFAULT_EMERGENCY_CONTROLS);
+    if ((emergency.pauseNewOrders || emergency.maintenanceMode) && user.role !== 'admin') {
+      return res.status(503).json({
+        status: false,
+        error: 'ORDERS_PAUSED',
+        message: 'Checkout and new orders are temporarily paused by platform moderation.',
+      });
+    }
+
     const rl = await checkAndRecordRateLimit(`pay_init:${user.userId}`, 20, 5 * 60 * 1000);
     if (!rl.allowed) {
       return res.status(429).json({ status: false, message: 'Too many checkout attempts. Please wait a minute.' });
@@ -1841,6 +2011,7 @@ router.post('/payments/initialize', requirePaymentsEnabled, requireAuth, async (
 
     // Lazily expire stale 60-minute pending orders & restore reserved stock before inventory checks
     await runLazyPendingOrderExpiry();
+    const feePolicy = await getPlatformSetting('fee_settings', DEFAULT_FEE_SETTINGS_DB);
 
     const initializedOrder = await withTransaction(async client => {
       const resolvedItems: any[] = [];
@@ -1892,7 +2063,7 @@ router.post('/payments/initialize', requirePaymentsEnabled, requireAuth, async (
           throw Object.assign(new Error(`Invalid server price on "${p.title}".`), { statusCode: 400 });
         }
 
-        const itemServiceFeeKobo = calculateTieredServiceFeeKobo(sellerPriceKobo);
+        const itemServiceFeeKobo = calculateConfiguredServiceFeeKobo(sellerPriceKobo, feePolicy);
         subtotalKobo += sellerPriceKobo * qty;
         serviceFeeKobo += itemServiceFeeKobo * qty;
 

@@ -347,6 +347,7 @@ export interface FeeSettings {
   tierMidFee: number; // ₦2,000 - ₦10,000 -> ₦500
   tierHighPercentage: number; // Above ₦10,000 -> 5%
   firstMonthPromoFree: boolean;
+  minWithdrawal?: number;
   withdrawalFeeRule: {
     freeThreshold: number; // e.g. Free above ₦5,000, ₦50 below
     flatFeeBelowThreshold: number;

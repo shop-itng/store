@@ -225,6 +225,281 @@ async function runTests() {
     assert.ok(Array.isArray(activityData.events) && activityData.events.length >= 4, 'Expected audit activity events for registration, upgrade, and product actions');
     console.log('   ✓ Admin panel users & activity endpoints show full user + action audit trail');
 
+    // 4. Platform Config, Broadcast, Emergency Killswitches, Fee Policy, Wallet Freeze & Dispute Resolution
+    const cfgInitRes = await fetch(`${baseUrl}/api/platform/config`);
+    const cfgInitData: any = await cfgInitRes.json();
+    assert.strictEqual(cfgInitRes.status, 200);
+    assert.strictEqual(cfgInitData.status, true);
+    assert.strictEqual(cfgInitData.emergencyControls.maintenanceMode, false);
+
+    // Non-admin must receive 403 on PUT /api/admin/broadcast
+    const unauthBroadRes = await fetch(`${baseUrl}/api/admin/broadcast`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${userToken}`,
+      },
+      body: JSON.stringify({ isActive: true, title: 'Hacked', message: 'Nope', tone: 'warning' }),
+    });
+    assert.strictEqual(unauthBroadRes.status, 403);
+
+    // Admin sets live broadcast in PostgreSQL
+    const adminBroadRes = await fetch(`${baseUrl}/api/admin/broadcast`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${adminToken}`,
+      },
+      body: JSON.stringify({
+        isActive: true,
+        title: 'Campus Safety Notice',
+        message: 'Deliveries close at 6 PM today.',
+        tone: 'warning',
+      }),
+    });
+    const adminBroadData: any = await adminBroadRes.json();
+    assert.strictEqual(adminBroadRes.status, 200);
+    assert.strictEqual(adminBroadData.broadcastAnnouncement.isActive, true);
+
+    const cfgAfterBroadRes = await fetch(`${baseUrl}/api/platform/config`);
+    const cfgAfterBroadData: any = await cfgAfterBroadRes.json();
+    assert.strictEqual(cfgAfterBroadData.broadcastAnnouncement.isActive, true);
+    assert.strictEqual(cfgAfterBroadData.broadcastAnnouncement.title, 'Campus Safety Notice');
+    console.log('   ✓ Live Broadcast saved to PostgreSQL & served via GET /api/platform/config');
+
+    // Admin enables pauseSellerSignups & pauseNewOrders killswitches
+    const ksRes = await fetch(`${baseUrl}/api/admin/emergency-controls`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${adminToken}`,
+      },
+      body: JSON.stringify({ pauseSellerSignups: true, pauseNewOrders: true, maintenanceMode: false }),
+    });
+    assert.strictEqual(ksRes.status, 200);
+
+    // Server-side enforcement: seller signup blocked (503 SELLER_SIGNUPS_PAUSED), buyer signup still allowed
+    const pausedSellerEmail = `paused_seller_${ts}@test.edu.ng`;
+    const pausedSellerProof = await issueSignupVerificationToken(pausedSellerEmail);
+    const blockedSellerRegRes = await fetch(`${baseUrl}/api/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: pausedSellerEmail,
+        password: 'SellerPass123!',
+        name: 'Paused Seller',
+        role: 'seller',
+        age: 21,
+        shopName: 'Blocked Shop',
+        campus: 'UNILAG (Akoka)',
+        signupVerificationToken: pausedSellerProof,
+      }),
+    });
+    const blockedSellerRegData: any = await blockedSellerRegRes.json();
+    assert.strictEqual(blockedSellerRegRes.status, 503);
+    assert.strictEqual(blockedSellerRegData.error, 'SELLER_SIGNUPS_PAUSED');
+
+    // Server-side enforcement: buyer-to-seller upgrade also blocked when pauseSellerSignups=true
+    const buyerEmail2 = `buyer_ks_${ts}@test.edu.ng`;
+    const buyerProof2 = await issueSignupVerificationToken(buyerEmail2);
+    const buyerReg2Res = await fetch(`${baseUrl}/api/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: buyerEmail2,
+        password: 'BuyerPass123!',
+        name: 'Allowed Buyer',
+        role: 'buyer',
+        age: 20,
+        signupVerificationToken: buyerProof2,
+      }),
+    });
+    assert.strictEqual(buyerReg2Res.status, 201);
+    const buyer2Token = ((await buyerReg2Res.json()) as any).sessionToken;
+
+    const blockedUpgradeRes = await fetch(`${baseUrl}/api/sellers/upgrade`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${buyer2Token}`,
+      },
+      body: JSON.stringify({ shopName: 'Blocked Upgrade Shop', campus: 'UNILAG (Akoka)' }),
+    });
+    assert.strictEqual(blockedUpgradeRes.status, 503);
+
+    // Server-side enforcement: new order & checkout initialization blocked when pauseNewOrders=true
+    const prevPaymentsEnabled = process.env.PAYMENTS_ENABLED;
+    process.env.PAYMENTS_ENABLED = 'true';
+    try {
+      const blockedOrderRes = await fetch(`${baseUrl}/api/orders`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${buyer2Token}`,
+        },
+        body: JSON.stringify({
+          items: [{ productId: 'prod_dummy', title: 'Test', price: 1000, sellerPrice: 800, serviceFee: 200, quantity: 1, sellerId: userId, sellerShopName: 'Temi Crochet Studio' }],
+          grandTotal: 1000,
+        }),
+      });
+      const blockedOrderData: any = await blockedOrderRes.json();
+      assert.strictEqual(blockedOrderRes.status, 503);
+      assert.strictEqual(blockedOrderData.error, 'ORDERS_PAUSED');
+
+      const blockedPayInitRes = await fetch(`${baseUrl}/api/payments/initialize`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${buyer2Token}`,
+        },
+        body: JSON.stringify({
+          items: [{ productId: 'prod_dummy', quantity: 1 }],
+        }),
+      });
+      const blockedPayInitData: any = await blockedPayInitRes.json();
+      assert.strictEqual(blockedPayInitRes.status, 503);
+      assert.strictEqual(blockedPayInitData.error, 'ORDERS_PAUSED');
+    } finally {
+      if (prevPaymentsEnabled === undefined) delete process.env.PAYMENTS_ENABLED;
+      else process.env.PAYMENTS_ENABLED = prevPaymentsEnabled;
+    }
+    console.log('   ✓ Emergency Killswitches enforced server-side (503 SELLER_SIGNUPS_PAUSED & ORDERS_PAUSED)');
+
+    // Reset emergency controls back to false
+    const ksResetRes = await fetch(`${baseUrl}/api/admin/emergency-controls`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${adminToken}`,
+      },
+      body: JSON.stringify({ pauseSellerSignups: false, pauseNewOrders: false, maintenanceMode: false }),
+    });
+    assert.strictEqual(ksResetRes.status, 200);
+
+    // Fee settings persisted in PostgreSQL & honored on product creation
+    const feeRes = await fetch(`${baseUrl}/api/admin/fee-settings`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${adminToken}`,
+      },
+      body: JSON.stringify({ firstMonthPromoFree: true }),
+    });
+    assert.strictEqual(feeRes.status, 200);
+
+    const promoProdRes = await fetch(`${baseUrl}/api/products`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${userToken}`,
+      },
+      body: JSON.stringify({
+        title: 'Promo Ceramic Mug',
+        description: 'Zero-fee promo mug',
+        category: 'home',
+        sellerPrice: 4000,
+        stock: 5,
+        images: ['/shopit-logo.png'],
+      }),
+    });
+    const promoProdData: any = await promoProdRes.json();
+    assert.strictEqual(promoProdRes.status, 201);
+    const getPromoProdRes = await fetch(`${baseUrl}/api/products/${encodeURIComponent(promoProdData.productId)}`);
+    const getPromoProdData: any = await getPromoProdRes.json();
+    assert.strictEqual(getPromoProdData.product.serviceFee, 0);
+    assert.strictEqual(getPromoProdData.product.displayPrice, 4000);
+
+    // Reset promo fee setting
+    await fetch(`${baseUrl}/api/admin/fee-settings`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${adminToken}`,
+      },
+      body: JSON.stringify({ firstMonthPromoFree: false }),
+    });
+    console.log('   ✓ Fee policy persisted in PostgreSQL & applied dynamically during product creation');
+
+    // Wallet freeze persistence
+    const freezeRes = await fetch(`${baseUrl}/api/admin/wallets/${encodeURIComponent(userId)}/freeze`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${adminToken}`,
+      },
+      body: JSON.stringify({ isFrozen: true, reason: 'Verification freeze test' }),
+    });
+    assert.strictEqual(freezeRes.status, 200);
+
+    const { query: dbQuery } = await import('../api/db/postgres.js');
+    const walletRow = await dbQuery('SELECT is_frozen, freeze_reason FROM shopit_wallets WHERE seller_id = $1', [userId]);
+    assert.strictEqual(walletRow.rows[0].is_frozen, true);
+    assert.strictEqual(walletRow.rows[0].freeze_reason, 'Verification freeze test');
+
+    // Transactional dispute resolution
+    const orderIdDisp = `ORD-DISP-${ts}`;
+    await dbQuery(
+      `INSERT INTO shopit_orders (
+        id, buyer_id, buyer_name, buyer_email, items,
+        subtotal, service_fee_total, delivery_total, discount_total, grand_total,
+        subtotal_kobo, service_fee_kobo, delivery_fee_kobo, discount_total_kobo, grand_total_kobo,
+        payment_method, payment_reference, status, stock_reserved, paid_at, created_at, updated_at
+      ) VALUES (
+        $1, $2, 'Temi Buyer', $3, $4::jsonb,
+        4000, 500, 0, 0, 4500,
+        400000, 50000, 0, 0, 450000,
+        'flutterwave_card', $5, 'paid', true, NOW(), NOW(), NOW()
+      )`,
+      [
+        orderIdDisp,
+        userId,
+        buyerEmail,
+        JSON.stringify([{ productId: promoProdData.productId, title: 'Promo Ceramic Mug', price: 4500, sellerPrice: 4000, serviceFee: 500, quantity: 1, sellerId: userId, sellerShopName: 'Temi Crochet Studio' }]),
+        `REF-DISP-${ts}`,
+      ]
+    );
+    await dbQuery(
+      `UPDATE shopit_wallets SET pending_balance = 4000, pending_balance_kobo = 400000 WHERE seller_id = $1`,
+      [userId]
+    );
+    const dispOpenRes = await fetch(`${baseUrl}/api/disputes`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${userToken}`,
+      },
+      body: JSON.stringify({ orderId: orderIdDisp, reason: 'Item not delivered', description: 'Verification dispute test' }),
+    });
+    const dispOpenData: any = await dispOpenRes.json();
+    assert.strictEqual(dispOpenRes.status, 201);
+
+    const dispResolveRes = await fetch(`${baseUrl}/api/disputes/${encodeURIComponent(dispOpenData.disputeId)}/resolve`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${adminToken}`,
+      },
+      body: JSON.stringify({ resolution: 'release_seller', notes: 'Verified delivery proof' }),
+    });
+    const dispResolveData: any = await dispResolveRes.json();
+    assert.strictEqual(dispResolveRes.status, 200);
+    assert.strictEqual(dispResolveData.disputeStatus, 'resolved_released');
+    assert.strictEqual(dispResolveData.orderStatus, 'completed');
+
+    const walletAfterDisp = await dbQuery('SELECT available_balance_kobo FROM shopit_wallets WHERE seller_id = $1', [userId]);
+    assert.ok(parseInt(walletAfterDisp.rows[0].available_balance_kobo, 10) >= 450000);
+    console.log('   ✓ Wallet freeze & atomic escrow dispute resolution persisted in PostgreSQL');
+
+    // Deactivate test broadcast so state stays clean
+    await fetch(`${baseUrl}/api/admin/broadcast`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${adminToken}`,
+      },
+      body: JSON.stringify({ isActive: false, title: '', message: '' }),
+    });
+
     console.log('\n=== VERIFY DB & FLOWS PASSED (100%) ===');
   } finally {
     server.close();

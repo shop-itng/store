@@ -44,6 +44,28 @@ export function calculatePricingInKobo(sellerPriceKobo: number) {
   };
 }
 
+export function calculateConfiguredServiceFeeKobo(
+  sellerPriceKobo: number,
+  feeSettings?: {
+    firstMonthPromoFree?: boolean;
+    tierLowFee?: number;
+    tierMidFee?: number;
+    tierHighPercentage?: number;
+  }
+): number {
+  const safeKobo = Math.max(0, Math.round(Number(sellerPriceKobo) || 0));
+  if (feeSettings?.firstMonthPromoFree) {
+    return 0;
+  }
+  const lowKobo = feeSettings?.tierLowFee !== undefined ? Math.max(0, nairaToKobo(feeSettings.tierLowFee)) : 20000;
+  const midKobo = feeSettings?.tierMidFee !== undefined ? Math.max(0, nairaToKobo(feeSettings.tierMidFee)) : 50000;
+  const highPct = feeSettings?.tierHighPercentage !== undefined ? Math.max(0, Math.min(0.25, Number(feeSettings.tierHighPercentage))) : 0.05;
+
+  if (safeKobo < 200000) return lowKobo;
+  if (safeKobo <= 1000000) return midKobo;
+  return Math.round((safeKobo * highPct) / 5000) * 5000;
+}
+
 // ============================================================================
 // AES-256-GCM Encryption for Sensitive Identity Documents (NDPA 2023)
 // Derived strictly via HKDF from APP_SECRET with label 'doc-encryption'

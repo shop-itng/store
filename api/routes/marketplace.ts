@@ -1,17 +1,24 @@
 import express, { Response } from 'express';
 import crypto from 'crypto';
-import { query as dbQuery, withTransaction } from '../db/postgres.js';
+import {
+  query as dbQuery,
+  withTransaction,
+  getPlatformSetting,
+  DEFAULT_EMERGENCY_CONTROLS,
+  DEFAULT_FEE_SETTINGS_DB,
+} from '../db/postgres.js';
 import { verifyAndConsumeOtp } from '../db/otpStore.js';
 import {
   requireAuth,
   requireAdmin,
+  requireModerator,
   AuthenticatedRequest,
 } from '../auth/middleware.js';
 import { logAuditEvent } from '../auth/sessionStore.js';
 import {
   nairaToKobo,
   koboToNaira,
-  calculatePricingInKobo,
+  calculateConfiguredServiceFeeKobo,
   processUnshippedOrders,
   runLazyPendingOrderExpiry,
 } from '../lib/payments.js';
@@ -286,7 +293,17 @@ router.post('/products', requireAuth, async (req: AuthenticatedRequest, res: Res
     }
 
     const sellerPriceKobo = nairaToKobo(rawSellerPriceNaira);
-    const pricing = calculatePricingInKobo(sellerPriceKobo);
+    const feePolicy = await getPlatformSetting('fee_settings', DEFAULT_FEE_SETTINGS_DB);
+    const serviceFeeKobo = calculateConfiguredServiceFeeKobo(sellerPriceKobo, feePolicy);
+    const displayPriceKobo = sellerPriceKobo + serviceFeeKobo;
+    const pricing = {
+      sellerPriceKobo,
+      serviceFeeKobo,
+      displayPriceKobo,
+      sellerPriceNaira: koboToNaira(sellerPriceKobo),
+      serviceFeeNaira: koboToNaira(serviceFeeKobo),
+      displayPriceNaira: koboToNaira(displayPriceKobo),
+    };
 
     // Derive sellerId strictly from session (only admin can override on behalf of another seller)
     const sellerId =
@@ -425,10 +442,12 @@ router.put('/products/:id', requireAuth, async (req: AuthenticatedRequest, res: 
       if (isNaN(parsedPrice) || parsedPrice < 100) {
         return res.status(400).json({ status: false, message: 'Minimum seller price is ₦100.' });
       }
-      const p = calculatePricingInKobo(nairaToKobo(parsedPrice));
-      sellerPrice = p.sellerPriceNaira;
-      serviceFee = p.serviceFeeNaira;
-      displayPrice = p.displayPriceNaira;
+      const feePolicy = await getPlatformSetting('fee_settings', DEFAULT_FEE_SETTINGS_DB);
+      const spKobo = nairaToKobo(parsedPrice);
+      const sfKobo = calculateConfiguredServiceFeeKobo(spKobo, feePolicy);
+      sellerPrice = koboToNaira(spKobo);
+      serviceFee = koboToNaira(sfKobo);
+      displayPrice = koboToNaira(spKobo + sfKobo);
     }
 
     let title = row.title;
@@ -646,6 +665,14 @@ router.put('/sellers/:id', requireAuth, async (req: AuthenticatedRequest, res: R
 // POST /api/sellers/upgrade - Authenticated buyer creates a shop profile and upgrades to seller
 router.post('/sellers/upgrade', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const emergency = await getPlatformSetting('emergency_controls', DEFAULT_EMERGENCY_CONTROLS);
+    if (emergency.pauseSellerSignups) {
+      return res.status(503).json({
+        status: false,
+        error: 'SELLER_SIGNUPS_PAUSED',
+        message: 'New seller registrations are temporarily paused by administration.',
+      });
+    }
     const authUser = req.user!;
     const { shopName, bio, campus, location, locationArea, under18, guardianName, guardianPhone } = req.body || {};
 
@@ -952,6 +979,14 @@ router.get('/orders', requireAuth, async (req: AuthenticatedRequest, res: Respon
 
 // POST /api/orders - C3 Security: Direct client-side paid order creation is permanently disabled
 router.post('/orders', requirePaymentsEnabled, requireAuth, async (_req: AuthenticatedRequest, res: Response) => {
+  const emergency = await getPlatformSetting('emergency_controls', DEFAULT_EMERGENCY_CONTROLS);
+  if (emergency.pauseNewOrders || emergency.maintenanceMode) {
+    return res.status(503).json({
+      status: false,
+      error: 'ORDERS_PAUSED',
+      message: 'New orders are temporarily paused by platform moderation.',
+    });
+  }
   return res.status(403).json({
     status: false,
     error: 'DIRECT_ORDER_CREATION_DISABLED',
@@ -1936,6 +1971,219 @@ router.post('/disputes', requireAuth, async (req: AuthenticatedRequest, res: Res
     });
 
     return res.status(201).json({ status: true, disputeId, message: 'Dispute opened. Funds held securely in escrow.' });
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: err.message });
+  }
+});
+
+// PATCH /api/disputes/:id/resolve - Moderator dispute resolution (atomic escrow settlement in PostgreSQL)
+router.patch('/disputes/:id/resolve', requireModerator, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const user = req.user!;
+    const { id } = req.params;
+    const { resolution, partialRefundAmount, notes } = req.body || {};
+    if (!['refund_full', 'release_seller', 'partial'].includes(String(resolution))) {
+      return res.status(400).json({ status: false, message: 'resolution must be refund_full, release_seller, or partial.' });
+    }
+
+    const txResult = await withTransaction(async client => {
+      const dispRes = await client.query('SELECT * FROM shopit_disputes WHERE id = $1 FOR UPDATE', [id]);
+      if (dispRes.rows.length === 0) {
+        return { code: 404, body: { status: false, message: 'Dispute not found.' } };
+      }
+      const disp = dispRes.rows[0];
+      if (disp.status !== 'open' && disp.status !== 'investigating') {
+        return { code: 409, body: { status: false, message: `Dispute is already ${disp.status}.` } };
+      }
+
+      const escrowKobo = Math.max(0, nairaToKobo(disp.amount_held_in_escrow || 0));
+      let refundKobo = 0;
+      let sellerKobo = 0;
+      let nextDisputeStatus = 'resolved_released';
+      let nextOrderStatus = 'completed';
+
+      if (resolution === 'refund_full') {
+        refundKobo = escrowKobo;
+        sellerKobo = 0;
+        nextDisputeStatus = 'resolved_refunded';
+        nextOrderStatus = 'cancelled';
+      } else if (resolution === 'release_seller') {
+        refundKobo = 0;
+        sellerKobo = escrowKobo;
+        nextDisputeStatus = 'resolved_released';
+        nextOrderStatus = 'completed';
+      } else {
+        const reqRefundKobo = partialRefundAmount !== undefined ? nairaToKobo(partialRefundAmount) : Math.round(escrowKobo / 2);
+        refundKobo = Math.max(0, Math.min(escrowKobo, reqRefundKobo));
+        sellerKobo = Math.max(0, escrowKobo - refundKobo);
+        nextDisputeStatus = 'resolved_partial';
+        nextOrderStatus = 'completed';
+      }
+
+      const cleanNotes = notes ? String(notes).trim().slice(0, 500) : `Resolved by ${user.email} (${resolution})`;
+      await client.query(
+        'UPDATE shopit_disputes SET status = $1, resolution_notes = $2, updated_at = NOW() WHERE id = $3',
+        [nextDisputeStatus, cleanNotes, id]
+      );
+
+      if (disp.order_id) {
+        const ordRes = await client.query('SELECT status FROM shopit_orders WHERE id = $1 FOR UPDATE', [disp.order_id]);
+        if (ordRes.rows.length > 0) {
+          const prevStatus = ordRes.rows[0].status;
+          await client.query(
+            `UPDATE shopit_orders
+             SET status = $1,
+                 completed_at = CASE WHEN $1 = 'completed' THEN NOW() ELSE completed_at END,
+                 updated_at = NOW()
+             WHERE id = $2`,
+            [nextOrderStatus, disp.order_id]
+          );
+          await client.query(
+            `INSERT INTO shopit_order_status_history (id, order_id, previous_status, new_status, changed_by, notes, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
+            [
+              `osh_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
+              disp.order_id,
+              prevStatus,
+              nextOrderStatus,
+              user.userId,
+              cleanNotes,
+            ]
+          );
+        }
+      }
+
+      if (disp.seller_id) {
+        const wRes = await client.query(
+          'SELECT pending_balance_kobo, available_balance_kobo FROM shopit_wallets WHERE seller_id = $1 FOR UPDATE',
+          [disp.seller_id]
+        );
+        if (wRes.rows.length > 0) {
+          const curPending = parseInt(wRes.rows[0].pending_balance_kobo || '0', 10);
+          const curAvailable = parseInt(wRes.rows[0].available_balance_kobo || '0', 10);
+          const nextPending = Math.max(0, curPending - escrowKobo);
+          const nextAvailable = curAvailable + sellerKobo;
+
+          const idempKey = `dispute_resolve:${id}:${disp.seller_id}`;
+          const ledgerType = resolution === 'refund_full' ? 'refund' : 'escrow_release';
+          const ledgerAmtKobo = resolution === 'refund_full' ? refundKobo : sellerKobo;
+          const insRes = await client.query(
+            `INSERT INTO shopit_ledger_entries (
+              id, wallet_id, order_id, type, amount, fee, balance_after, balance_type, status,
+              amount_kobo, fee_kobo, balance_after_kobo, description, reference, idempotency_key, created_at
+            ) VALUES ($1, $2, $3, $4, $5, 0, $6, $7, 'completed', $8, 0, $9, $10, $11, $12, NOW())
+            ON CONFLICT (idempotency_key) DO NOTHING
+            RETURNING id`,
+            [
+              `DISP-LED-${Date.now()}-${crypto.randomBytes(2).toString('hex')}`,
+              disp.seller_id,
+              disp.order_id,
+              ledgerType,
+              koboToNaira(ledgerAmtKobo),
+              koboToNaira(nextAvailable),
+              resolution === 'refund_full' ? 'pending' : 'available',
+              ledgerAmtKobo,
+              nextAvailable,
+              `Dispute #${id} resolved (${resolution}): ${cleanNotes}`,
+              disp.order_id,
+              idempKey,
+            ]
+          );
+
+          if (insRes.rows.length > 0) {
+            await client.query(
+              `UPDATE shopit_wallets
+               SET pending_balance_kobo = $1, available_balance_kobo = $2,
+                   pending_balance = $3, available_balance = $4, updated_at = NOW()
+               WHERE seller_id = $5`,
+              [nextPending, nextAvailable, koboToNaira(nextPending), koboToNaira(nextAvailable), disp.seller_id]
+            );
+          }
+        }
+      }
+
+      return {
+        code: 200,
+        body: {
+          status: true,
+          disputeId: id,
+          disputeStatus: nextDisputeStatus,
+          orderStatus: nextOrderStatus,
+          refundNaira: koboToNaira(refundKobo),
+          sellerNaira: koboToNaira(sellerKobo),
+          resolutionNotes: cleanNotes,
+          message: `Dispute ${id} resolved (${resolution}) and saved to database.`,
+        },
+        audit: { disputeId: id, orderId: disp.order_id, resolution, refundKobo, sellerKobo },
+      };
+    });
+
+    if (txResult.code === 200 && (txResult as any).audit) {
+      await logAuditEvent({
+        action: 'DISPUTE_RESOLVED',
+        actor: { id: user.userId, email: user.email, role: user.role },
+        target: { type: 'dispute', id },
+        details: (txResult as any).audit,
+        ip: req.ip,
+        userAgent: req.get('user-agent'),
+      });
+    }
+
+    return res.status(txResult.code).json(txResult.body);
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: err.message });
+  }
+});
+
+// PATCH /api/admin/wallets/:sellerId/freeze - Persist seller wallet freeze/unfreeze in PostgreSQL
+router.patch('/admin/wallets/:sellerId/freeze', requireModerator, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const user = req.user!;
+    const { sellerId } = req.params;
+    const isFrozen = Boolean(req.body?.isFrozen);
+    const reason = req.body?.reason ? String(req.body.reason).trim().slice(0, 300) : null;
+
+    await dbQuery(
+      `INSERT INTO shopit_wallets (seller_id, pending_balance, available_balance, total_withdrawn, is_frozen, freeze_reason, pending_balance_kobo, available_balance_kobo, total_withdrawn_kobo, created_at, updated_at)
+       VALUES ($1, 0, 0, 0, $2, $3, 0, 0, 0, NOW(), NOW())
+       ON CONFLICT (seller_id) DO UPDATE SET is_frozen = $2, freeze_reason = $3, updated_at = NOW()`,
+      [sellerId, isFrozen, isFrozen ? (reason || 'Admin Security Review') : null]
+    );
+
+    await logAuditEvent({
+      action: 'WALLET_FREEZE_UPDATED',
+      actor: { id: user.userId, email: user.email, role: user.role },
+      target: { type: 'wallet', id: sellerId },
+      details: { isFrozen, reason },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
+
+    return res.json({ status: true, sellerId, isFrozen, message: isFrozen ? 'Wallet frozen in database.' : 'Wallet unfrozen in database.' });
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: err.message });
+  }
+});
+
+// PATCH /api/admin/chat/conversations/:id/lock - Persist conversation lock state in PostgreSQL
+router.patch('/admin/chat/conversations/:id/lock', requireModerator, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const user = req.user!;
+    const { id } = req.params;
+    const locked = req.body?.isChatLocked !== undefined ? Boolean(req.body.isChatLocked) : true;
+    const upd = await dbQuery(
+      'UPDATE shopit_chat_conversations SET is_chat_locked = $1 WHERE id = $2 RETURNING id',
+      [locked, id]
+    );
+    await logAuditEvent({
+      action: 'CHAT_LOCK_UPDATED',
+      actor: { id: user.userId, email: user.email, role: user.role },
+      target: { type: 'conversation', id },
+      details: { isChatLocked: locked, matchedRows: upd.rows.length },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
+    return res.json({ status: true, conversationId: id, isChatLocked: locked });
   } catch (err: any) {
     return res.status(500).json({ status: false, message: err.message });
   }
