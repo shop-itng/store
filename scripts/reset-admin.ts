@@ -2,7 +2,9 @@ import dotenv from 'dotenv';
 import { getPool, hashPassword } from '../api/db/postgres.js';
 import { clearLoginFailures } from '../api/auth/sessionStore.js';
 
-dotenv.config({ override: true });
+if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL && !process.env.CI) {
+  dotenv.config({ override: false });
+}
 
 async function resetAdmin() {
   const args = process.argv.slice(2);

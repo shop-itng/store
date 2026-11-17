@@ -1,4 +1,3 @@
-import 'dotenv/config';
 import express from 'express';
 import crypto from 'crypto';
 import cookieParser from 'cookie-parser';
@@ -306,6 +305,7 @@ router.get(['/health', '/api/health'], async (_req, res) => {
     status: 'ERROR',
     failing: failingServices.join(', '),
     schemaOk: Boolean(pgPing.schemaOk),
+    ...(pgPing.missingTables && pgPing.missingTables.length > 0 ? { missingTables: pgPing.missingTables } : {}),
     ...(safeDbError ? { error: safeDbError } : {}),
     timestamp: new Date().toISOString(),
   });

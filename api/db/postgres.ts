@@ -1,6 +1,10 @@
-import 'dotenv/config';
+import dotenv from 'dotenv';
 import pg from 'pg';
 import crypto from 'crypto';
+
+if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
+  dotenv.config({ override: false });
+}
 
 // The exact pooled connection variable name added by Vercel for Neon PostgreSQL
 export const DATABASE_URL_ENV_NAME = 'DATABASE_URL';
@@ -45,16 +49,51 @@ export function verifyPassword(password: string, storedHash: string): boolean {
   }
 }
 
-const CORE_SCHEMA_TABLES = [
+export const CORE_SCHEMA_TABLES = [
   'shopit_users',
   'shopit_sellers',
+  'shopit_verifications',
+  'shopit_products',
+  'shopit_orders',
+  'shopit_payments',
+  'shopit_wallets',
+  'shopit_ledger_entries',
+  'shopit_disputes',
+  'shopit_reports',
+  'shopit_chat_conversations',
+  'shopit_chat_messages',
+  'shopit_audit_logs',
+  'shopit_order_status_history',
+  'shopit_carts',
+  'shopit_wishlists',
+  'shopit_notifications',
+  'shopit_commissions',
   'shopit_otps',
+  'shopit_rate_limits',
   'shopit_sessions',
   'shopit_verified_signups',
-  'shopit_audit_logs',
-  'shopit_rate_limits',
+  'shopit_coupons',
+  'shopit_payouts',
+  'shopit_verification_documents',
+  'shopit_admin_alerts',
   'shopit_platform_settings',
 ] as const;
+
+export function getDatabaseUrlSource(): string | null {
+  const candidates = [
+    'DATABASE_URL',
+    'POSTGRES_URL',
+    'POSTGRES_PRISMA_URL',
+    'POSTGRES_URL_NON_POOLING',
+    'NEON_DATABASE_URL',
+    'DATABASE_URL_UNPOOLED',
+  ] as const;
+  for (const key of candidates) {
+    const val = (process.env[key] || '').trim().replace(/^["']|["']$/g, '');
+    if (val) return key;
+  }
+  return null;
+}
 
 export function getDatabaseUrl(): string {
   return (
@@ -63,6 +102,7 @@ export function getDatabaseUrl(): string {
     process.env.POSTGRES_PRISMA_URL ||
     process.env.POSTGRES_URL_NON_POOLING ||
     process.env.NEON_DATABASE_URL ||
+    process.env.DATABASE_URL_UNPOOLED ||
     ''
   )
     .trim()
@@ -76,7 +116,13 @@ export function getDatabaseUrl(): string {
  */
 export function buildPgPoolConfig(dbUrl: string): pg.PoolConfig {
   const parsed = new URL(dbUrl);
+  if (parsed.protocol !== 'postgres:' && parsed.protocol !== 'postgresql:') {
+    throw new Error(`Invalid PostgreSQL URL protocol: "${parsed.protocol}" (expected postgres:// or postgresql://).`);
+  }
   const host = parsed.hostname;
+  if (!host) {
+    throw new Error('Invalid PostgreSQL URL: missing hostname.');
+  }
   const port = parsed.port ? parseInt(parsed.port, 10) : 5432;
   const user = parsed.username ? decodeURIComponent(parsed.username) : undefined;
   const password = parsed.password ? decodeURIComponent(parsed.password) : undefined;
@@ -232,13 +278,26 @@ export async function verifyDatabaseSchema(): Promise<{ ok: boolean; missingTabl
   }
 }
 
-export async function pingPostgres(): Promise<{ ok: boolean; provider: string; isPgMem?: boolean; schemaOk?: boolean; error?: string }> {
+export async function pingPostgres(): Promise<{
+  ok: boolean;
+  provider: string;
+  isPgMem?: boolean;
+  schemaOk?: boolean;
+  missingTables?: string[];
+  error?: string;
+}> {
   try {
     const pool = await getPool();
     const res = await pool.query('SELECT 1 AS alive');
     const isAlive = res?.rows?.[0]?.alive === 1;
     if (!isAlive) {
-      return { ok: false, isPgMem, schemaOk: false, provider: isPgMem ? 'pg-mem (local dev)' : 'Neon PostgreSQL (DATABASE_URL)', error: 'SELECT 1 check failed' };
+      return {
+        ok: false,
+        isPgMem,
+        schemaOk: false,
+        provider: isPgMem ? 'pg-mem (local dev)' : `PostgreSQL (${getDatabaseUrlSource() || 'DATABASE_URL'})`,
+        error: 'SELECT 1 check failed',
+      };
     }
     if (!migrationCompleted) {
       await runMigration();
@@ -247,12 +306,19 @@ export async function pingPostgres(): Promise<{ ok: boolean; provider: string; i
     return {
       ok: schemaCheck.ok,
       schemaOk: schemaCheck.ok,
+      ...(schemaCheck.ok ? {} : { missingTables: schemaCheck.missingTables }),
       isPgMem,
-      provider: isPgMem ? 'pg-mem (local dev)' : 'Neon PostgreSQL (DATABASE_URL)',
+      provider: isPgMem ? 'pg-mem (local dev)' : `PostgreSQL (${getDatabaseUrlSource() || 'DATABASE_URL'})`,
       ...(schemaCheck.ok ? {} : { error: `Missing core tables: ${schemaCheck.missingTables.join(', ')}` }),
     };
   } catch (err: any) {
-    return { ok: false, schemaOk: false, isPgMem, provider: 'Neon PostgreSQL', error: err.message };
+    return {
+      ok: false,
+      schemaOk: false,
+      isPgMem,
+      provider: isPgMem ? 'pg-mem (local dev)' : `PostgreSQL (${getDatabaseUrlSource() || 'DATABASE_URL'})`,
+      error: err.message,
+    };
   }
 }
 
@@ -927,7 +993,6 @@ export async function runMigration(): Promise<void> {
     'ALTER TABLE shopit_wallets ADD COLUMN IF NOT EXISTS active_payout_account_id VARCHAR(64);',
     'ALTER TABLE shopit_wallets ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();',
     'ALTER TABLE shopit_wallets ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();',
-    'ALTER TABLE shopit_wallets DROP CONSTRAINT IF EXISTS chk_shopit_wallet_non_negative;',
     'ALTER TABLE shopit_wallets ADD CONSTRAINT chk_shopit_wallet_non_negative CHECK (pending_balance_kobo >= 0 AND available_balance_kobo >= 0 AND total_withdrawn_kobo >= 0);',
 
     // 7. shopit_payments
@@ -1006,9 +1071,16 @@ export async function runMigration(): Promise<void> {
     'ALTER TABLE shopit_commissions ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();',
   ];
 
+  const stripLeadingComments = (sql: string): string =>
+    sql
+      .split('\n')
+      .map(line => line.replace(/^\s*--.*$/, ''))
+      .join('\n')
+      .trim();
+
   const allStatements = migrationSql
     .split(';')
-    .map(s => s.trim())
+    .map(stripLeadingComments)
     .filter(s => s.length > 0);
 
   // Separate table DDL, column healing ALTERs, and index DDL so indexes on newer columns never fail silently
@@ -1019,16 +1091,16 @@ export async function runMigration(): Promise<void> {
   );
 
   const alterOnlyStatements = alterStatements
-    .map(s => s.trim())
+    .map(stripLeadingComments)
     .filter(s => s.length > 0 && !/^CREATE\s+(UNIQUE\s+)?INDEX/i.test(s));
   const alterIndexStatements = alterStatements
-    .map(s => s.trim())
+    .map(stripLeadingComments)
     .filter(s => /^CREATE\s+(UNIQUE\s+)?INDEX/i.test(s));
 
   const isBenignDdlError = (stmt: string, err: any): boolean => {
     const msg = String(err?.message || '').toLowerCase();
     const code = String(err?.code || '');
-    // Ignore already-exists errors
+    // Ignore already-exists errors (42P07 duplicate_table, 42710 duplicate_object, 42701 duplicate_column)
     if (code === '42P07' || code === '42710' || code === '42701' || msg.includes('already exists')) {
       return true;
     }
@@ -1071,20 +1143,23 @@ export async function runMigration(): Promise<void> {
     }
   }
 
-  // Phase 3: Create indexes after all columns exist
-  for (const idxStmt of [...sqlIndexStatements, ...alterIndexStatements]) {
-    try {
-      await pool.query(idxStmt);
-    } catch (idxErr: any) {
-      if (!isBenignDdlError(idxStmt, idxErr)) {
-        console.warn('[Migration Index Note]:', idxErr.message);
-      }
-    }
+  // Phase 3: Create indexes after all columns exist (fail loudly on any non-benign index error)
+  const indexFailures = await applyMigrationIndexes(pool, [...sqlIndexStatements, ...alterIndexStatements], isBenignDdlError);
+  if (indexFailures.length > 0) {
+    throw new Error(`Migration index creation failed (${indexFailures.length}): ${indexFailures.join(' | ')}`);
   }
 
   // Phase 4: Verify all core tables actually exist before marking migrationCompleted = true
+  const missingCoreTables: string[] = [];
   for (const coreTable of CORE_SCHEMA_TABLES) {
-    await pool.query(`SELECT 1 FROM ${coreTable} LIMIT 0`);
+    try {
+      await pool.query(`SELECT 1 FROM ${coreTable} LIMIT 0`);
+    } catch (verifyErr: any) {
+      missingCoreTables.push(`${coreTable} (${verifyErr?.message || 'missing'})`);
+    }
+  }
+  if (missingCoreTables.length > 0) {
+    throw new Error(`Migration schema verification failed. Missing core tables: ${missingCoreTables.join(', ')}`);
   }
 
   // Seed default platform settings (broadcast, emergency killswitches, fee policy)
@@ -1128,7 +1203,10 @@ export async function runMigration(): Promise<void> {
          ON CONFLICT (key) DO NOTHING`,
         [ps.key, JSON.stringify(ps.value)]
       );
-    } catch {}
+    } catch (seedErr: any) {
+      console.error(`[Migration Seed Error] Failed seeding platform setting "${ps.key}":`, seedErr.message);
+      throw seedErr;
+    }
   }
 
   // Seed default coupons into PostgreSQL (DB-authoritative coupon validation)
@@ -1146,7 +1224,10 @@ export async function runMigration(): Promise<void> {
          ON CONFLICT (code) DO NOTHING`,
         [c.code, c.discountKobo, c.minSubtotalKobo]
       );
-    } catch {}
+    } catch (couponErr: any) {
+      console.error(`[Migration Seed Error] Failed seeding coupon "${c.code}":`, couponErr.message);
+      throw couponErr;
+    }
   }
 
   // Create First Administrator strictly from server environment secrets
@@ -1192,13 +1273,14 @@ export async function runMigration(): Promise<void> {
       }
     } catch (adminErr: any) {
       console.error('[Admin Setup Error]:', adminErr.message);
+      throw adminErr;
     }
   } else {
     console.log('[Admin Setup] Notice: ADMIN_EMAIL and ADMIN_INITIAL_PASSWORD environment variables are not set in environment.');
   }
 
     migrationCompleted = true;
-    console.log('[Database Migration] All tables, audit logs, and security schemas successfully verified in PostgreSQL.');
+    console.log('[Database Migration] All tables, indexes, audit logs, and security schemas successfully verified in PostgreSQL.');
   })().catch(err => {
     migrationPromise = null;
     migrationCompleted = false;
@@ -1207,6 +1289,35 @@ export async function runMigration(): Promise<void> {
   });
 
   return migrationPromise;
+}
+
+export async function applyMigrationIndexes(
+  pool: any,
+  indexStatements: string[],
+  isBenignErr?: (stmt: string, err: any) => boolean
+): Promise<string[]> {
+  const failures: string[] = [];
+  const defaultBenignCheck = (_stmt: string, err: any) => {
+    const msg = String(err?.message || '').toLowerCase();
+    const code = String(err?.code || '');
+    return code === '42P07' || code === '42710' || code === '42701' || msg.includes('already exists');
+  };
+  const checkBenign = isBenignErr || defaultBenignCheck;
+
+  for (const idxStmt of indexStatements) {
+    try {
+      await pool.query(idxStmt);
+    } catch (idxErr: any) {
+      if (checkBenign(idxStmt, idxErr)) {
+        console.warn('[Migration Index Note]:', idxErr.message);
+      } else {
+        const summary = `${idxStmt.slice(0, 80)} -> ${idxErr?.message || idxErr}`;
+        console.error('[Migration Index Error]:', summary);
+        failures.push(summary);
+      }
+    }
+  }
+  return failures;
 }
 
 export const DEFAULT_BROADCAST_SETTING = {

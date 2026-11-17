@@ -1,49 +1,71 @@
 import dotenv from 'dotenv';
-dotenv.config({ override: true });
 
-import { runMigration, pingPostgres, query } from '../api/db/postgres.js';
+// Safety rule: NEVER override existing environment variables and NEVER load local .env files in production/Vercel/CI.
+export function loadLocalEnvSafely(env: NodeJS.ProcessEnv = process.env): boolean {
+  const isProdLike = env.NODE_ENV === 'production' || Boolean(env.VERCEL) || Boolean(env.CI);
+  if (isProdLike) {
+    return false;
+  }
+  dotenv.config({ override: false });
+  return true;
+}
+
+loadLocalEnvSafely();
+
+import {
+  CORE_SCHEMA_TABLES,
+  getDatabaseUrl,
+  getDatabaseUrlSource,
+  pingPostgres,
+  query,
+  runMigration,
+  verifyDatabaseSchema,
+} from '../api/db/postgres.js';
+
+function formatSafeDbTarget(): string {
+  const dbUrl = getDatabaseUrl();
+  const source = getDatabaseUrlSource();
+  if (!dbUrl) {
+    return 'pg-mem (no DATABASE_URL configured — development fallback only)';
+  }
+  try {
+    const parsed = new URL(dbUrl);
+    const dbName = parsed.pathname.replace(/^\/+/, '') || '(default)';
+    return `${source || 'DATABASE_URL'} -> ${parsed.hostname}:${parsed.port || '5432'}/${dbName}`;
+  } catch {
+    return `${source || 'DATABASE_URL'} -> [invalid URL]`;
+  }
+}
 
 async function main() {
   console.log('=== Shop It Database Migration & Table Verification ===');
-  console.log(`Checking connection using variable: DATABASE_URL`);
+  console.log(`Target Database: ${formatSafeDbTarget()}`);
+
+  await runMigration();
 
   const ping = await pingPostgres();
   console.log(`Database Status: ${ping.ok ? 'ONLINE' : 'OFFLINE'} (${ping.provider})`);
   if (!ping.ok) {
-    console.error('Error connecting to database:', ping.error);
+    console.error('Error connecting or verifying schema:', ping.error);
+    process.exit(1);
   }
 
-  await runMigration();
+  const schemaStatus = await verifyDatabaseSchema();
+  if (!schemaStatus.ok) {
+    console.error(`Missing core schema tables: ${schemaStatus.missingTables.join(', ')}`);
+    process.exit(1);
+  }
 
-  // Verify all 18 tables exist and are queryable
-  const tables = [
-    'shopit_users',
-    'shopit_sellers',
-    'shopit_verifications',
-    'shopit_products',
-    'shopit_orders',
-    'shopit_payments',
-    'shopit_wallets',
-    'shopit_ledger_entries',
-    'shopit_disputes',
-    'shopit_reports',
-    'shopit_chat_conversations',
-    'shopit_chat_messages',
-    'shopit_audit_logs',
-    'shopit_order_status_history',
-    'shopit_carts',
-    'shopit_wishlists',
-    'shopit_notifications',
-    'shopit_commissions',
-  ];
+  let hasFailures = false;
 
-  console.log('\n--- Table Row Counts ---');
-  for (const table of tables) {
+  console.log(`\n--- Core Table Row Counts (${CORE_SCHEMA_TABLES.length} tables) ---`);
+  for (const table of CORE_SCHEMA_TABLES) {
     try {
       const res = await query(`SELECT COUNT(*) as count FROM ${table}`);
-      console.log(`  ✓ ${table.padEnd(30)} : ${res.rows[0].count} rows`);
+      console.log(`  ✓ ${table.padEnd(32)} : ${res.rows[0].count} rows`);
     } catch (err: any) {
-      console.error(`  ✗ ${table.padEnd(30)} : ERROR - ${err.message}`);
+      hasFailures = true;
+      console.error(`  ✗ ${table.padEnd(32)} : ERROR - ${err.message}`);
     }
   }
 
@@ -66,8 +88,14 @@ async function main() {
       await query(`SELECT ${check.col} FROM ${check.table} LIMIT 1`);
       console.log(`  ✓ ${check.table}.${check.col}`);
     } catch (err: any) {
+      hasFailures = true;
       console.error(`  ✗ ${check.table}.${check.col} : ${err.message}`);
     }
+  }
+
+  if (hasFailures) {
+    console.error('\n=== Database Migration Verification Failed ===');
+    process.exit(1);
   }
 
   const userCount = await query('SELECT COUNT(*) as count FROM shopit_users');
@@ -80,7 +108,13 @@ async function main() {
   process.exit(0);
 }
 
-main().catch(err => {
-  console.error('Migration verification failed:', err);
-  process.exit(1);
-});
+const isDirectExec =
+  process.argv[1] &&
+  (process.argv[1].endsWith('migrate.ts') || process.argv[1].endsWith('migrate.js'));
+
+if (isDirectExec) {
+  main().catch(err => {
+    console.error('Migration verification failed:', err);
+    process.exit(1);
+  });
+}

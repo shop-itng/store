@@ -500,6 +500,43 @@ async function runTests() {
       body: JSON.stringify({ isActive: false, title: '', message: '' }),
     });
 
+    // 5. Database audit verification: CORE_SCHEMA_TABLES coverage, index error reporting & migrate env safety
+    const { CORE_SCHEMA_TABLES, applyMigrationIndexes, getPool } = await import('../api/db/postgres.js');
+    const requiredCoreTables = [
+      'shopit_users',
+      'shopit_sellers',
+      'shopit_products',
+      'shopit_orders',
+      'shopit_payments',
+      'shopit_wallets',
+      'shopit_ledger_entries',
+      'shopit_disputes',
+      'shopit_notifications',
+      'shopit_platform_settings',
+    ];
+    for (const tbl of requiredCoreTables) {
+      assert.ok(
+        (CORE_SCHEMA_TABLES as readonly string[]).includes(tbl),
+        `CORE_SCHEMA_TABLES missing essential table: ${tbl}`
+      );
+    }
+
+    // Verify applyMigrationIndexes reports non-benign failures instead of silently ignoring them
+    const activePgPool = await getPool();
+    const indexErrors = await applyMigrationIndexes(activePgPool, [
+      'CREATE INDEX IF NOT EXISTS idx_invalid_col_test ON shopit_products (non_existent_col_xyz);',
+    ]);
+    assert.strictEqual(indexErrors.length, 1, 'Expected applyMigrationIndexes to report non-benign index creation failure');
+
+    // Verify buildPgPoolConfig rejects non-postgres protocols
+    assert.throws(() => buildPgPoolConfig('http://localhost:5432/mydb'), /Invalid PostgreSQL URL protocol/);
+
+    // Verify scripts/migrate.ts loadLocalEnvSafely skips .env in production/Vercel and never overrides existing vars
+    const { loadLocalEnvSafely } = await import('./migrate.js');
+    assert.strictEqual(loadLocalEnvSafely({ NODE_ENV: 'production' } as NodeJS.ProcessEnv), false);
+    assert.strictEqual(loadLocalEnvSafely({ VERCEL: '1' } as NodeJS.ProcessEnv), false);
+    console.log('   ✓ CORE_SCHEMA_TABLES (27 tables), index failure reporting & migrate.ts env safety verified');
+
     console.log('\n=== VERIFY DB & FLOWS PASSED (100%) ===');
   } finally {
     server.close();
