@@ -11,9 +11,11 @@ import {
   AlertTriangle,
   KeyRound,
   User as UserIcon,
+  Ban,
+  Loader2,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
-import { NotificationPrefs, PrivacySettings } from '../types';
+import { NotificationPrefs, PrivacySettings, BlockedAccountItem } from '../types';
 import {
   DEFAULT_NOTIFICATION_PREFS,
   DEFAULT_PRIVACY_SETTINGS,
@@ -32,6 +34,8 @@ export const AccountSettingsView: React.FC = () => {
     confirmEmailChange,
     exportMyData,
     deleteMyAccount,
+    fetchBlockedUsers,
+    unblockUser,
     notify,
   } = useApp();
 
@@ -66,7 +70,12 @@ export const AccountSettingsView: React.FC = () => {
   const [deleteConfirmText, setDeleteConfirmText] = useState('');
   const [deletingAccount, setDeletingAccount] = useState(false);
 
-  // Hydrate latest notification & privacy preferences from /api/profiles/me
+  // Blocked Accounts state
+  const [blockedUsers, setBlockedUsers] = useState<BlockedAccountItem[]>([]);
+  const [loadingBlocks, setLoadingBlocks] = useState(false);
+  const [unblockingId, setUnblockingId] = useState<string | null>(null);
+
+  // Hydrate latest notification & privacy preferences from /api/profiles/me + blocked accounts
   useEffect(() => {
     if (!currentUser?.id) return;
     const token = typeof localStorage !== 'undefined' ? localStorage.getItem('shopit_session_token') : null;
@@ -83,7 +92,12 @@ export const AccountSettingsView: React.FC = () => {
         }
       })
       .catch(() => {});
-  }, [currentUser?.id]);
+
+    setLoadingBlocks(true);
+    void fetchBlockedUsers()
+      .then(list => setBlockedUsers(list))
+      .finally(() => setLoadingBlocks(false));
+  }, [currentUser?.id, fetchBlockedUsers]);
 
   if (!currentUser) {
     return (
@@ -205,6 +219,15 @@ export const AccountSettingsView: React.FC = () => {
     if (res.status) {
       setIsDeleteModalOpen(false);
     }
+  };
+
+  const handleUnblock = async (targetUserId: string) => {
+    setUnblockingId(targetUserId);
+    const res = await unblockUser(targetUserId);
+    if (res.status) {
+      setBlockedUsers(prev => prev.filter(u => u.blockedUserId !== targetUserId));
+    }
+    setUnblockingId(null);
   };
 
   return (
@@ -541,6 +564,67 @@ export const AccountSettingsView: React.FC = () => {
             <span>{savingPrivacy ? 'Saving...' : 'Save Privacy Settings'}</span>
           </button>
         </div>
+      </section>
+
+      {/* Section 4b: Blocked Accounts */}
+      <section className="bg-white dark:bg-[#15161C] rounded-2xl border border-[#E4E4E7] dark:border-[#27272A] p-5 space-y-4">
+        <div className="flex items-center gap-2.5">
+          <div className="w-9 h-9 rounded-xl bg-rose-50 dark:bg-rose-950/40 text-rose-600 flex items-center justify-center">
+            <Ban className="w-4 h-4" />
+          </div>
+          <div>
+            <h2 className="text-sm font-black text-[#111111] dark:text-white">Blocked Accounts</h2>
+            <p className="text-[11px] text-[#71717A] dark:text-[#A1A1AA]">
+              Blocked members cannot follow you, see your profile, or message you in escrow chat.
+            </p>
+          </div>
+        </div>
+
+        {loadingBlocks ? (
+          <div className="py-4 text-xs text-[#71717A] flex items-center gap-2">
+            <Loader2 className="w-4 h-4 animate-spin text-[#FF6B00]" />
+            <span>Loading blocked accounts...</span>
+          </div>
+        ) : blockedUsers.length === 0 ? (
+          <div className="p-4 rounded-xl bg-[#FAFAFA] dark:bg-[#1E2028] border border-[#E4E4E7] dark:border-[#27272A] text-xs text-[#71717A] dark:text-[#A1A1AA]">
+            You haven&apos;t blocked anyone.
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {blockedUsers.map(item => (
+              <div
+                key={item.id}
+                className="flex items-center justify-between gap-3 p-3 rounded-xl border border-[#E4E4E7] dark:border-[#27272A] bg-[#FAFAFA] dark:bg-[#1E2028]"
+              >
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <span className="w-9 h-9 rounded-full overflow-hidden border border-[#E4E4E7] dark:border-[#27272A] bg-[#FFF4EC] flex items-center justify-center font-black text-xs text-[#FF6B00] shrink-0">
+                    {item.avatarUrl ? (
+                      <img src={item.avatarUrl} alt={item.displayName} className="w-full h-full object-cover" />
+                    ) : (
+                      item.displayName[0]?.toUpperCase() || 'M'
+                    )}
+                  </span>
+                  <div className="min-w-0">
+                    <div className="text-xs font-black text-[#111111] dark:text-white truncate">
+                      {item.displayName}
+                    </div>
+                    <div className="text-[11px] text-[#71717A] dark:text-[#A1A1AA]">
+                      Blocked {item.createdAt ? new Date(item.createdAt).toLocaleDateString() : ''}
+                    </div>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  disabled={unblockingId === item.blockedUserId}
+                  onClick={() => void handleUnblock(item.blockedUserId)}
+                  className="px-3 py-1.5 rounded-lg border border-[#E4E4E7] dark:border-[#27272A] bg-white dark:bg-[#15161C] hover:border-[#FF6B00] font-bold text-xs text-[#111111] dark:text-white disabled:opacity-50"
+                >
+                  {unblockingId === item.blockedUserId ? 'Unblocking...' : 'Unblock'}
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
       </section>
 
       {/* Section 5: Data Portability & Delete Account */}

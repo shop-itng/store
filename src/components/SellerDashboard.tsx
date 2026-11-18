@@ -3,6 +3,7 @@ import { useApp } from '../context/AppContext';
 import { Product, ProductCategory, Campus, Order } from '../types';
 import { CAMPUSES } from '../data/mockData';
 import { getPricingBreakdown, formatNaira } from '../utils/pricing';
+import { uploadFileToServer } from '../utils/fileUpload';
 import {
   Store,
   Plus,
@@ -171,58 +172,44 @@ export const SellerDashboard: React.FC = () => {
     setIsAddModalOpen(true);
   };
 
-  const handleProductImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleProductImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
     if (!file.type.startsWith('image/')) {
       notify('Please select a valid image file (PNG, JPG, WEBP).', 'error');
-      return;
-    }
-    if (file.size > 3 * 1024 * 1024) {
-      notify('Product photo must be under 3MB.', 'error');
       return;
     }
     setIsCompressing(true);
-    const reader = new FileReader();
-    reader.onload = ev => {
+    try {
+      const uploaded = await uploadFileToServer(file, 'product');
+      setFormImage(uploaded.url);
+      notify('Product photo uploaded cleanly!', 'success');
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Could not upload photo. Please try again.', 'error');
+    } finally {
       setIsCompressing(false);
-      if (typeof ev.target?.result === 'string') {
-        setFormImage(ev.target.result);
-        notify('Product photo loaded cleanly for persistent listing!', 'success');
-      }
-    };
-    reader.onerror = () => {
-      setIsCompressing(false);
-      notify('Could not read photo file. Please try again.', 'error');
-    };
-    reader.readAsDataURL(file);
+    }
   };
 
-  const handlePackPhotoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handlePackPhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
     if (!file.type.startsWith('image/')) {
       notify('Please select a valid image file (PNG, JPG, WEBP).', 'error');
       return;
     }
-    if (file.size > 3 * 1024 * 1024) {
-      notify('Packing proof photo must be under 3MB.', 'error');
-      return;
-    }
     setIsUploadingPackPhoto(true);
-    const reader = new FileReader();
-    reader.onload = ev => {
+    try {
+      const uploaded = await uploadFileToServer(file, 'packed_proof', { orderId: packingOrder?.id });
+      setPackPhotoUrl(uploaded.url);
+      notify('Packing proof photo uploaded.', 'success');
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Could not upload packing photo. Please try again.', 'error');
+    } finally {
       setIsUploadingPackPhoto(false);
-      if (typeof ev.target?.result === 'string') {
-        setPackPhotoUrl(ev.target.result);
-        notify('Packing proof photo attached.', 'success');
-      }
-    };
-    reader.onerror = () => {
-      setIsUploadingPackPhoto(false);
-      notify('Could not read packing photo. Please try again.', 'error');
-    };
-    reader.readAsDataURL(file);
+    }
   };
 
   const handleFormSubmit = (e: React.FormEvent) => {
@@ -891,9 +878,9 @@ export const SellerDashboard: React.FC = () => {
                   <div className="text-center text-slate-500 px-4">
                     <Upload className="w-6 h-6 mx-auto mb-1 text-slate-400" />
                     <span className="font-bold text-slate-700 block">
-                      {isUploadingPackPhoto ? 'Loading packing photo...' : 'Tap to upload packed order photo'}
+                      {isUploadingPackPhoto ? 'Uploading packing photo...' : 'Tap to upload packed order photo'}
                     </span>
-                    <span className="text-[11px] text-slate-400">PNG, JPG, WEBP up to 3MB</span>
+                    <span className="text-[11px] text-slate-400">PNG, JPG, WEBP up to 10MB</span>
                   </div>
                 )}
                 <input
@@ -1092,7 +1079,7 @@ export const SellerDashboard: React.FC = () => {
                   <label className="flex-1 cursor-pointer border border-dashed border-slate-300 rounded-lg p-2.5 text-center hover:bg-slate-50 transition-colors">
                     <div className="flex items-center justify-center gap-1.5 text-slate-600 font-medium">
                       <Upload className="w-4 h-4" />
-                      <span>{isCompressing ? 'Loading photo...' : 'Upload Craft Photo'}</span>
+                      <span>{isCompressing ? 'Uploading photo...' : 'Upload Craft Photo'}</span>
                     </div>
                     <input
                       type="file"
@@ -1187,7 +1174,8 @@ export const SellerDashboard: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  className="px-6 py-2.5 rounded-xl bg-[#FF6B00] hover:bg-[#ff7a1a] text-[#111111] font-black border-2 border-[#111111] shadow-[0_3px_0_#111111] active:translate-y-0.5 transition-all flex items-center gap-1.5"
+                  disabled={isCompressing}
+                  className="px-6 py-2.5 rounded-xl bg-[#FF6B00] hover:bg-[#ff7a1a] disabled:opacity-50 text-[#111111] font-black border-2 border-[#111111] shadow-[0_3px_0_#111111] active:translate-y-0.5 transition-all flex items-center gap-1.5"
                 >
                   <span className="w-2 h-2 rounded-full bg-[#9FE870] border border-[#111111]" />
                   <span>{editingProductId ? 'Save Changes' : 'List Product'}</span>

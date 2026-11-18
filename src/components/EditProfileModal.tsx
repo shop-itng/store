@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { X, Camera, Image as ImageIcon, Check, AlertTriangle, Trash2 } from 'lucide-react';
+import { X, Camera, Image as ImageIcon, Check, AlertTriangle, Trash2, Loader2 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { CAMPUSES } from '../data/mockData';
 import {
@@ -7,6 +7,7 @@ import {
   DEFAULT_AVATAR_PRESETS,
   clientContainsForbiddenContactInfo,
 } from '../utils/profileConstants';
+import { uploadFileToServer } from '../utils/fileUpload';
 import { ImageCropperModal } from './ImageCropperModal';
 import { PublicProfileData } from '../types';
 
@@ -37,6 +38,7 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({
   const [shopName, setShopName] = useState('');
   const [shopBio, setShopBio] = useState('');
   const [isSaving, setIsSaving] = useState(false);
+  const [uploadingTarget, setUploadingTarget] = useState<'avatar' | 'cover' | null>(null);
 
   const [cropTarget, setCropTarget] = useState<{
     kind: 'avatar' | 'cover';
@@ -191,9 +193,18 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({
                     <span className="font-semibold">Click to upload & crop a cover photo</span>
                   </div>
                 )}
-                <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white font-bold gap-1.5">
-                  <Camera className="w-4 h-4" />
-                  <span>Change Cover</span>
+                <div className={`absolute inset-0 bg-black/45 flex items-center justify-center text-white font-bold gap-1.5 transition-opacity ${uploadingTarget === 'cover' ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
+                  {uploadingTarget === 'cover' ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>Uploading Cover...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Camera className="w-4 h-4" />
+                      <span>Change Cover</span>
+                    </>
+                  )}
                 </div>
               </div>
               <input
@@ -212,11 +223,16 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({
                 <div className="flex items-center gap-3">
                   <button
                     type="button"
+                    disabled={uploadingTarget === 'avatar'}
                     onClick={() => avatarInputRef.current?.click()}
-                    className="text-[11px] font-bold text-[#FF6B00] hover:underline flex items-center gap-1"
+                    className="text-[11px] font-bold text-[#FF6B00] hover:underline flex items-center gap-1 disabled:opacity-60"
                   >
-                    <Camera className="w-3.5 h-3.5" />
-                    <span>Upload & Crop Photo</span>
+                    {uploadingTarget === 'avatar' ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Camera className="w-3.5 h-3.5" />
+                    )}
+                    <span>{uploadingTarget === 'avatar' ? 'Uploading Photo...' : 'Upload & Crop Photo'}</span>
                   </button>
                   {avatarUrl && (
                     <button
@@ -418,11 +434,11 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({
               </button>
               <button
                 type="submit"
-                disabled={isSaving || hasValidationError}
+                disabled={isSaving || uploadingTarget !== null || hasValidationError}
                 className="px-5 py-2.5 rounded-xl bg-[#FF6B00] hover:bg-[#E55E00] disabled:opacity-50 text-[#111111] font-black border-2 border-[#111111] shadow-[0_2px_0_#111111] flex items-center gap-1.5"
               >
                 <Check className="w-4 h-4" />
-                <span>{isSaving ? 'Saving...' : 'Save Profile'}</span>
+                <span>{isSaving ? 'Saving...' : uploadingTarget ? 'Uploading Image...' : 'Save Profile'}</span>
               </button>
             </div>
           </form>
@@ -436,12 +452,24 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({
         title={cropTarget?.kind === 'cover' ? 'Crop Cover Banner (16:5)' : 'Crop Profile Photo (1:1)'}
         onCancel={() => setCropTarget(null)}
         onSave={dataUrl => {
-          if (cropTarget?.kind === 'cover') {
-            setCoverUrl(dataUrl);
-          } else {
-            setAvatarUrl(dataUrl);
-          }
+          const kind = cropTarget?.kind === 'cover' ? 'cover' : 'avatar';
           setCropTarget(null);
+          setUploadingTarget(kind);
+          void uploadFileToServer(dataUrl, kind, { fileName: `${kind}.jpg` })
+            .then(uploaded => {
+              if (kind === 'cover') {
+                setCoverUrl(uploaded.url);
+              } else {
+                setAvatarUrl(uploaded.url);
+              }
+              notify(kind === 'cover' ? 'Cover banner uploaded!' : 'Profile photo uploaded!', 'success');
+            })
+            .catch(err => {
+              notify(err instanceof Error ? err.message : 'Failed to upload image.', 'error');
+            })
+            .finally(() => {
+              setUploadingTarget(null);
+            });
         }}
       />
     </>

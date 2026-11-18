@@ -70,6 +70,7 @@ export interface PublicProfileData {
   showFollowersList?: boolean;
   showFollowingList?: boolean;
   isRestricted?: boolean;
+  pendingFollowRequestsCount?: number;
   followersCount: number;
   followingCount: number;
   completedOrdersCount?: number;
@@ -440,6 +441,15 @@ export interface FeeSettings {
 // PHASE 3: LOCKED CHAT & PRIVACY ANTI-BYPASS
 // ==========================================
 
+export interface ChatAttachment {
+  id: string;
+  url: string;
+  originalName: string;
+  mimeType: string;
+  sizeBytes: number;
+  kind: 'image' | 'document';
+}
+
 export interface ChatMessage {
   id: string;
   conversationId: string;
@@ -451,9 +461,12 @@ export interface ChatMessage {
   senderId: string;
   content: string; // [blocked] if bypass attempt
   originalContent?: string;
+  attachment?: ChatAttachment;
+  readByOther?: boolean;
   isBlockedBypass?: boolean;
   blockedTokens?: string[];
   timestamp: string;
+  createdAt?: string;
   isQuickReply?: boolean;
   presetOffer?: {
     price: number;
@@ -488,7 +501,50 @@ export interface Conversation {
   unreadBuyer: number;
   unreadSeller: number;
   isChatLocked?: boolean;
+  isBlocked?: boolean;
   bypassViolationsCount: number;
+}
+
+export interface FollowRequestItem {
+  id: string;
+  followerId: string;
+  displayName: string;
+  profileSlug: string;
+  avatarUrl?: string | null;
+  campus?: string;
+  createdAt: string;
+}
+
+export interface FollowListUser {
+  id: string;
+  displayName: string;
+  profileSlug: string;
+  avatarUrl?: string | null;
+  campus?: string;
+  role?: string;
+  shopName?: string;
+  followedAt?: string;
+}
+
+export interface BlockedAccountItem {
+  id: string;
+  blockedUserId: string;
+  displayName: string;
+  profileSlug: string;
+  avatarUrl?: string | null;
+  reason?: string;
+  createdAt: string;
+}
+
+export interface DbNotificationItem {
+  id: string;
+  userId: string;
+  title: string;
+  message: string;
+  type: string;
+  isRead: boolean;
+  link?: string | null;
+  createdAt: string;
 }
 
 // ==========================================

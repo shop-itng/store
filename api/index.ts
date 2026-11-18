@@ -91,6 +91,7 @@ import {
 } from './lib/validation.js';
 import marketplaceRouter, { processEscrowAutoRelease } from './routes/marketplace.js';
 import profilesRouter from './routes/profiles.js';
+import filesRouter from './routes/files.js';
 
 // Fail-closed startup guard: refuse to boot unless APP_SECRET is valid (64+ hex chars)
 validateAppSecret();
@@ -282,6 +283,7 @@ const VALID_EMAIL_TEMPLATES = new Set<EmailTemplateKey>([
 const router = express.Router();
 router.use(marketplaceRouter);
 router.use(profilesRouter);
+router.use(filesRouter);
 
 const APP_BUILT_AT = new Date().toISOString();
 

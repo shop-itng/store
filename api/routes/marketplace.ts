@@ -24,7 +24,14 @@ import {
   restoreOrderStockInTx,
   sendBrevoDirect,
 } from '../lib/payments.js';
-import { containsForbiddenContactInfo, extractFirstName } from '../lib/validation.js';
+import {
+  containsForbiddenContactInfo,
+  extractFirstName,
+  sanitizePrivacySettings,
+  DEFAULT_PRIVACY_SETTINGS,
+  UNDER_18_PRIVACY_SETTINGS,
+  rejectUnknownFields,
+} from '../lib/validation.js';
 
 const router = express.Router();
 
@@ -90,6 +97,47 @@ function mapReviewWithUsers(rev: any, userMap: Map<string, ResolvedUserMeta>) {
     date: rev.date || '',
     verifiedPurchase: Boolean(rev.verifiedPurchase ?? true),
   };
+}
+
+async function notifyFollowersOfNewProduct(params: {
+  sellerIds: string[];
+  shopName: string;
+  productId: string;
+  productTitle: string;
+}) {
+  try {
+    const cleanIds = Array.from(new Set(params.sellerIds.filter(Boolean)));
+    if (cleanIds.length === 0) return;
+    const { placeholders, params: sParams } = buildInClause(cleanIds);
+    const folRes = await dbQuery(
+      `SELECT DISTINCT f.follower_id
+       FROM shopit_follows f
+       JOIN shopit_users u ON u.id = f.follower_id
+       WHERE f.following_id IN (${placeholders})
+         AND f.status = 'accepted'
+         AND u.deleted_at IS NULL
+         AND u.is_banned IS NOT TRUE`,
+      sParams
+    );
+    const sellerIdSet = new Set(cleanIds);
+    for (const r of folRes.rows) {
+      const followerId = String(r.follower_id);
+      if (!followerId || sellerIdSet.has(followerId)) continue;
+      await dbQuery(
+        `INSERT INTO shopit_notifications (id, user_id, title, message, type, is_read, link, created_at)
+         VALUES ($1, $2, $3, $4, 'info', false, $5, NOW())`,
+        [
+          `notif_newprod_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
+          followerId,
+          `New craft from ${params.shopName}`,
+          `"${params.productTitle}" was just listed by ${params.shopName}.`,
+          `/?product=${encodeURIComponent(params.productId)}`,
+        ]
+      );
+    }
+  } catch (err: any) {
+    console.warn('[Follower New Product Notification Note]:', err?.message || err);
+  }
 }
 
 // Safety switch middleware: returns 503 when PAYMENTS_ENABLED is not 'true'
@@ -600,6 +648,15 @@ router.post('/products', requireAuth, async (req: AuthenticatedRequest, res: Res
       ]
     );
 
+    if (!isDraft && !isPaused) {
+      await notifyFollowersOfNewProduct({
+        sellerIds: [sellerId, seller?.user_id || user.userId],
+        shopName,
+        productId,
+        productTitle: cleanTitle.slice(0, 120),
+      });
+    }
+
     await logAuditEvent({
       action: 'PRODUCT_CREATED',
       actor: { id: user.userId, email: user.email, role: user.role },
@@ -756,6 +813,17 @@ router.put('/products/:id', requireAuth, async (req: AuthenticatedRequest, res: 
       } catch (notifErr: any) {
         console.warn('[Restock Notification Warning]:', notifErr?.message || notifErr);
       }
+    }
+
+    if ((Boolean(row.is_draft) || Boolean(row.is_paused)) && !isDraft && !isPaused) {
+      const sOwnerRes = await dbQuery('SELECT user_id, shop_name FROM shopit_sellers WHERE id = $1 OR user_id = $1 LIMIT 1', [row.seller_id]).catch(() => ({ rows: [] }));
+      const sOwnerRow = sOwnerRes.rows[0];
+      await notifyFollowersOfNewProduct({
+        sellerIds: [row.seller_id, sOwnerRow?.user_id].filter(Boolean),
+        shopName: sOwnerRow?.shop_name || row.seller_shop_name || 'Artisan Shop',
+        productId: id,
+        productTitle: title.slice(0, 120),
+      });
     }
 
     await logAuditEvent({
@@ -2353,7 +2421,12 @@ router.post('/wallet/payout-account', requirePaymentsEnabled, requireAuth, async
 // 6. CHAT & CONVERSATIONS API (Participant-Authorized)
 // ============================================================================
 
-function mapConversationRow(row: any, userMap?: Map<string, ResolvedUserMeta>) {
+function mapConversationRow(
+  row: any,
+  userMap?: Map<string, ResolvedUserMeta>,
+  unreadStats?: { unreadBuyer: number; unreadSeller: number },
+  isBlocked = false
+) {
   const buyerMeta = row.buyer_id ? userMap?.get(row.buyer_id) : undefined;
   const sellerMeta = row.seller_id ? userMap?.get(row.seller_id) : undefined;
   return {
@@ -2373,12 +2446,85 @@ function mapConversationRow(row: any, userMap?: Map<string, ResolvedUserMeta>) {
     sellerProfileSlug: sellerMeta?.profileSlug,
     lastMessage: row.last_message || 'Conversation started',
     lastMessageAt: row.last_message_at || row.created_at,
-    unreadBuyer: 0,
-    unreadSeller: 0,
+    unreadBuyer: unreadStats ? unreadStats.unreadBuyer : 0,
+    unreadSeller: unreadStats ? unreadStats.unreadSeller : 0,
     isChatLocked: Boolean(row.is_chat_locked),
+    isBlocked,
     bypassViolationsCount: parseInt(row.bypass_violations_count, 10) || 0,
     createdAt: row.created_at,
   };
+}
+
+async function computeConversationUnreadAndBlocks(
+  convRows: any[],
+  userMap: Map<string, ResolvedUserMeta>
+): Promise<{
+  unreadMap: Map<string, { unreadBuyer: number; unreadSeller: number }>;
+  blockedConvSet: Set<string>;
+}> {
+  const unreadMap = new Map<string, { unreadBuyer: number; unreadSeller: number }>();
+  const blockedConvSet = new Set<string>();
+  if (convRows.length === 0) return { unreadMap, blockedConvSet };
+
+  const convIds = convRows.map(c => c.id).filter(Boolean);
+  const { placeholders, params } = buildInClause(convIds);
+  const msgRes = await dbQuery(
+    `SELECT conversation_id, sender_id, sender_role, created_at
+     FROM shopit_chat_messages
+     WHERE conversation_id IN (${placeholders})`,
+    params
+  ).catch(() => ({ rows: [] }));
+
+  const msgsByConv = new Map<string, any[]>();
+  for (const m of msgRes.rows) {
+    const list = msgsByConv.get(m.conversation_id) || [];
+    list.push(m);
+    msgsByConv.set(m.conversation_id, list);
+  }
+
+  for (const conv of convRows) {
+    const msgs = msgsByConv.get(conv.id) || [];
+    const buyerReadMs = conv.buyer_last_read_at ? new Date(conv.buyer_last_read_at).getTime() : 0;
+    const sellerReadMs = conv.seller_last_read_at ? new Date(conv.seller_last_read_at).getTime() : 0;
+    let unreadBuyer = 0;
+    let unreadSeller = 0;
+
+    for (const m of msgs) {
+      const mMs = new Date(m.created_at).getTime();
+      if (m.sender_id !== conv.buyer_id && mMs > buyerReadMs) {
+        unreadBuyer++;
+      }
+      if (m.sender_id === conv.buyer_id && mMs > sellerReadMs) {
+        unreadSeller++;
+      }
+    }
+    unreadMap.set(conv.id, { unreadBuyer, unreadSeller });
+  }
+
+  const allParticipantUserIds = Array.from(
+    new Set(
+      convRows
+        .flatMap(c => [c.buyer_id, userMap.get(c.seller_id)?.id || c.seller_id])
+        .filter(Boolean)
+    )
+  );
+  if (allParticipantUserIds.length > 0) {
+    const bIn = buildInClause(allParticipantUserIds);
+    const blkRes = await dbQuery(
+      `SELECT blocker_id, blocked_id FROM shopit_blocks WHERE blocker_id IN (${bIn.placeholders}) OR blocked_id IN (${bIn.placeholders})`,
+      bIn.params
+    ).catch(() => ({ rows: [] }));
+    const blockPairs = new Set<string>(blkRes.rows.map((r: any) => `${r.blocker_id}:${r.blocked_id}`));
+
+    for (const conv of convRows) {
+      const sellerUserId = userMap.get(conv.seller_id)?.id || conv.seller_id;
+      if (blockPairs.has(`${conv.buyer_id}:${sellerUserId}`) || blockPairs.has(`${sellerUserId}:${conv.buyer_id}`)) {
+        blockedConvSet.add(conv.id);
+      }
+    }
+  }
+
+  return { unreadMap, blockedConvSet };
 }
 
 router.get('/chat/conversations', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
@@ -2401,7 +2547,10 @@ router.get('/chat/conversations', requireAuth, async (req: AuthenticatedRequest,
       if (r.seller_id) ids.push(r.seller_id);
     }
     const userMap = await batchLoadUserMeta(ids);
-    const conversations = result.rows.map((r: any) => mapConversationRow(r, userMap));
+    const { unreadMap, blockedConvSet } = await computeConversationUnreadAndBlocks(result.rows, userMap);
+    const conversations = result.rows.map((r: any) =>
+      mapConversationRow(r, userMap, unreadMap.get(r.id), blockedConvSet.has(r.id))
+    );
 
     return res.json({ status: true, conversations });
   } catch (err: any) {
@@ -2420,13 +2569,91 @@ router.post('/chat/conversations', requireAuth, async (req: AuthenticatedRequest
       return res.status(400).json({ status: false, message: 'You cannot open a chat conversation with your own shop.' });
     }
 
-    const sellerRes = await dbQuery('SELECT id, user_id, shop_name FROM shopit_sellers WHERE id = $1 OR user_id = $1 LIMIT 1', [sellerId]);
-    const canonicalSellerId = sellerRes.rows[0]?.id || String(sellerId);
-    const sellerUserId = sellerRes.rows[0]?.user_id || canonicalSellerId;
+    const sellerRes = await dbQuery(
+      `SELECT s.id, s.user_id, s.shop_name, s.under_18 as s_under_18,
+              u.id as u_id, u.age, u.privacy_settings, u.is_banned, u.deleted_at
+       FROM shopit_sellers s
+       LEFT JOIN shopit_users u ON (u.id = s.user_id OR u.id = s.id)
+       WHERE s.id = $1 OR s.user_id = $1
+       LIMIT 1`,
+      [sellerId]
+    );
+    let targetUserRow = sellerRes.rows[0];
+    if (!targetUserRow) {
+      const fallbackUserRes = await dbQuery(
+        'SELECT id as u_id, age, privacy_settings, is_banned, deleted_at FROM shopit_users WHERE id = $1 LIMIT 1',
+        [sellerId]
+      );
+      if (fallbackUserRes.rows[0]) {
+        targetUserRow = fallbackUserRes.rows[0];
+      }
+    }
+    if (targetUserRow?.deleted_at || targetUserRow?.is_banned) {
+      return res.status(404).json({ status: false, message: 'This seller account is unavailable.' });
+    }
+
+    const canonicalSellerId = targetUserRow?.id || String(sellerId);
+    const sellerUserId = targetUserRow?.user_id || targetUserRow?.u_id || canonicalSellerId;
     if (sellerUserId === user.userId || isUserSellerOwner(user, canonicalSellerId)) {
       return res.status(400).json({ status: false, message: 'You cannot open a chat conversation with your own shop.' });
     }
-    const shopName = sellerRes.rows[0]?.shop_name || 'Artisan';
+    const shopName = targetUserRow?.shop_name || 'Artisan';
+
+    // Check mutual block
+    if (user.role !== 'admin') {
+      const blkRes = await dbQuery(
+        `SELECT id FROM shopit_blocks
+         WHERE (blocker_id = $1 AND blocked_id = $2) OR (blocker_id = $2 AND blocked_id = $1)
+         LIMIT 1`,
+        [user.userId, sellerUserId]
+      );
+      if (blkRes.rows.length > 0) {
+        return res.status(403).json({ status: false, message: 'You cannot message this user because one of you has blocked the other.' });
+      }
+    }
+
+    // Check recipient's whoCanMessage privacy setting (order partners bypass restriction)
+    if (user.role !== 'admin' && targetUserRow) {
+      const isUnder18 =
+        (targetUserRow.age !== null && targetUserRow.age !== undefined && Number(targetUserRow.age) < 18) ||
+        Boolean(targetUserRow.s_under_18);
+      const basePrivacy = isUnder18 ? UNDER_18_PRIVACY_SETTINGS : DEFAULT_PRIVACY_SETTINGS;
+      const rawPrivacy = typeof targetUserRow.privacy_settings === 'string'
+        ? (() => { try { return JSON.parse(targetUserRow.privacy_settings); } catch { return basePrivacy; } })()
+        : targetUserRow.privacy_settings || basePrivacy;
+      const privacy = sanitizePrivacySettings(rawPrivacy, basePrivacy, isUnder18);
+
+      if (privacy.whoCanMessage !== 'everyone') {
+        const [fViewerToTarget, fTargetToViewer, orderRes] = await Promise.all([
+          dbQuery(`SELECT 1 FROM shopit_follows WHERE follower_id = $1 AND following_id = $2 AND status = 'accepted' LIMIT 1`, [user.userId, sellerUserId]),
+          dbQuery(`SELECT 1 FROM shopit_follows WHERE follower_id = $1 AND following_id = $2 AND status = 'accepted' LIMIT 1`, [sellerUserId, user.userId]),
+          dbQuery(
+            `SELECT 1 FROM shopit_orders
+             WHERE buyer_id = $1 AND (items::text LIKE $2 OR items::text LIKE $3)
+             LIMIT 1`,
+            [user.userId, `%"sellerId":"${canonicalSellerId}"%`, `%"sellerId":"${sellerUserId}"%`]
+          ),
+        ]);
+        const hasOrder = Boolean(orderId) || orderRes.rows.length > 0;
+        const viewerFollows = fViewerToTarget.rows.length > 0;
+        const targetFollows = fTargetToViewer.rows.length > 0;
+
+        if (!hasOrder) {
+          if (privacy.whoCanMessage === 'followers' && !viewerFollows) {
+            return res.status(403).json({
+              status: false,
+              message: 'This member only accepts messages from followers or customers with an order.',
+            });
+          }
+          if (privacy.whoCanMessage === 'mutual' && !(viewerFollows && targetFollows)) {
+            return res.status(403).json({
+              status: false,
+              message: 'This member only accepts messages from mutual followers or customers with an order.',
+            });
+          }
+        }
+      }
+    }
 
     let resolvedTitle = productTitle ? String(productTitle).trim().slice(0, 200) : null;
     let resolvedImage = productImage ? String(productImage).trim() : null;
@@ -2466,7 +2693,11 @@ router.post('/chat/conversations', requireAuth, async (req: AuthenticatedRequest
         );
         if (upd.rows.length > 0) existingRow = upd.rows[0];
       }
-      return res.json({ status: true, conversation: mapConversationRow(existingRow, userMap) });
+      const { unreadMap, blockedConvSet } = await computeConversationUnreadAndBlocks([existingRow], userMap);
+      return res.json({
+        status: true,
+        conversation: mapConversationRow(existingRow, userMap, unreadMap.get(existingRow.id), blockedConvSet.has(existingRow.id)),
+      });
     }
 
     const convId = `conv_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
@@ -2475,8 +2706,8 @@ router.post('/chat/conversations', requireAuth, async (req: AuthenticatedRequest
       `INSERT INTO shopit_chat_conversations (
         id, order_id, product_id, product_title, product_image,
         buyer_id, buyer_masked_id, seller_id, seller_shop_name,
-        last_message, last_message_at, created_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'Chat started', NOW(), NOW())
+        last_message, last_message_at, buyer_last_read_at, created_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'Chat started', NOW(), NOW(), NOW())
       RETURNING *`,
       [convId, orderId || null, productId || null, resolvedTitle, resolvedImage, user.userId, buyerDisplayName, canonicalSellerId, shopName]
     );
@@ -2490,7 +2721,50 @@ router.post('/chat/conversations', requireAuth, async (req: AuthenticatedRequest
       userAgent: req.get('user-agent'),
     });
 
-    return res.status(201).json({ status: true, conversation: mapConversationRow(insertRes.rows[0], userMap) });
+    return res.status(201).json({
+      status: true,
+      conversation: mapConversationRow(insertRes.rows[0], userMap, { unreadBuyer: 0, unreadSeller: 0 }, false),
+    });
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: err.message });
+  }
+});
+
+router.post('/chat/conversations/:id/read', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const user = req.user!;
+    const { id } = req.params;
+    const convRes = await dbQuery('SELECT * FROM shopit_chat_conversations WHERE id = $1 LIMIT 1', [id]);
+    if (convRes.rows.length === 0) {
+      return res.status(404).json({ status: false, message: 'Conversation not found.' });
+    }
+    const conv = convRes.rows[0];
+    const isBuyer = conv.buyer_id === user.userId;
+    const isSeller = isUserSellerOwner(user, conv.seller_id);
+    if (!isBuyer && !isSeller && user.role !== 'admin') {
+      return res.status(403).json({ status: false, message: 'Access denied to this conversation.' });
+    }
+
+    let updatedConv = conv;
+    if (isBuyer) {
+      const upd = await dbQuery(
+        'UPDATE shopit_chat_conversations SET buyer_last_read_at = NOW() WHERE id = $1 RETURNING *',
+        [id]
+      );
+      if (upd.rows[0]) updatedConv = upd.rows[0];
+    } else if (isSeller) {
+      const upd = await dbQuery(
+        'UPDATE shopit_chat_conversations SET seller_last_read_at = NOW() WHERE id = $1 RETURNING *',
+        [id]
+      );
+      if (upd.rows[0]) updatedConv = upd.rows[0];
+    }
+
+    const userMap = await batchLoadUserMeta([conv.buyer_id, conv.seller_id]);
+    const { unreadMap } = await computeConversationUnreadAndBlocks([updatedConv], userMap);
+    const counts = unreadMap.get(id) || { unreadBuyer: 0, unreadSeller: 0 };
+
+    return res.json({ status: true, conversationId: id, ...counts });
   } catch (err: any) {
     return res.status(500).json({ status: false, message: err.message });
   }
@@ -2515,6 +2789,8 @@ router.get('/chat/conversations/:id/messages', requireAuth, async (req: Authenti
     );
 
     const senderMap = await batchLoadUserMeta([conv.buyer_id, conv.seller_id, ...result.rows.map((r: any) => r.sender_id)]);
+    const buyerReadMs = conv.buyer_last_read_at ? new Date(conv.buyer_last_read_at).getTime() : 0;
+    const sellerReadMs = conv.seller_last_read_at ? new Date(conv.seller_last_read_at).getTime() : 0;
 
     return res.json({
       status: true,
@@ -2524,6 +2800,15 @@ router.get('/chat/conversations/:id/messages', requireAuth, async (req: Authenti
           row.sender_role === 'admin'
             ? 'Shop It Moderation'
             : sMeta?.displayName || row.sender_masked_name || 'Member';
+        const msgMs = new Date(row.created_at).getTime();
+        const isSentByBuyer = row.sender_id === conv.buyer_id;
+        const readByOther = isSentByBuyer ? sellerReadMs >= msgMs : buyerReadMs >= msgMs;
+
+        const parsedAttachment =
+          row.attachment && typeof row.attachment === 'string'
+            ? (() => { try { return JSON.parse(row.attachment); } catch { return undefined; } })()
+            : row.attachment || undefined;
+
         return {
           id: row.id,
           conversationId: row.conversation_id,
@@ -2533,6 +2818,8 @@ router.get('/chat/conversations/:id/messages', requireAuth, async (req: Authenti
           senderAvatarUrl: sMeta?.avatarUrl,
           senderProfileSlug: sMeta?.profileSlug,
           content: row.content,
+          attachment: parsedAttachment,
+          readByOther,
           isBlockedBypass: Boolean(row.is_blocked_bypass),
           presetOffer: row.preset_offer || undefined,
           createdAt: row.created_at,
@@ -2549,7 +2836,11 @@ router.post('/chat/conversations/:id/messages', requireAuth, async (req: Authent
   try {
     const user = req.user!;
     const { id } = req.params;
-    const { content, presetOffer } = req.body || {};
+    const check = rejectUnknownFields(req.body || {}, ['content', 'presetOffer', 'attachment']);
+    if (!check.ok) {
+      return res.status(400).json({ status: false, message: check.message });
+    }
+    const { content, presetOffer, attachment } = check.obj;
 
     const convRes = await dbQuery('SELECT * FROM shopit_chat_conversations WHERE id = $1', [id]);
     if (convRes.rows.length === 0) {
@@ -2563,11 +2854,52 @@ router.post('/chat/conversations/:id/messages', requireAuth, async (req: Authent
       return res.status(403).json({ status: false, message: 'This conversation has been locked by moderation.' });
     }
 
-    if (!content || !String(content).trim()) {
-      return res.status(400).json({ status: false, message: 'Message content is required.' });
+    const sellerOwnerRes = await dbQuery('SELECT user_id FROM shopit_sellers WHERE id = $1 OR user_id = $1 LIMIT 1', [conv.seller_id]);
+    const sellerUserId = sellerOwnerRes.rows[0]?.user_id || conv.seller_id;
+
+    if (user.role !== 'admin') {
+      const blkRes = await dbQuery(
+        `SELECT id FROM shopit_blocks
+         WHERE (blocker_id = $1 AND blocked_id = $2) OR (blocker_id = $2 AND blocked_id = $1)
+         LIMIT 1`,
+        [conv.buyer_id, sellerUserId]
+      );
+      if (blkRes.rows.length > 0) {
+        return res.status(403).json({ status: false, message: 'Messaging is disabled because one participant has blocked the other.' });
+      }
     }
 
-    const cleanContent = String(content).trim().slice(0, 1000);
+    let attachmentMeta:
+      | { id: string; url: string; originalName: string; mimeType: string; sizeBytes: number; kind: 'image' | 'document' }
+      | undefined;
+
+    if (attachment && typeof attachment === 'object' && attachment.fileId) {
+      const fileId = String(attachment.fileId).trim();
+      const fRes = await dbQuery(
+        'SELECT id, owner_id, original_name, mime_type, size_bytes, conversation_id FROM shopit_files WHERE id = $1 LIMIT 1',
+        [fileId]
+      );
+      if (fRes.rows.length === 0) {
+        return res.status(400).json({ status: false, message: 'Attached file was not found.' });
+      }
+      const fRow = fRes.rows[0];
+      if (fRow.owner_id !== user.userId && user.role !== 'admin') {
+        return res.status(403).json({ status: false, message: 'You can only attach files that you uploaded.' });
+      }
+      if (fRow.conversation_id && fRow.conversation_id !== id) {
+        return res.status(403).json({ status: false, message: 'This file is attached to a different conversation.' });
+      }
+      await dbQuery('UPDATE shopit_files SET conversation_id = $1, is_public = false WHERE id = $2', [id, fileId]);
+      attachmentMeta = {
+        id: fRow.id,
+        url: `/api/files/${fRow.id}`,
+        originalName: fRow.original_name,
+        mimeType: fRow.mime_type,
+        sizeBytes: Number(fRow.size_bytes || 0),
+        kind: String(fRow.mime_type || '').startsWith('image/') ? 'image' : 'document',
+      };
+    }
+
     const sanitizedPresetOffer =
       presetOffer && typeof presetOffer === 'object' && Number.isFinite(Number(presetOffer.price)) && Number.isFinite(Number(presetOffer.quantity))
         ? {
@@ -2577,16 +2909,23 @@ router.post('/chat/conversations/:id/messages', requireAuth, async (req: Authent
           }
         : undefined;
 
+    const cleanContent = content !== undefined && content !== null ? String(content).trim().slice(0, 1000) : '';
+    if (!cleanContent && !attachmentMeta && !sanitizedPresetOffer) {
+      return res.status(400).json({ status: false, message: 'Message text or an attachment is required.' });
+    }
+
     const phoneRegex = /(\+?234|0)[789][01]\d{8}/;
     const bankRegex = /\b\d{10}\b/;
     const whatsappRegex = /(wa\.me|whatsapp|t\.me|telegram|ig\s*dm|dm\s*me\s*on\s*ig|instagram|snapchat|call\s*me|opay|palmpay|kuda|acct\s*no|account\s*number)/i;
     const freeTextDigitRegex = !sanitizedPresetOffer ? /\d/ : /$^/;
 
-    const isBypass =
-      phoneRegex.test(cleanContent) ||
-      bankRegex.test(cleanContent) ||
-      whatsappRegex.test(cleanContent) ||
-      freeTextDigitRegex.test(cleanContent);
+    const isBypass = Boolean(
+      cleanContent &&
+        (phoneRegex.test(cleanContent) ||
+          bankRegex.test(cleanContent) ||
+          whatsappRegex.test(cleanContent) ||
+          freeTextDigitRegex.test(cleanContent))
+    );
     const msgId = `msg_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
     const role = isUserSellerOwner(user, conv.seller_id) ? 'seller' : (user.role === 'admin' ? 'admin' : 'buyer');
 
@@ -2603,35 +2942,48 @@ router.post('/chat/conversations/:id/messages', requireAuth, async (req: Authent
       ? '[Security Notice: Numbers, phone numbers, account numbers, and off-platform payments are prohibited to protect your escrow security.]'
       : cleanContent;
 
+    const savedAttachment = isBypass ? undefined : attachmentMeta;
+    const lastMessagePreview = savedContent
+      ? savedContent
+      : savedAttachment
+        ? `[Attachment: ${savedAttachment.originalName}]`
+        : '[Custom Offer]';
+
     const nowIso = new Date().toISOString();
 
     await dbQuery(
       `INSERT INTO shopit_chat_messages (
         id, conversation_id, sender_id, sender_role, sender_masked_name,
-        content, is_blocked_bypass, preset_offer, created_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())`,
-      [msgId, id, user.userId, role, senderDisplayName, savedContent, isBypass, sanitizedPresetOffer ? JSON.stringify(sanitizedPresetOffer) : null]
+        content, is_blocked_bypass, preset_offer, attachment, created_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())`,
+      [
+        msgId,
+        id,
+        user.userId,
+        role,
+        senderDisplayName,
+        savedContent,
+        isBypass,
+        sanitizedPresetOffer ? JSON.stringify(sanitizedPresetOffer) : null,
+        savedAttachment ? JSON.stringify(savedAttachment) : null,
+      ]
     );
 
     const nextViolations = (parseInt(conv.bypass_violations_count, 10) || 0) + (isBypass ? 1 : 0);
+    const readCursorColumn = conv.buyer_id === user.userId ? 'buyer_last_read_at' : 'seller_last_read_at';
     await dbQuery(
       `UPDATE shopit_chat_conversations
        SET last_message = $1, last_message_at = NOW(),
            bypass_violations_count = $2,
-           is_chat_locked = CASE WHEN $2 >= 2 THEN true ELSE is_chat_locked END
+           is_chat_locked = CASE WHEN $2 >= 2 THEN true ELSE is_chat_locked END,
+           ${readCursorColumn} = NOW()
        WHERE id = $3`,
-      [savedContent, nextViolations, id]
+      [lastMessagePreview.slice(0, 200), nextViolations, id]
     );
 
     // Notify recipient in shopit_notifications
     try {
-      let recipientUserId: string | null = null;
-      if (role === 'buyer') {
-        const sRow = await dbQuery('SELECT user_id FROM shopit_sellers WHERE id = $1 OR user_id = $1 LIMIT 1', [conv.seller_id]);
-        recipientUserId = sRow.rows[0]?.user_id || conv.seller_id;
-      } else {
-        recipientUserId = conv.buyer_id;
-      }
+      const recipientUserId = role === 'buyer' ? sellerUserId : conv.buyer_id;
       if (recipientUserId && recipientUserId !== user.userId) {
         await dbQuery(
           `INSERT INTO shopit_notifications (id, user_id, title, message, type, is_read, link, created_at)
@@ -2640,7 +2992,7 @@ router.post('/chat/conversations/:id/messages', requireAuth, async (req: Authent
             `notif_chat_${Date.now()}_${crypto.randomBytes(2).toString('hex')}`,
             recipientUserId,
             `New Message from ${senderDisplayName}`,
-            isBypass ? 'A blocked safety notice was logged in your conversation.' : savedContent.slice(0, 140),
+            isBypass ? 'A blocked safety notice was logged in your conversation.' : lastMessagePreview.slice(0, 140),
           ]
         );
       }
@@ -2653,8 +3005,9 @@ router.post('/chat/conversations/:id/messages', requireAuth, async (req: Authent
       details: {
         senderRole: role,
         isBlockedBypass: isBypass,
+        hasAttachment: Boolean(savedAttachment),
         violationsCount: nextViolations,
-        preview: isBypass ? '[Off-platform contact blocked]' : savedContent.slice(0, 80),
+        preview: isBypass ? '[Off-platform contact blocked]' : lastMessagePreview.slice(0, 80),
       },
       ip: req.ip,
       userAgent: req.get('user-agent'),
@@ -2671,6 +3024,8 @@ router.post('/chat/conversations/:id/messages', requireAuth, async (req: Authent
         senderAvatarUrl: sMeta?.avatarUrl,
         senderProfileSlug: sMeta?.profileSlug,
         content: savedContent,
+        attachment: savedAttachment,
+        readByOther: false,
         isBlockedBypass: isBypass,
         presetOffer: sanitizedPresetOffer,
         createdAt: nowIso,
@@ -3051,9 +3406,11 @@ router.get('/notifications', requireAuth, async (req: AuthenticatedRequest, res:
       'SELECT * FROM shopit_notifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50',
       [user.userId]
     );
+    const unreadCount = result.rows.filter((r: any) => !r.is_read).length;
 
     return res.json({
       status: true,
+      unreadCount,
       notifications: result.rows.map((row: any) => ({
         id: row.id,
         userId: row.user_id,
@@ -3065,6 +3422,19 @@ router.get('/notifications', requireAuth, async (req: AuthenticatedRequest, res:
         createdAt: row.created_at,
       })),
     });
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: err.message });
+  }
+});
+
+router.post('/notifications/read-all', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const user = req.user!;
+    await dbQuery(
+      'UPDATE shopit_notifications SET is_read = true WHERE user_id = $1 AND is_read = false',
+      [user.userId]
+    );
+    return res.json({ status: true, unreadCount: 0, message: 'All notifications marked as read.' });
   } catch (err: any) {
     return res.status(500).json({ status: false, message: err.message });
   }

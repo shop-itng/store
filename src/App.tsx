@@ -28,12 +28,19 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import { NotFoundView } from './components/NotFoundView';
 import { ResetPasswordPage } from './components/ResetPasswordPage';
 import { AccountSettingsView } from './components/AccountSettingsView';
-import { Store, ShieldCheck, MapPin, Star, ArrowRight, PackageOpen, ShoppingBag, ShieldAlert, ArrowLeft, Clock } from 'lucide-react';
+import { Store, ShieldCheck, MapPin, Star, ArrowRight, PackageOpen, ShoppingBag, ShieldAlert, ArrowLeft, Clock, Loader2, Users } from 'lucide-react';
+import { Product } from './types';
 
 
 const MarketplaceContent: React.FC = () => {
   const [isInitialLoading, setIsInitialLoading] = React.useState(true);
   const [selectedSpotCampus, setSelectedSpotCampus] = React.useState<string>('All');
+  const [feedTab, setFeedTab] = React.useState<'all' | 'following'>('all');
+  const [followingProducts, setFollowingProducts] = React.useState<Product[]>([]);
+  const [followingTotal, setFollowingTotal] = React.useState(0);
+  const [followingShopsCount, setFollowingShopsCount] = React.useState(0);
+  const [followingLoading, setFollowingLoading] = React.useState(false);
+  const [followingError, setFollowingError] = React.useState<string | null>(null);
 
   React.useEffect(() => {
     const timer = setTimeout(() => {
@@ -59,7 +66,31 @@ const MarketplaceContent: React.FC = () => {
     userLocation,
     currentUser,
     emergencyControls,
+    fetchFollowingFeed,
   } = useApp();
+
+  const loadFollowingFeed = React.useCallback(async () => {
+    if (!currentUser?.id) return;
+    setFollowingLoading(true);
+    setFollowingError(null);
+    const res = await fetchFollowingFeed(1);
+    setFollowingLoading(false);
+    if (!res.status) {
+      setFollowingError(res.message || 'Could not load Following feed.');
+      return;
+    }
+    setFollowingProducts(res.products);
+    setFollowingTotal(res.total);
+    setFollowingShopsCount(res.followingCount);
+  }, [currentUser?.id, fetchFollowingFeed]);
+
+  React.useEffect(() => {
+    if (!currentUser?.id && feedTab === 'following') {
+      setFeedTab('all');
+    } else if (currentUser?.id && feedTab === 'following' && activeView === 'catalog') {
+      void loadFollowingFeed();
+    }
+  }, [currentUser?.id, feedTab, activeView, loadFollowingFeed]);
 
   const selectedProduct = products.find(p => p.id === selectedProductId);
 
@@ -127,26 +158,107 @@ const MarketplaceContent: React.FC = () => {
 
             {/* Product Feed Grid */}
             <section className="space-y-4">
-              <div className="flex items-center justify-between">
+              <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <h2 className="text-base sm:text-lg font-black text-neutral-900 dark:text-white">
-                    Items & Crafts For Sale
+                    {feedTab === 'following' ? 'Following Feed' : 'Items & Crafts For Sale'}
                   </h2>
                   <p className="text-xs text-neutral-500 dark:text-[#A1A1AA] mt-0.5">
-                    {filteredProducts.length > 0
+                    {feedTab === 'following'
+                      ? followingTotal > 0
+                        ? `Showing ${followingTotal} item(s) from shops you follow`
+                        : 'Latest crafts from makers you follow'
+                      : filteredProducts.length > 0
                       ? `Showing ${filteredProducts.length} items available in your location`
                       : 'Marketplace feed for Nigerian teens and youth'}
                   </p>
                 </div>
 
-                {filteredProducts.length > 0 && (
-                  <span className="text-xs text-neutral-500 dark:text-[#A1A1AA] hidden sm:inline">
-                    Location: <strong className="text-neutral-900 dark:text-white">{userLocation.area}</strong>
-                  </span>
-                )}
+                <div className="flex items-center gap-3">
+                  {currentUser?.id && (
+                    <div className="inline-flex p-1 rounded-xl bg-white dark:bg-[#15161C] border border-[#E4E4E7] dark:border-[#27272A]">
+                      <button
+                        type="button"
+                        onClick={() => setFeedTab('all')}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-black transition-colors whitespace-nowrap ${
+                          feedTab === 'all'
+                            ? 'bg-[#111111] text-[#9FE870]'
+                            : 'text-[#71717A] dark:text-[#A1A1AA] hover:text-[#111111] dark:hover:text-white'
+                        }`}
+                      >
+                        All Crafts
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setFeedTab('following')}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-black transition-colors whitespace-nowrap flex items-center gap-1 ${
+                          feedTab === 'following'
+                            ? 'bg-[#FF6B00] text-[#111111]'
+                            : 'text-[#71717A] dark:text-[#A1A1AA] hover:text-[#111111] dark:hover:text-white'
+                        }`}
+                      >
+                        <Users className="w-3.5 h-3.5" />
+                        <span>Following</span>
+                      </button>
+                    </div>
+                  )}
+
+                  {feedTab === 'all' && filteredProducts.length > 0 && (
+                    <span className="text-xs text-neutral-500 dark:text-[#A1A1AA] hidden sm:inline">
+                      Location: <strong className="text-neutral-900 dark:text-white">{userLocation.area}</strong>
+                    </span>
+                  )}
+                </div>
               </div>
 
-              {products.length === 0 ? (
+              {feedTab === 'following' ? (
+                followingLoading ? (
+                  <div className="bg-white dark:bg-[#15161C] rounded-2xl border border-[#E4E4E7] dark:border-[#27272A] p-12 text-center space-y-2">
+                    <Loader2 className="w-7 h-7 animate-spin text-[#FF6B00] mx-auto" />
+                    <p className="text-xs font-bold text-[#71717A] dark:text-[#A1A1AA]">
+                      Loading crafts from shops you follow...
+                    </p>
+                  </div>
+                ) : followingError ? (
+                  <div className="bg-white dark:bg-[#15161C] rounded-2xl border border-[#E4E4E7] dark:border-[#27272A] p-10 text-center max-w-md mx-auto space-y-3">
+                    <p className="text-xs font-bold text-rose-600">{followingError}</p>
+                    <button
+                      type="button"
+                      onClick={() => void loadFollowingFeed()}
+                      className="px-4 py-2 bg-[#111111] text-[#9FE870] text-xs font-black rounded-xl border border-[#FF6B00]"
+                    >
+                      Try Again
+                    </button>
+                  </div>
+                ) : followingProducts.length > 0 ? (
+                  <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3.5 sm:gap-5">
+                    {followingProducts.map((product, idx) => (
+                      <ProductCard key={product.id} product={product} index={idx} />
+                    ))}
+                  </div>
+                ) : (
+                  <div className="bg-white dark:bg-[#15161C] rounded-2xl border border-[#E4E4E7] dark:border-[#27272A] p-10 text-center max-w-md mx-auto space-y-3 shadow-xs">
+                    <Users className="w-8 h-8 text-[#FF6B00] mx-auto" />
+                    <h3 className="text-sm font-black text-[#111111] dark:text-white">
+                      {followingShopsCount === 0
+                        ? "You're not following any shops yet"
+                        : "Followed shops haven't listed items yet"}
+                    </h3>
+                    <p className="text-xs text-[#71717A] dark:text-[#A1A1AA] leading-relaxed">
+                      {followingShopsCount === 0
+                        ? 'Follow your favorite campus makers from any listing or shop profile to see their newest crafts here.'
+                        : 'Check back soon or browse All Crafts across the marketplace.'}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setFeedTab('all')}
+                      className="px-4 py-2 bg-[#FF6B00] text-[#111111] border-2 border-[#111111] text-xs font-black rounded-xl"
+                    >
+                      Browse All Crafts
+                    </button>
+                  </div>
+                )
+              ) : products.length === 0 ? (
                 /* Ready-Made Fresh Marketplace Launch State (Solid, Human-Made, No gradients) */
                 <div className="bg-white dark:bg-[#15161C] rounded-3xl border-2 border-[#111111] dark:border-[#27272A] p-8 sm:p-12 text-center max-w-xl mx-auto space-y-6 shadow-[0_4px_0_#111111] dark:shadow-none transition-colors">
                   {/* The Official Shop It Logo */}

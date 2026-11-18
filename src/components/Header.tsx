@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
 import { NIGERIAN_STATES } from '../data/nigerianLocations';
 import {
@@ -15,6 +15,9 @@ import {
   Sun,
   Moon,
   Settings,
+  Bell,
+  CheckCheck,
+  RefreshCw,
 } from 'lucide-react';
 
 export const Header: React.FC = () => {
@@ -28,21 +31,83 @@ export const Header: React.FC = () => {
     conversations,
     openQuickListModal,
     openProfile,
+    openProduct,
     openAccountSettings,
     userLocation,
     setUserLocation,
     notify,
     theme,
     toggleTheme,
+    dbNotifications,
+    unreadNotificationsCount,
+    refreshNotifications,
+    markNotificationRead,
+    markAllNotificationsRead,
   } = useApp();
 
   const [isLocationModalOpen, setIsLocationModalOpen] = useState(false);
   const [tempState, setTempState] = useState(userLocation.state || 'Lagos');
   const [tempCity, setTempCity] = useState(userLocation.city || 'Lagos Mainland');
   const [tempArea, setTempArea] = useState(userLocation.area || 'Yaba');
+  const [isNotifOpen, setIsNotifOpen] = useState(false);
+  const [isRefreshingNotifs, setIsRefreshingNotifs] = useState(false);
+  const notifContainerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!isNotifOpen) return;
+    const handleClickOutside = (ev: MouseEvent) => {
+      if (notifContainerRef.current && !notifContainerRef.current.contains(ev.target as Node)) {
+        setIsNotifOpen(false);
+      }
+    };
+    const handleEsc = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') setIsNotifOpen(false);
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    document.addEventListener('keydown', handleEsc);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('keydown', handleEsc);
+    };
+  }, [isNotifOpen]);
+
+  const handleNotificationClick = (item: (typeof dbNotifications)[number]) => {
+    if (!item.isRead) {
+      void markNotificationRead(item.id);
+    }
+    setIsNotifOpen(false);
+    const link = (item.link || '').trim();
+    if (!link) return;
+
+    try {
+      const parsed = new URL(link, typeof window !== 'undefined' ? window.location.origin : 'https://shopitng.vercel.app');
+      const prodParam = parsed.searchParams.get('product');
+      const profParam = parsed.searchParams.get('profile');
+      if (prodParam) {
+        openProduct(prodParam);
+        return;
+      }
+      if (profParam) {
+        openProfile(profParam);
+        return;
+      }
+      if (parsed.pathname.startsWith('/chat')) {
+        setActiveView('chat');
+      } else if (parsed.pathname.startsWith('/orders')) {
+        setActiveView('orders');
+      } else if (parsed.pathname.startsWith('/seller')) {
+        setActiveView('seller_dashboard');
+      } else if (parsed.pathname.startsWith('/settings')) {
+        openAccountSettings();
+      }
+    } catch {
+      if (link.includes('chat')) setActiveView('chat');
+      else if (link.includes('order')) setActiveView('orders');
+    }
+  };
 
   const totalUnreadMessages = conversations.reduce(
-    (sum, c) => sum + (currentUser?.role === 'seller' ? c.unreadSeller : c.unreadBuyer),
+    (sum, c) => sum + (c.buyerId === currentUser?.id ? c.unreadBuyer : c.unreadSeller),
     0
   );
 
@@ -76,7 +141,7 @@ export const Header: React.FC = () => {
   };
 
   return (
-    <header className="sticky top-0 z-40 bg-white dark:bg-[#0D0E12] border-b border-[#E4E4E7] dark:border-[#27272A] transition-colors duration-200 w-full max-w-full overflow-hidden">
+    <header className="sticky top-0 z-40 bg-white dark:bg-[#0D0E12] border-b border-[#E4E4E7] dark:border-[#27272A] transition-colors duration-200 w-full max-w-full">
       <div className="max-w-7xl mx-auto px-3 sm:px-6 h-14 sm:h-16 flex items-center justify-between gap-2 sm:gap-4 min-w-0">
         {/* Zone 1: Official Logo + Brand Name */}
         <div className="flex items-center gap-2 sm:gap-3 min-w-0 shrink">
@@ -228,9 +293,113 @@ export const Header: React.FC = () => {
             )}
           </button>
 
-          {/* User Profile Pill, Settings, & Role Button */}
+          {/* User Profile Pill, Notifications, Settings, & Role Button */}
           {currentUser ? (
             <div className="flex items-center gap-1.5">
+              {/* Live Notifications Bell */}
+              <div ref={notifContainerRef} className="relative">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = !isNotifOpen;
+                    setIsNotifOpen(next);
+                    if (next) void refreshNotifications();
+                  }}
+                  aria-label="Notifications"
+                  title="Notifications"
+                  className="relative p-1.5 sm:p-2 text-[#111111] dark:text-[#A1A1AA] hover:text-[#FF6B00] rounded-xl hover:bg-[#FFF4EC] dark:hover:bg-[#1E2028] border border-[#E4E4E7] dark:border-[#27272A] bg-white dark:bg-[#15161C] transition-colors"
+                >
+                  <Bell className="w-4 h-4 sm:w-5 sm:h-5" />
+                  {unreadNotificationsCount > 0 && (
+                    <span className="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 rounded-full bg-[#FF6B00] text-[#111111] border border-[#111111] dark:border-[#27272A] text-[10px] font-black flex items-center justify-center font-mono-numbers">
+                      {unreadNotificationsCount > 99 ? '99+' : unreadNotificationsCount}
+                    </span>
+                  )}
+                </button>
+
+                {isNotifOpen && (
+                  <div className="fixed sm:absolute right-3 sm:right-0 top-15 sm:top-full sm:mt-2 w-[calc(100vw-1.5rem)] sm:w-96 max-h-[75vh] bg-white dark:bg-[#15161C] border-2 border-[#111111] dark:border-[#27272A] rounded-2xl shadow-2xl z-50 flex flex-col overflow-hidden">
+                    <div className="px-4 py-3 border-b border-[#E4E4E7] dark:border-[#27272A] flex items-center justify-between gap-2 bg-[#FAFAFA] dark:bg-[#0D0E12]">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-black text-[#111111] dark:text-white">
+                          Notifications
+                        </span>
+                        {unreadNotificationsCount > 0 && (
+                          <span className="px-2 py-0.5 rounded-md bg-[#9FE870] text-[#111111] text-[10px] font-black font-mono-numbers">
+                            {unreadNotificationsCount} unread
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            setIsRefreshingNotifs(true);
+                            await refreshNotifications();
+                            setIsRefreshingNotifs(false);
+                          }}
+                          title="Refresh notifications"
+                          className="p-1 rounded-lg text-[#71717A] hover:text-[#111111] dark:hover:text-white"
+                        >
+                          <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingNotifs ? 'animate-spin text-[#FF6B00]' : ''}`} />
+                        </button>
+                        {unreadNotificationsCount > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => void markAllNotificationsRead()}
+                            className="text-[11px] font-bold text-[#FF6B00] hover:underline flex items-center gap-1 whitespace-nowrap"
+                          >
+                            <CheckCheck className="w-3.5 h-3.5" />
+                            <span>Mark all read</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="overflow-y-auto divide-y divide-[#F4F4F5] dark:divide-[#27272A] max-h-[55vh]">
+                      {dbNotifications.length === 0 ? (
+                        <div className="p-8 text-center text-xs text-[#71717A] dark:text-[#A1A1AA] space-y-1.5">
+                          <Bell className="w-7 h-7 mx-auto text-[#D4D4D8] dark:text-[#3F3F46]" />
+                          <p className="font-bold text-[#111111] dark:text-white">All caught up</p>
+                          <p className="text-[11px]">No notifications yet. Activity from followers, orders, and chat appears here.</p>
+                        </div>
+                      ) : (
+                        dbNotifications.map(item => (
+                          <button
+                            key={item.id}
+                            type="button"
+                            onClick={() => handleNotificationClick(item)}
+                            className={`w-full text-left px-4 py-3 hover:bg-[#FAFAFA] dark:hover:bg-[#1E2028] transition-colors flex items-start gap-2.5 ${
+                              item.isRead ? 'opacity-75' : 'bg-[#FFF4EC]/40 dark:bg-[#1E2028]/70'
+                            }`}
+                          >
+                            <span
+                              className={`w-2 h-2 rounded-full mt-1.5 shrink-0 ${
+                                item.isRead ? 'bg-transparent' : 'bg-[#FF6B00]'
+                              }`}
+                            />
+                            <div className="min-w-0 flex-1 space-y-0.5">
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="text-xs font-black text-[#111111] dark:text-white truncate">
+                                  {item.title}
+                                </span>
+                                <span className="text-[10px] text-[#71717A] dark:text-[#A1A1AA] shrink-0">
+                                  {item.createdAt ? new Date(item.createdAt).toLocaleDateString() : ''}
+                                </span>
+                              </div>
+                              <p className="text-[11px] text-[#52525B] dark:text-[#D4D4D8] leading-snug line-clamp-2">
+                                {item.message}
+                              </p>
+                            </div>
+                          </button>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+
               <button
                 type="button"
                 onClick={() => openProfile(currentUser.profileSlug || currentUser.id)}

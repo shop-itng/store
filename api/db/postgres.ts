@@ -80,6 +80,7 @@ export const CORE_SCHEMA_TABLES = [
   'shopit_platform_settings',
   'shopit_follows',
   'shopit_blocks',
+  'shopit_files',
 ] as const;
 
 export function getDatabaseUrlSource(): string | null {
@@ -388,8 +389,8 @@ export async function runMigration(): Promise<void> {
       campus VARCHAR(120),
       location_area VARCHAR(120),
       interests JSONB DEFAULT '[]'::jsonb,
-      notification_prefs JSONB DEFAULT '{"newFollower":true,"followBack":true,"newProductFromFollowing":true,"messageReceived":true,"orderUpdates":true,"emailNotifications":true}'::jsonb,
-      privacy_settings JSONB DEFAULT '{"profileVisibility":"everyone","whoCanFollow":"everyone","whoCanMessage":"everyone","showFollowersList":true,"showFollowingList":true,"showLastSeen":true}'::jsonb,
+      notification_prefs JSONB DEFAULT '{"emailOrders":true,"emailMessages":true,"emailFollowers":true,"emailRestock":true}'::jsonb,
+      privacy_settings JSONB DEFAULT '{"profileVisibility":"public","whoCanFollow":"everyone","whoCanMessage":"everyone","showFollowersList":true,"showFollowingList":true,"showLastSeen":true}'::jsonb,
       last_seen_at TIMESTAMPTZ DEFAULT NOW(),
       deleted_at TIMESTAMPTZ,
       last_login_at TIMESTAMPTZ,
@@ -655,6 +656,8 @@ export async function runMigration(): Promise<void> {
       last_message_at TIMESTAMPTZ DEFAULT NOW(),
       is_chat_locked BOOLEAN DEFAULT false,
       bypass_violations_count INTEGER DEFAULT 0,
+      buyer_last_read_at TIMESTAMPTZ,
+      seller_last_read_at TIMESTAMPTZ,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
@@ -668,6 +671,8 @@ export async function runMigration(): Promise<void> {
       content TEXT NOT NULL,
       is_blocked_bypass BOOLEAN DEFAULT false,
       preset_offer JSONB,
+      attachment JSONB,
+      reply_to_id VARCHAR(64),
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
@@ -888,6 +893,24 @@ export async function runMigration(): Promise<void> {
     );
     CREATE INDEX IF NOT EXISTS idx_shopit_blocks_blocker ON shopit_blocks (blocker_id);
     CREATE INDEX IF NOT EXISTS idx_shopit_blocks_blocked ON shopit_blocks (blocked_id);
+
+    -- 30. Unified File Storage Table (PostgreSQL-backed, zero local disk dependencies)
+    CREATE TABLE IF NOT EXISTS shopit_files (
+      id VARCHAR(80) PRIMARY KEY,
+      owner_id VARCHAR(64) NOT NULL REFERENCES shopit_users(id) ON DELETE CASCADE,
+      purpose VARCHAR(40) NOT NULL DEFAULT 'general',
+      original_name VARCHAR(255) NOT NULL,
+      mime_type VARCHAR(100) NOT NULL,
+      size_bytes INTEGER NOT NULL,
+      sha256 VARCHAR(64) NOT NULL,
+      data_base64 TEXT NOT NULL,
+      is_public BOOLEAN NOT NULL DEFAULT true,
+      conversation_id VARCHAR(64),
+      order_id VARCHAR(64),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_shopit_files_owner ON shopit_files (owner_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_shopit_files_conv ON shopit_files (conversation_id);
   `;
 
   // Comprehensive column healing: ensures every table has all required columns regardless of initial creation schema
@@ -1155,6 +1178,12 @@ export async function runMigration(): Promise<void> {
     'ALTER TABLE shopit_admin_alerts ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();',
     'CREATE INDEX IF NOT EXISTS idx_shopit_admin_alerts_created_heal ON shopit_admin_alerts (created_at DESC);',
     'CREATE INDEX IF NOT EXISTS idx_shopit_admin_alerts_type_read_heal ON shopit_admin_alerts (alert_type, is_read);',
+
+    // 13. Chat Conversations & Messages read/attachment healing
+    'ALTER TABLE shopit_chat_conversations ADD COLUMN IF NOT EXISTS buyer_last_read_at TIMESTAMPTZ;',
+    'ALTER TABLE shopit_chat_conversations ADD COLUMN IF NOT EXISTS seller_last_read_at TIMESTAMPTZ;',
+    'ALTER TABLE shopit_chat_messages ADD COLUMN IF NOT EXISTS attachment JSONB;',
+    'ALTER TABLE shopit_chat_messages ADD COLUMN IF NOT EXISTS reply_to_id VARCHAR(64);',
   ];
 
   const stripLeadingComments = (sql: string): string =>
@@ -1448,7 +1477,7 @@ export async function runMigration(): Promise<void> {
               s.campus AS seller_campus, s.location_area AS seller_area, s.under_18 AS seller_under_18
        FROM shopit_users u
        LEFT JOIN shopit_sellers s ON (u.id = s.user_id OR u.id = s.id)
-       WHERE u.display_name IS NULL OR TRIM(u.display_name) = '' OR u.profile_slug IS NULL OR TRIM(u.profile_slug) = '' OR u.privacy_settings IS NULL OR u.notification_prefs IS NULL`
+       WHERE u.display_name IS NULL OR u.display_name = '' OR u.profile_slug IS NULL OR u.profile_slug = '' OR u.privacy_settings IS NULL OR u.notification_prefs IS NULL`
     );
     const {
       extractFirstName,
@@ -1473,8 +1502,8 @@ export async function runMigration(): Promise<void> {
 
       await pool.query(
         `UPDATE shopit_users
-         SET display_name = COALESCE(NULLIF(TRIM(display_name), ''), $1),
-             profile_slug = COALESCE(NULLIF(TRIM(profile_slug), ''), $2),
+         SET display_name = $1,
+             profile_slug = $2,
              privacy_settings = COALESCE(privacy_settings, $3::jsonb),
              notification_prefs = COALESCE(notification_prefs, $4::jsonb),
              campus = COALESCE(campus, $5),

@@ -4,6 +4,7 @@ import { NIGERIAN_STATES } from '../data/nigerianLocations';
 import { ProductCategory } from '../types';
 import { getPricingBreakdown, formatNaira } from '../utils/pricing';
 import { clientContainsForbiddenContactInfo } from '../utils/profileConstants';
+import { uploadFileToServer } from '../utils/fileUpload';
 import {
   X,
   Upload,
@@ -133,27 +134,23 @@ export const QuickListModal: React.FC = () => {
   const titleCheck = title.trim() ? clientContainsForbiddenContactInfo(title) : { blocked: false };
   const descCheck = description.trim() ? clientContainsForbiddenContactInfo(description) : { blocked: false };
 
-  const handleImageFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImageFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      if (!file.type.startsWith('image/')) {
-        notify('Please select an image file (PNG, JPG, WEBP).', 'error');
-        return;
-      }
-      setIsCompressing(true);
-      const reader = new FileReader();
-      reader.onload = event => {
-        setIsCompressing(false);
-        if (event.target?.result) {
-          setImageUrl(event.target.result as string);
-          notify('Your product photo has been loaded successfully!', 'success');
-        }
-      };
-      reader.onerror = () => {
-        setIsCompressing(false);
-        notify('Could not load image. Please try again.', 'error');
-      };
-      reader.readAsDataURL(file);
+    e.target.value = '';
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      notify('Please select an image file (PNG, JPG, WEBP).', 'error');
+      return;
+    }
+    setIsCompressing(true);
+    try {
+      const uploaded = await uploadFileToServer(file, 'product');
+      setImageUrl(uploaded.url);
+      notify('Your product photo has been uploaded cleanly!', 'success');
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Could not upload image. Please try again.', 'error');
+    } finally {
+      setIsCompressing(false);
     }
   };
 
@@ -422,10 +419,10 @@ export const QuickListModal: React.FC = () => {
               >
                 <Upload className="w-8 h-8 text-[#FF6B00] mx-auto mb-2" />
                 <span className="text-xs font-bold text-[#111111] dark:text-white block">
-                  {isCompressing ? 'Loading photo...' : 'Tap to Upload Product Photo from Device / PC'}
+                  {isCompressing ? 'Uploading photo...' : 'Tap to Upload Product Photo from Device / PC'}
                 </span>
                 <span className="text-[11px] text-[#71717A] dark:text-[#A1A1AA] mt-1 block">
-                  PNG, JPG, or WEBP · Clear photo of your real item
+                  PNG, JPG, or WEBP up to 10MB · Clear photo of your real item
                 </span>
                 <input
                   ref={fileInputRef}
@@ -570,7 +567,7 @@ export const QuickListModal: React.FC = () => {
           <div className="pt-2 flex flex-col sm:flex-row gap-2">
             <button
               type="button"
-              disabled={isSubmitting || titleCheck.blocked || descCheck.blocked}
+              disabled={isSubmitting || isCompressing || titleCheck.blocked || descCheck.blocked}
               onClick={() => void submitListing(true)}
               className="sm:w-44 py-3 bg-[#FAFAFA] dark:bg-[#1E2028] hover:bg-[#F4F4F5] dark:hover:bg-[#27272A] text-[#111111] dark:text-white border border-[#E4E4E7] dark:border-[#27272A] font-bold text-xs rounded-xl transition-all flex items-center justify-center gap-1.5 disabled:opacity-50"
             >
@@ -579,7 +576,7 @@ export const QuickListModal: React.FC = () => {
             </button>
             <button
               type="submit"
-              disabled={isSubmitting || titleCheck.blocked || descCheck.blocked}
+              disabled={isSubmitting || isCompressing || titleCheck.blocked || descCheck.blocked}
               className="flex-1 py-3 bg-[#FF6B00] hover:bg-[#FF7A1A] disabled:opacity-50 text-[#111111] border-2 border-[#111111] font-black text-xs sm:text-sm rounded-xl shadow-[0_3px_0_#111111] transition-all flex items-center justify-center gap-2 active:translate-y-0.5 cursor-pointer"
             >
               <span className="w-5 h-5 rounded-full bg-[#9FE870] text-[#111111] flex items-center justify-center font-black">

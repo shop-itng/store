@@ -1,16 +1,16 @@
 import crypto from 'crypto';
 
 export const PROFILE_INTERESTS = [
-  'Crochet & Knitwear',
-  'Beads & Jewelry',
-  'Skincare & Hair',
-  'Apparel & Tote Bags',
-  'Resin & Decor',
-  'Art & Stationery',
-  'Tech Accessories',
-  'Thrift & Vintage',
-  'Custom Gifts',
-  'Campus Essentials',
+  'Waist Beads & Jewelry',
+  'Crochet & Yarn',
+  'Perfume Oils & Scents',
+  'Thrift & Fashion',
+  'Room Decor & Candles',
+  'Art & Illustration',
+  'Phone Cases & Tech Crafts',
+  'Hair Accessories',
+  'Leather & Bags',
+  'Stationery & Gifts',
 ] as const;
 
 export const ALLOWED_AVATAR_PRESETS = [
@@ -23,34 +23,30 @@ export const ALLOWED_AVATAR_PRESETS = [
 ] as const;
 
 export interface NotificationPrefs {
-  newFollower: boolean;
-  followBack: boolean;
-  newProductFromFollowing: boolean;
-  messageReceived: boolean;
-  orderUpdates: boolean;
-  emailNotifications: boolean;
+  emailOrders: boolean;
+  emailMessages: boolean;
+  emailFollowers: boolean;
+  emailRestock: boolean;
 }
 
 export interface PrivacySettings {
-  profileVisibility: 'everyone' | 'followers';
+  profileVisibility: 'public' | 'followers';
   whoCanFollow: 'everyone' | 'approval';
-  whoCanMessage: 'everyone' | 'followers' | 'order_or_product';
+  whoCanMessage: 'everyone' | 'followers' | 'mutual';
   showFollowersList: boolean;
   showFollowingList: boolean;
   showLastSeen: boolean;
 }
 
 export const DEFAULT_NOTIFICATION_PREFS: NotificationPrefs = {
-  newFollower: true,
-  followBack: true,
-  newProductFromFollowing: true,
-  messageReceived: true,
-  orderUpdates: true,
-  emailNotifications: true,
+  emailOrders: true,
+  emailMessages: true,
+  emailFollowers: true,
+  emailRestock: true,
 };
 
 export const DEFAULT_PRIVACY_SETTINGS: PrivacySettings = {
-  profileVisibility: 'everyone',
+  profileVisibility: 'public',
   whoCanFollow: 'everyone',
   whoCanMessage: 'everyone',
   showFollowersList: true,
@@ -59,9 +55,9 @@ export const DEFAULT_PRIVACY_SETTINGS: PrivacySettings = {
 };
 
 export const UNDER_18_PRIVACY_SETTINGS: PrivacySettings = {
-  profileVisibility: 'followers',
+  profileVisibility: 'public',
   whoCanFollow: 'approval',
-  whoCanMessage: 'order_or_product',
+  whoCanMessage: 'mutual',
   showFollowersList: false,
   showFollowingList: false,
   showLastSeen: false,
@@ -154,7 +150,7 @@ export async function generateUniqueProfileSlug(
 /**
  * Strips EXIF / APP1 / APP13 / COM metadata segments from a JPEG buffer.
  */
-function stripJpegMetadata(buf: Buffer): Buffer | null {
+export function stripJpegMetadata(buf: Buffer): Buffer | null {
   if (buf.length < 4 || buf[0] !== 0xff || buf[1] !== 0xd8) {
     return null;
   }
@@ -183,7 +179,7 @@ function stripJpegMetadata(buf: Buffer): Buffer | null {
     const segLen = buf.readUInt16BE(offset + 2);
     if (segLen < 2 || offset + 2 + segLen > buf.length) break;
 
-    // Drop APP1 (EXIF/XMP), APP2 (ICC/FlashPix optional), APP13 (IPTC), COM (comments)
+    // Drop APP1 (EXIF/XMP), APP13 (IPTC), COM (comments)
     const shouldDrop = marker === 0xe1 || marker === 0xed || marker === 0xfe;
     if (!shouldDrop) {
       chunks.push(buf.subarray(offset, offset + 2 + segLen));
@@ -194,8 +190,52 @@ function stripJpegMetadata(buf: Buffer): Buffer | null {
   return Buffer.concat(chunks);
 }
 
+function verifyMagicBytesForImage(
+  mime: string,
+  buf: Buffer
+): { ok: true; buf: Buffer } | { ok: false; message: string } {
+  const isJpeg = buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;
+  const isPng =
+    buf.length >= 8 &&
+    buf[0] === 0x89 &&
+    buf[1] === 0x50 &&
+    buf[2] === 0x4e &&
+    buf[3] === 0x47 &&
+    buf[4] === 0x0d &&
+    buf[5] === 0x0a &&
+    buf[6] === 0x1a &&
+    buf[7] === 0x0a;
+  const isWebp =
+    buf.length >= 12 &&
+    buf.subarray(0, 4).toString('ascii') === 'RIFF' &&
+    buf.subarray(8, 12).toString('ascii') === 'WEBP';
+  const isGif =
+    buf.length >= 6 &&
+    (buf.subarray(0, 6).toString('ascii') === 'GIF87a' || buf.subarray(0, 6).toString('ascii') === 'GIF89a');
+
+  if (mime === 'image/jpeg') {
+    if (!isJpeg) return { ok: false, message: 'File content does not match JPEG image signature.' };
+    const stripped = stripJpegMetadata(buf);
+    if (!stripped) return { ok: false, message: 'Corrupted JPEG image.' };
+    return { ok: true, buf: stripped };
+  }
+  if (mime === 'image/png') {
+    if (!isPng) return { ok: false, message: 'File content does not match PNG image signature.' };
+    return { ok: true, buf };
+  }
+  if (mime === 'image/webp') {
+    if (!isWebp) return { ok: false, message: 'File content does not match WebP image signature.' };
+    return { ok: true, buf };
+  }
+  if (mime === 'image/gif') {
+    if (!isGif) return { ok: false, message: 'File content does not match GIF image signature.' };
+    return { ok: true, buf };
+  }
+  return { ok: false, message: 'Unsupported image type.' };
+}
+
 /**
- * Validates avatar/cover image URL or base64 data URI by magic bytes, 5MB limit, and EXIF stripping.
+ * Validates avatar/cover image URL, preset path, server-stored /api/files/:id path, or base64 data URI.
  */
 export function validateAndSanitizeImageInput(
   rawUrl: unknown,
@@ -205,7 +245,7 @@ export function validateAndSanitizeImageInput(
     return allowEmpty ? { valid: true, url: null } : { valid: false, message: 'Image is required.' };
   }
   if (typeof rawUrl !== 'string') {
-    return { valid: false, message: 'Image must be a valid data URL or preset path.' };
+    return { valid: false, message: 'Image must be a valid upload path, data URL, or preset path.' };
   }
   const trimmed = rawUrl.trim();
   if (trimmed.length === 0) {
@@ -216,7 +256,12 @@ export function validateAndSanitizeImageInput(
     return { valid: true, url: trimmed };
   }
 
-  // Allow existing server-issued private/public blob URLs if already stored
+  // Server-issued unified upload path
+  if (/^\/api\/files\/file_[a-zA-Z0-9_-]+$/.test(trimmed)) {
+    return { valid: true, url: trimmed };
+  }
+
+  // Allow existing server-issued Vercel Blob URLs if stored from earlier versions
   if (/^https:\/\/[a-z0-9.-]+\.public\.blob\.vercel-storage\.com\//i.test(trimmed)) {
     return { valid: true, url: trimmed };
   }
@@ -235,58 +280,167 @@ export function validateAndSanitizeImageInput(
     return { valid: false, message: 'Image size must be greater than 0 and under 5 MB.' };
   }
 
-  const isJpeg = buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;
-  const isPng =
-    buf.length >= 8 &&
-    buf[0] === 0x89 &&
-    buf[1] === 0x50 &&
-    buf[2] === 0x4e &&
-    buf[3] === 0x47 &&
-    buf[4] === 0x0d &&
-    buf[5] === 0x0a &&
-    buf[6] === 0x1a &&
-    buf[7] === 0x0a;
-  const isWebp =
-    buf.length >= 12 &&
-    buf.subarray(0, 4).toString('ascii') === 'RIFF' &&
-    buf.subarray(8, 12).toString('ascii') === 'WEBP';
-
-  if (mime === 'image/jpeg' && !isJpeg) {
-    return { valid: false, message: 'File content does not match JPEG image signature.' };
-  }
-  if (mime === 'image/png' && !isPng) {
-    return { valid: false, message: 'File content does not match PNG image signature.' };
-  }
-  if (mime === 'image/webp' && !isWebp) {
-    return { valid: false, message: 'File content does not match WebP image signature.' };
-  }
-
-  let cleanBuf: Buffer = buf;
-  if (isJpeg) {
-    const stripped = stripJpegMetadata(buf);
-    if (!stripped) {
-      return { valid: false, message: 'Corrupted JPEG image.' };
-    }
-    cleanBuf = stripped;
+  const verified = verifyMagicBytesForImage(mime, buf);
+  if (!verified.ok) {
+    return { valid: false, message: verified.message };
   }
 
   return {
     valid: true,
-    url: `data:${mime};base64,${cleanBuf.toString('base64')}`,
+    url: `data:${mime};base64,${verified.buf.toString('base64')}`,
   };
 }
 
-export function sanitizeNotificationPrefs(input: unknown, current: NotificationPrefs = DEFAULT_NOTIFICATION_PREFS): NotificationPrefs {
-  const src = input && typeof input === 'object' ? (input as Record<string, any>) : {};
+export type UploadFilePurpose =
+  | 'avatar'
+  | 'cover'
+  | 'product'
+  | 'chat'
+  | 'packed_proof'
+  | 'dispute'
+  | 'general';
+
+export const ALLOWED_UPLOAD_PURPOSES: readonly UploadFilePurpose[] = [
+  'avatar',
+  'cover',
+  'product',
+  'chat',
+  'packed_proof',
+  'dispute',
+  'general',
+] as const;
+
+export function validateAndSanitizeUploadFile(params: {
+  dataUrl: unknown;
+  fileName: unknown;
+  purpose: UploadFilePurpose;
+}):
+  | {
+      valid: true;
+      mimeType: string;
+      sizeBytes: number;
+      base64Data: string;
+      cleanName: string;
+      kind: 'image' | 'document';
+      sha256: string;
+    }
+  | { valid: false; message: string } {
+  const { dataUrl, fileName, purpose } = params;
+  if (typeof dataUrl !== 'string' || !dataUrl.trim()) {
+    return { valid: false, message: 'File data URL is required.' };
+  }
+
+  const rawName = String(fileName || 'upload').trim();
+  const cleanName = rawName
+    .replace(/[\r\n\0/\\]+/g, '_')
+    .replace(/[^a-zA-Z0-9._ -]/g, '_')
+    .slice(0, 120) || 'upload';
+
+  const match = /^data:([a-z0-9+.-]+\/[a-z0-9+.-]+)(?:;[a-z0-9=_-]+)*;base64,([A-Za-z0-9+/=\s]+)$/i.exec(dataUrl.trim());
+  if (!match) {
+    return { valid: false, message: 'Invalid file format. Please upload a JPG, PNG, WebP, GIF, PDF, or TXT file.' };
+  }
+
+  let mimeType = match[1].toLowerCase();
+  if (mimeType === 'image/jpg') mimeType = 'image/jpeg';
+
+  // Explicitly reject SVG, HTML, JS, XML or executable payloads
+  if (
+    mimeType.includes('svg') ||
+    mimeType.includes('html') ||
+    mimeType.includes('javascript') ||
+    mimeType.includes('xml')
+  ) {
+    return { valid: false, message: 'SVG, HTML, and script files are blocked for security.' };
+  }
+
+  const base64Body = match[2].replace(/\s+/g, '');
+  const buf = Buffer.from(base64Body, 'base64');
+  const MAX_BYTES = 4 * 1024 * 1024; // 4 MB strict limit
+  if (buf.length === 0 || buf.length > MAX_BYTES) {
+    return { valid: false, message: 'File size must be between 1 byte and 4 MB.' };
+  }
+
+  const isImageMime =
+    mimeType === 'image/jpeg' ||
+    mimeType === 'image/png' ||
+    mimeType === 'image/webp' ||
+    mimeType === 'image/gif';
+
+  if (isImageMime) {
+    const verified = verifyMagicBytesForImage(mimeType, buf);
+    if (!verified.ok) {
+      return { valid: false, message: verified.message };
+    }
+    const finalBuf = verified.buf;
+    const sha256 = crypto.createHash('sha256').update(finalBuf).digest('hex');
+    return {
+      valid: true,
+      mimeType,
+      sizeBytes: finalBuf.length,
+      base64Data: finalBuf.toString('base64'),
+      cleanName,
+      kind: 'image',
+      sha256,
+    };
+  }
+
+  // Document uploads are strictly limited to chat attachments (PDF & plain text)
+  if (purpose === 'chat' && (mimeType === 'application/pdf' || mimeType === 'text/plain')) {
+    if (mimeType === 'application/pdf') {
+      const hasPdfSig = buf.length >= 5 && buf.subarray(0, 5).toString('ascii') === '%PDF-';
+      if (!hasPdfSig) {
+        return { valid: false, message: 'File content does not match a valid PDF document.' };
+      }
+    } else {
+      // Plain text: disallow null bytes & active script/HTML markup
+      if (buf.includes(0)) {
+        return { valid: false, message: 'Binary data is not allowed inside a plain-text file.' };
+      }
+      const txt = buf.toString('utf8');
+      if (/<script|<iframe|javascript:/i.test(txt)) {
+        return { valid: false, message: 'Text attachment contains disallowed script/HTML markup.' };
+      }
+    }
+    const sha256 = crypto.createHash('sha256').update(buf).digest('hex');
+    return {
+      valid: true,
+      mimeType,
+      sizeBytes: buf.length,
+      base64Data: buf.toString('base64'),
+      cleanName,
+      kind: 'document',
+      sha256,
+    };
+  }
+
   return {
-    newFollower: src.newFollower !== undefined ? Boolean(src.newFollower) : current.newFollower,
-    followBack: src.followBack !== undefined ? Boolean(src.followBack) : current.followBack,
-    newProductFromFollowing:
-      src.newProductFromFollowing !== undefined ? Boolean(src.newProductFromFollowing) : current.newProductFromFollowing,
-    messageReceived: src.messageReceived !== undefined ? Boolean(src.messageReceived) : current.messageReceived,
-    orderUpdates: src.orderUpdates !== undefined ? Boolean(src.orderUpdates) : current.orderUpdates,
-    emailNotifications:
-      src.emailNotifications !== undefined ? Boolean(src.emailNotifications) : current.emailNotifications,
+    valid: false,
+    message:
+      purpose === 'chat'
+        ? 'Only JPG, PNG, WebP, GIF, PDF, or TXT files are allowed in chat.'
+        : 'Only JPG, PNG, WebP, or GIF image files are allowed for this upload.',
+  };
+}
+
+export function sanitizeNotificationPrefs(
+  input: unknown,
+  current: NotificationPrefs = DEFAULT_NOTIFICATION_PREFS
+): NotificationPrefs {
+  const src = input && typeof input === 'object' ? (input as Record<string, any>) : {};
+
+  // Seamless migration from legacy keys if present in older DB rows
+  const emailOrdersRaw = src.emailOrders !== undefined ? src.emailOrders : src.orderUpdates;
+  const emailMessagesRaw = src.emailMessages !== undefined ? src.emailMessages : src.messageReceived;
+  const emailFollowersRaw = src.emailFollowers !== undefined ? src.emailFollowers : src.newFollower;
+  const emailRestockRaw =
+    src.emailRestock !== undefined ? src.emailRestock : src.newProductFromFollowing;
+
+  return {
+    emailOrders: emailOrdersRaw !== undefined ? Boolean(emailOrdersRaw) : current.emailOrders,
+    emailMessages: emailMessagesRaw !== undefined ? Boolean(emailMessagesRaw) : current.emailMessages,
+    emailFollowers: emailFollowersRaw !== undefined ? Boolean(emailFollowersRaw) : current.emailFollowers,
+    emailRestock: emailRestockRaw !== undefined ? Boolean(emailRestockRaw) : current.emailRestock,
   };
 }
 
@@ -296,23 +450,32 @@ export function sanitizePrivacySettings(
   isUnder18 = false
 ): PrivacySettings {
   const src = input && typeof input === 'object' ? (input as Record<string, any>) : {};
-  const vis = src.profileVisibility === 'followers' || src.profileVisibility === 'everyone'
-    ? src.profileVisibility
-    : current.profileVisibility;
-  const follow = src.whoCanFollow === 'approval' || src.whoCanFollow === 'everyone'
-    ? src.whoCanFollow
-    : current.whoCanFollow;
-  const msg =
-    src.whoCanMessage === 'everyone' || src.whoCanMessage === 'followers' || src.whoCanMessage === 'order_or_product'
-      ? src.whoCanMessage
+
+  let visRaw = src.profileVisibility;
+  if (visRaw === 'everyone') visRaw = 'public';
+  const vis: PrivacySettings['profileVisibility'] =
+    visRaw === 'followers' || visRaw === 'public' ? visRaw : current.profileVisibility;
+
+  const follow: PrivacySettings['whoCanFollow'] =
+    src.whoCanFollow === 'approval' || src.whoCanFollow === 'everyone'
+      ? src.whoCanFollow
+      : current.whoCanFollow;
+
+  let msgRaw = src.whoCanMessage;
+  if (msgRaw === 'order_or_product') msgRaw = 'mutual';
+  const msg: PrivacySettings['whoCanMessage'] =
+    msgRaw === 'everyone' || msgRaw === 'followers' || msgRaw === 'mutual'
+      ? msgRaw
       : current.whoCanMessage;
 
   return {
     profileVisibility: vis,
-    whoCanFollow: isUnder18 ? 'approval' : follow, // Under-18 always requires approval
-    whoCanMessage: isUnder18 ? 'order_or_product' : msg, // Under-18 restricted to order/product connections
-    showFollowersList: src.showFollowersList !== undefined ? Boolean(src.showFollowersList) : current.showFollowersList,
-    showFollowingList: src.showFollowingList !== undefined ? Boolean(src.showFollowingList) : current.showFollowingList,
+    whoCanFollow: isUnder18 ? 'approval' : follow,
+    whoCanMessage: isUnder18 ? 'mutual' : msg,
+    showFollowersList:
+      src.showFollowersList !== undefined ? Boolean(src.showFollowersList) : current.showFollowersList,
+    showFollowingList:
+      src.showFollowingList !== undefined ? Boolean(src.showFollowingList) : current.showFollowingList,
     showLastSeen: src.showLastSeen !== undefined ? Boolean(src.showLastSeen) : current.showLastSeen,
   };
 }

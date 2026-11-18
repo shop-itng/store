@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useApp } from '../context/AppContext';
-import { AlertTriangle, X, ShieldAlert, Upload, CheckCircle2, Lock } from 'lucide-react';
+import { AlertTriangle, X, ShieldAlert, Upload, CheckCircle2, Lock, Loader2 } from 'lucide-react';
+import { uploadFileToServer } from '../utils/fileUpload';
 
 export const ReportProblemModal: React.FC = () => {
   const {
@@ -17,37 +18,37 @@ export const ReportProblemModal: React.FC = () => {
   const [desiredOutcome, setDesiredOutcome] = useState<'refund' | 'replacement'>('refund');
   const [evidencePhoto, setEvidencePhoto] = useState<string>('');
   const [evidenceFileName, setEvidenceFileName] = useState<string>('');
+  const [isUploadingEvidence, setIsUploadingEvidence] = useState(false);
 
   if (!isReportProblemModalOpen || !activeReportOrderId) return null;
 
   const order = orders.find(o => o.id === activeReportOrderId);
   if (!order) return null;
 
-  const handleEvidenceFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleEvidenceFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
     if (!file.type.startsWith('image/')) {
       notify('Please select a valid image file (PNG, JPG, WEBP).', 'error');
       return;
     }
-    if (file.size > 3 * 1024 * 1024) {
-      notify('Evidence photo must be under 3MB.', 'error');
-      return;
+    setIsUploadingEvidence(true);
+    try {
+      const uploaded = await uploadFileToServer(file, 'dispute', { orderId: order.id });
+      setEvidencePhoto(uploaded.url);
+      setEvidenceFileName(uploaded.originalName || file.name);
+      notify('Evidence photo uploaded and attached to dispute.', 'success');
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Failed to upload evidence photo.', 'error');
+    } finally {
+      setIsUploadingEvidence(false);
     }
-    const reader = new FileReader();
-    reader.onload = ev => {
-      if (typeof ev.target?.result === 'string') {
-        setEvidencePhoto(ev.target.result);
-        setEvidenceFileName(file.name);
-        notify('Evidence photo attached to dispute.', 'success');
-      }
-    };
-    reader.readAsDataURL(file);
   };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!description.trim()) return;
+    if (!description.trim() || isUploadingEvidence) return;
 
     const fullReason = `[${reasonCategory.toUpperCase()}] ${description.trim()} (Desired outcome: ${desiredOutcome})`;
     openDispute(order.id, fullReason, evidencePhoto || undefined);
@@ -161,11 +162,16 @@ export const ReportProblemModal: React.FC = () => {
                   {evidenceFileName || 'Upload photo of package or item issue (optional)'}
                 </p>
                 <label className="inline-flex items-center gap-1.5 mt-1.5 px-3 py-1 bg-white border border-stone-300 rounded-lg font-bold text-stone-800 hover:bg-stone-100 cursor-pointer">
-                  <Upload className="w-3.5 h-3.5" />
-                  <span>{evidencePhoto ? 'Replace Photo' : 'Choose Image'}</span>
+                  {isUploadingEvidence ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin text-[#f95700]" />
+                  ) : (
+                    <Upload className="w-3.5 h-3.5" />
+                  )}
+                  <span>{isUploadingEvidence ? 'Uploading...' : evidencePhoto ? 'Replace Photo' : 'Choose Image'}</span>
                   <input
                     type="file"
                     accept="image/*"
+                    disabled={isUploadingEvidence}
                     onChange={handleEvidenceFileChange}
                     className="hidden"
                   />
@@ -214,10 +220,10 @@ export const ReportProblemModal: React.FC = () => {
             </button>
             <button
               type="submit"
-              disabled={!description.trim()}
+              disabled={!description.trim() || isUploadingEvidence}
               className="px-5 py-2.5 rounded-xl bg-[#f95700] hover:bg-[#e04b00] text-white font-semibold text-xs transition-all shadow-sm active:scale-[0.98] disabled:opacity-50"
             >
-              Submit & Freeze Escrow
+              {isUploadingEvidence ? 'Uploading Evidence...' : 'Submit & Freeze Escrow'}
             </button>
           </div>
         </form>

@@ -17,7 +17,7 @@ export const MobileBottomNav: React.FC = () => {
   } = useApp();
 
   const totalUnreadMessages = conversations.reduce(
-    (sum, c) => sum + (currentUser?.role === 'seller' ? c.unreadSeller : c.unreadBuyer),
+    (sum, c) => sum + (c.buyerId === currentUser?.id ? c.unreadBuyer : c.unreadSeller),
     0
   );
 

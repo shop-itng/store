@@ -1,4 +1,5 @@
 import express, { Response } from 'express';
+import crypto from 'crypto';
 import {
   query as dbQuery,
   withTransaction,
@@ -338,6 +339,14 @@ router.get('/profiles/me', requireAuth, async (req: AuthenticatedRequest, res: R
     const activeProds = pRes.rows.filter((p: any) => !p.is_paused && !p.is_draft);
 
     const stats = await computeComputedSellerStats(row, sellerRow, activeProds, pRes.rows);
+    const pendingReqRes = await dbQuery(
+      `SELECT COUNT(*) as total
+       FROM shopit_follows f
+       JOIN shopit_users fu ON fu.id = f.follower_id
+       WHERE f.following_id = $1 AND f.status = 'pending' AND fu.deleted_at IS NULL AND fu.is_banned IS NOT TRUE`,
+      [row.id]
+    ).catch(() => ({ rows: [{ total: 0 }] }));
+    const pendingFollowRequestsCount = parseInt(String(pendingReqRes.rows[0]?.total || '0'), 10);
     const completeness = computeProfileCompleteness({
       avatarUrl: row.avatar_url || sellerRow?.logo_url,
       coverUrl: row.cover_url || sellerRow?.banner_url,
@@ -373,6 +382,7 @@ router.get('/profiles/me', requireAuth, async (req: AuthenticatedRequest, res: R
         notificationPrefs,
         privacySettings,
         completeness,
+        pendingFollowRequestsCount,
         ...stats,
         products: pRes.rows.map((p: any) =>
           mapProductRow(p, displayName, row.avatar_url || sellerRow?.logo_url, row.profile_slug)
@@ -827,6 +837,7 @@ router.delete('/profiles/me', requireAuth, async (req: AuthenticatedRequest, res
       await client.query('DELETE FROM shopit_carts WHERE user_id = $1', [userId]);
       await client.query('DELETE FROM shopit_notifications WHERE user_id = $1', [userId]);
       await client.query('DELETE FROM shopit_restock_alerts WHERE user_id = $1', [userId]);
+      await client.query('DELETE FROM shopit_files WHERE owner_id = $1', [userId]);
       await client.query('DELETE FROM shopit_verifications WHERE user_id = $1 OR seller_id = $1', [userId]);
       await client.query(`DELETE FROM shopit_verification_documents WHERE seller_id IN (${sellerIn.placeholders})`, sellerIn.params);
 
@@ -889,6 +900,539 @@ router.delete('/profiles/me', requireAuth, async (req: AuthenticatedRequest, res
     return res.status(500).json({ status: false, message: 'Failed to delete your account.' });
   }
 });
+
+// ============================================================================
+// SOCIAL: FOLLOWS, FOLLOW REQUESTS, FOLLOWING FEED & BLOCKS
+// ============================================================================
+
+async function resolveTargetUserRecord(rawTarget: string) {
+  const clean = String(rawTarget || '').trim();
+  if (!clean) return null;
+  const res = await dbQuery(
+    `SELECT u.id, u.name, u.display_name, u.profile_slug, u.avatar_url, u.age, u.privacy_settings,
+            u.notification_prefs, u.is_banned, u.deleted_at, s.id as s_id, s.under_18 as s_under_18
+     FROM shopit_users u
+     LEFT JOIN shopit_sellers s ON (u.id = s.user_id OR u.id = s.id)
+     WHERE u.id = $1 OR s.id = $1 OR LOWER(u.profile_slug) = LOWER($1)
+     LIMIT 1`,
+    [clean]
+  );
+  return res.rows[0] || null;
+}
+
+async function getAcceptedFollowersCount(targetUserId: string): Promise<number> {
+  const res = await dbQuery(
+    `SELECT COUNT(*) as total FROM shopit_follows WHERE following_id = $1 AND status = 'accepted'`,
+    [targetUserId]
+  );
+  return parseInt(String(res.rows[0]?.total || '0'), 10);
+}
+
+// POST /api/follows - Follow a member/seller (auto-pending for approval-required or under-18 accounts)
+router.post('/follows', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const check = rejectUnknownFields(req.body, ['targetUserId']);
+    if (!check.ok) {
+      return res.status(400).json({ status: false, message: check.message });
+    }
+    const rawTarget = String(check.obj.targetUserId || '').trim();
+    if (!rawTarget) {
+      return res.status(400).json({ status: false, message: 'targetUserId is required.' });
+    }
+
+    const viewer = req.user!;
+    const target = await resolveTargetUserRecord(rawTarget);
+    if (!target || target.deleted_at || target.is_banned) {
+      return res.status(404).json({ status: false, message: 'Account not found or unavailable.' });
+    }
+    if (target.id === viewer.userId) {
+      return res.status(400).json({ status: false, message: 'You cannot follow your own account.' });
+    }
+
+    const blkRes = await dbQuery(
+      `SELECT id FROM shopit_blocks
+       WHERE (blocker_id = $1 AND blocked_id = $2) OR (blocker_id = $2 AND blocked_id = $1)
+       LIMIT 1`,
+      [viewer.userId, target.id]
+    );
+    if (blkRes.rows.length > 0) {
+      return res.status(403).json({ status: false, message: 'Cannot follow this user due to a block.' });
+    }
+
+    const existing = await dbQuery(
+      'SELECT id, status FROM shopit_follows WHERE follower_id = $1 AND following_id = $2 LIMIT 1',
+      [viewer.userId, target.id]
+    );
+    if (existing.rows.length > 0) {
+      const existingStatus = existing.rows[0].status === 'accepted' ? 'accepted' : 'pending';
+      const followersCount = await getAcceptedFollowersCount(target.id);
+      return res.json({ status: true, followStatus: existingStatus, followersCount });
+    }
+
+    const isUnder18 =
+      (target.age !== null && target.age !== undefined && Number(target.age) < 18) || Boolean(target.s_under_18);
+    const basePrivacy = isUnder18 ? UNDER_18_PRIVACY_SETTINGS : DEFAULT_PRIVACY_SETTINGS;
+    const privacy = sanitizePrivacySettings(parseJsonSafe(target.privacy_settings, basePrivacy), basePrivacy, isUnder18);
+
+    const followStatus: 'pending' | 'accepted' = privacy.whoCanFollow === 'approval' ? 'pending' : 'accepted';
+    const followId = `fol_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+
+    await dbQuery(
+      `INSERT INTO shopit_follows (id, follower_id, following_id, status, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, NOW(), NOW())`,
+      [followId, viewer.userId, target.id, followStatus]
+    );
+
+    try {
+      const viewerRes = await dbQuery(
+        'SELECT display_name, name, profile_slug FROM shopit_users WHERE id = $1 LIMIT 1',
+        [viewer.userId]
+      );
+      const vRow = viewerRes.rows[0];
+      const vName = vRow?.display_name || extractFirstName(vRow?.name || viewer.name || 'Someone');
+      const vSlug = vRow?.profile_slug || viewer.userId;
+
+      await dbQuery(
+        `INSERT INTO shopit_notifications (id, user_id, title, message, type, is_read, link, created_at)
+         VALUES ($1, $2, $3, $4, 'info', false, $5, NOW())`,
+        [
+          `notif_fol_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
+          target.id,
+          followStatus === 'pending' ? 'New Follow Request' : 'New Follower',
+          followStatus === 'pending'
+            ? `${vName} requested to follow your Shop It profile.`
+            : `${vName} started following you on Shop It.`,
+          `/?profile=${encodeURIComponent(vSlug)}`,
+        ]
+      );
+    } catch {}
+
+    const followersCount = await getAcceptedFollowersCount(target.id);
+    return res.status(201).json({ status: true, followStatus, followersCount });
+  } catch (err: any) {
+    console.error('[POST /follows Error]:', err?.message || err);
+    return res.status(500).json({ status: false, message: 'Failed to follow user.' });
+  }
+});
+
+// DELETE /api/follows/:targetUserId - Unfollow or cancel pending follow request
+router.delete('/follows/:targetUserId', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const viewer = req.user!;
+    const rawTarget = String(req.params.targetUserId || '').trim();
+    const target = await resolveTargetUserRecord(rawTarget);
+    const resolvedTargetId = target?.id || rawTarget;
+
+    await dbQuery(
+      'DELETE FROM shopit_follows WHERE follower_id = $1 AND following_id = $2',
+      [viewer.userId, resolvedTargetId]
+    );
+
+    const followersCount = await getAcceptedFollowersCount(resolvedTargetId);
+    return res.json({ status: true, followStatus: 'none', followersCount });
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: 'Failed to unfollow user.' });
+  }
+});
+
+// GET /api/follows/requests - List pending incoming follow requests
+router.get('/follows/requests', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const viewer = req.user!;
+    const resRows = await dbQuery(
+      `SELECT f.id, f.follower_id, f.created_at, u.name, u.display_name, u.profile_slug, u.avatar_url, u.campus
+       FROM shopit_follows f
+       JOIN shopit_users u ON u.id = f.follower_id
+       WHERE f.following_id = $1 AND f.status = 'pending' AND u.deleted_at IS NULL AND u.is_banned IS NOT TRUE
+       ORDER BY f.created_at DESC
+       LIMIT 100`,
+      [viewer.userId]
+    );
+
+    return res.json({
+      status: true,
+      requests: resRows.rows.map((r: any) => ({
+        id: r.id,
+        followerId: r.follower_id,
+        displayName: r.display_name || extractFirstName(r.name || 'Member'),
+        profileSlug: r.profile_slug || r.follower_id,
+        avatarUrl: r.avatar_url || null,
+        campus: r.campus || '',
+        createdAt: r.created_at,
+      })),
+    });
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: 'Failed to load follow requests.' });
+  }
+});
+
+// PATCH /api/follows/requests/:followerId - Accept or decline a follow request
+router.patch('/follows/requests/:followerId', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const check = rejectUnknownFields(req.body, ['action']);
+    if (!check.ok) {
+      return res.status(400).json({ status: false, message: check.message });
+    }
+    const action = String(check.obj.action || '').trim();
+    if (action !== 'accept' && action !== 'decline') {
+      return res.status(400).json({ status: false, message: 'action must be accept or decline.' });
+    }
+
+    const viewer = req.user!;
+    const followerId = String(req.params.followerId || '').trim();
+
+    const existing = await dbQuery(
+      `SELECT id FROM shopit_follows WHERE follower_id = $1 AND following_id = $2 AND status = 'pending' LIMIT 1`,
+      [followerId, viewer.userId]
+    );
+    if (existing.rows.length === 0) {
+      return res.status(404).json({ status: false, message: 'Pending follow request not found.' });
+    }
+
+    if (action === 'accept') {
+      await dbQuery(
+        `UPDATE shopit_follows SET status = 'accepted', updated_at = NOW() WHERE id = $1`,
+        [existing.rows[0].id]
+      );
+      try {
+        const myRes = await dbQuery('SELECT display_name, name, profile_slug FROM shopit_users WHERE id = $1', [viewer.userId]);
+        const myRow = myRes.rows[0];
+        const myName = myRow?.display_name || extractFirstName(myRow?.name || viewer.name || 'Someone');
+        const mySlug = myRow?.profile_slug || viewer.userId;
+        await dbQuery(
+          `INSERT INTO shopit_notifications (id, user_id, title, message, type, is_read, link, created_at)
+           VALUES ($1, $2, 'Follow Request Accepted', $3, 'success', false, $4, NOW())`,
+          [
+            `notif_fol_acc_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
+            followerId,
+            `${myName} accepted your follow request.`,
+            `/?profile=${encodeURIComponent(mySlug)}`,
+          ]
+        );
+      } catch {}
+    } else {
+      await dbQuery('DELETE FROM shopit_follows WHERE id = $1', [existing.rows[0].id]);
+    }
+
+    const followersCount = await getAcceptedFollowersCount(viewer.userId);
+    return res.json({ status: true, action, followersCount });
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: 'Failed to process follow request.' });
+  }
+});
+
+// GET /api/feed/following - Live product feed from shops the caller follows
+router.get('/feed/following', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const viewer = req.user!;
+    const page = Math.max(1, parseInt(String(req.query.page || '1'), 10) || 1);
+    const limit = Math.min(60, Math.max(1, parseInt(String(req.query.limit || '30'), 10) || 30));
+    const offset = (page - 1) * limit;
+
+    const [folRes, blkRes] = await Promise.all([
+      dbQuery(`SELECT following_id FROM shopit_follows WHERE follower_id = $1 AND status = 'accepted'`, [viewer.userId]),
+      dbQuery(
+        `SELECT blocker_id, blocked_id FROM shopit_blocks WHERE blocker_id = $1 OR blocked_id = $1`,
+        [viewer.userId]
+      ),
+    ]);
+
+    const blockedSet = new Set<string>();
+    for (const b of blkRes.rows) {
+      if (b.blocker_id !== viewer.userId) blockedSet.add(b.blocker_id);
+      if (b.blocked_id !== viewer.userId) blockedSet.add(b.blocked_id);
+    }
+
+    const followedUserIds: string[] = Array.from(
+      new Set<string>(folRes.rows.map((r: any) => String(r.following_id)).filter((id: string) => id && !blockedSet.has(id)))
+    );
+
+    if (followedUserIds.length === 0) {
+      return res.json({ status: true, products: [], total: 0, followingCount: 0, page, totalPages: 1 });
+    }
+
+    const uIn = buildInClause(followedUserIds);
+    const sRes = await dbQuery(
+      `SELECT id, user_id FROM shopit_sellers WHERE user_id IN (${uIn.placeholders}) OR id IN (${uIn.placeholders})`,
+      uIn.params
+    );
+    const sellerTargetIds = Array.from(
+      new Set([...followedUserIds, ...sRes.rows.map((s: any) => String(s.id))])
+    );
+    const pIn = buildInClause(sellerTargetIds);
+
+    const countRes = await dbQuery(
+      `SELECT COUNT(*) as total
+       FROM shopit_products p
+       LEFT JOIN shopit_sellers s ON (p.seller_id = s.id OR p.seller_id = s.user_id)
+       LEFT JOIN shopit_users u ON (u.id = COALESCE(s.user_id, p.seller_id))
+       WHERE p.seller_id IN (${pIn.placeholders})
+         AND (p.is_paused IS NOT TRUE)
+         AND (p.is_draft IS NOT TRUE)
+         AND (u.id IS NULL OR (u.deleted_at IS NULL AND u.is_banned IS NOT TRUE))`,
+      pIn.params
+    );
+    const total = parseInt(String(countRes.rows[0]?.total || '0'), 10);
+
+    const rowsRes = await dbQuery(
+      `SELECT p.*, u.display_name as u_display_name, u.name as u_name, u.avatar_url as u_avatar_url,
+              u.profile_slug as u_profile_slug, s.logo_url as s_logo_url
+       FROM shopit_products p
+       LEFT JOIN shopit_sellers s ON (p.seller_id = s.id OR p.seller_id = s.user_id)
+       LEFT JOIN shopit_users u ON (u.id = COALESCE(s.user_id, p.seller_id))
+       WHERE p.seller_id IN (${pIn.placeholders})
+         AND (p.is_paused IS NOT TRUE)
+         AND (p.is_draft IS NOT TRUE)
+         AND (u.id IS NULL OR (u.deleted_at IS NULL AND u.is_banned IS NOT TRUE))
+       ORDER BY p.created_at DESC
+       LIMIT $${pIn.params.length + 1} OFFSET $${pIn.params.length + 2}`,
+      [...pIn.params, limit, offset]
+    );
+
+    const products = rowsRes.rows.map((r: any) =>
+      mapProductRow(
+        r,
+        r.u_display_name || extractFirstName(r.u_name || r.seller_shop_name || 'Artisan'),
+        r.s_logo_url || r.u_avatar_url || undefined,
+        r.u_profile_slug || undefined
+      )
+    );
+
+    return res.json({
+      status: true,
+      products,
+      total,
+      followingCount: followedUserIds.length,
+      page,
+      totalPages: Math.ceil(total / limit) || 1,
+    });
+  } catch (err: any) {
+    console.error('[GET /feed/following Error]:', err?.message || err);
+    return res.status(500).json({ status: false, message: 'Failed to load Following feed.' });
+  }
+});
+
+// GET /api/blocks - List accounts blocked by current user
+router.get('/blocks', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const viewer = req.user!;
+    const rows = await dbQuery(
+      `SELECT b.id, b.blocked_id, b.reason, b.created_at, u.name, u.display_name, u.profile_slug, u.avatar_url
+       FROM shopit_blocks b
+       LEFT JOIN shopit_users u ON u.id = b.blocked_id
+       WHERE b.blocker_id = $1
+       ORDER BY b.created_at DESC
+       LIMIT 100`,
+      [viewer.userId]
+    );
+
+    return res.json({
+      status: true,
+      blocks: rows.rows.map((r: any) => ({
+        id: r.id,
+        blockedUserId: r.blocked_id,
+        displayName: r.display_name || extractFirstName(r.name || 'Member'),
+        profileSlug: r.profile_slug || r.blocked_id,
+        avatarUrl: r.avatar_url || null,
+        reason: r.reason || '',
+        createdAt: r.created_at,
+      })),
+    });
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: 'Failed to fetch blocked accounts.' });
+  }
+});
+
+// POST /api/blocks - Block a user & automatically remove follows in both directions
+router.post('/blocks', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const check = rejectUnknownFields(req.body, ['targetUserId', 'reason']);
+    if (!check.ok) {
+      return res.status(400).json({ status: false, message: check.message });
+    }
+    const rawTarget = String(check.obj.targetUserId || '').trim();
+    const reason = check.obj.reason ? String(check.obj.reason).trim().slice(0, 200) : null;
+    if (!rawTarget) {
+      return res.status(400).json({ status: false, message: 'targetUserId is required.' });
+    }
+
+    const viewer = req.user!;
+    const target = await resolveTargetUserRecord(rawTarget);
+    if (!target || target.deleted_at) {
+      return res.status(404).json({ status: false, message: 'User account not found.' });
+    }
+    if (target.id === viewer.userId) {
+      return res.status(400).json({ status: false, message: 'You cannot block yourself.' });
+    }
+
+    await withTransaction(async client => {
+      const blkId = `blk_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+      await client.query(
+        `INSERT INTO shopit_blocks (id, blocker_id, blocked_id, reason, created_at)
+         VALUES ($1, $2, $3, $4, NOW())
+         ON CONFLICT (blocker_id, blocked_id) DO UPDATE SET reason = COALESCE($4, shopit_blocks.reason)`,
+        [blkId, viewer.userId, target.id, reason]
+      );
+      await client.query(
+        `DELETE FROM shopit_follows
+         WHERE (follower_id = $1 AND following_id = $2) OR (follower_id = $2 AND following_id = $1)`,
+        [viewer.userId, target.id]
+      );
+    });
+
+    await logAuditEvent({
+      action: 'USER_BLOCKED',
+      actor: { id: viewer.userId, email: viewer.email, role: viewer.role },
+      target: { type: 'user', id: target.id },
+      details: { reason },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
+
+    return res.status(201).json({
+      status: true,
+      blockedUserId: target.id,
+      message: `${target.display_name || extractFirstName(target.name || 'User')} has been blocked.`,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: 'Failed to block user.' });
+  }
+});
+
+// DELETE /api/blocks/:targetUserId - Unblock a user
+router.delete('/blocks/:targetUserId', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const viewer = req.user!;
+    const rawTarget = String(req.params.targetUserId || '').trim();
+    const target = await resolveTargetUserRecord(rawTarget);
+    const resolvedId = target?.id || rawTarget;
+
+    await dbQuery('DELETE FROM shopit_blocks WHERE blocker_id = $1 AND blocked_id = $2', [
+      viewer.userId,
+      resolvedId,
+    ]);
+
+    await logAuditEvent({
+      action: 'USER_UNBLOCKED',
+      actor: { id: viewer.userId, email: viewer.email, role: viewer.role },
+      target: { type: 'user', id: resolvedId },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
+
+    return res.json({ status: true, message: 'User unblocked.' });
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: 'Failed to unblock user.' });
+  }
+});
+
+// Helper for followers/following list privacy enforcement
+async function handleFollowListRoute(
+  req: AuthenticatedRequest,
+  res: Response,
+  mode: 'followers' | 'following'
+) {
+  try {
+    const rawSlug = String(req.params.slug || '').trim();
+    const target = await resolveTargetUserRecord(rawSlug);
+    if (!target || target.deleted_at) {
+      return res.status(404).json({ status: false, message: 'Profile not found.' });
+    }
+    const viewer = req.user;
+    const isOwner = Boolean(viewer && viewer.userId === target.id);
+    const isAdmin = Boolean(viewer && viewer.role === 'admin');
+    if (target.is_banned && !isAdmin) {
+      return res.status(404).json({ status: false, message: 'Profile not found.' });
+    }
+
+    if (viewer && !isOwner && !isAdmin) {
+      const blkRes = await dbQuery(
+        `SELECT id FROM shopit_blocks WHERE (blocker_id = $1 AND blocked_id = $2) OR (blocker_id = $2 AND blocked_id = $1) LIMIT 1`,
+        [viewer.userId, target.id]
+      );
+      if (blkRes.rows.length > 0) {
+        return res.status(403).json({ status: false, message: 'This profile is unavailable.' });
+      }
+    }
+
+    const isUnder18 =
+      (target.age !== null && target.age !== undefined && Number(target.age) < 18) || Boolean(target.s_under_18);
+    const basePrivacy = isUnder18 ? UNDER_18_PRIVACY_SETTINGS : DEFAULT_PRIVACY_SETTINGS;
+    const privacy = sanitizePrivacySettings(parseJsonSafe(target.privacy_settings, basePrivacy), basePrivacy, isUnder18);
+
+    if (privacy.profileVisibility === 'followers' && !isOwner && !isAdmin) {
+      let acceptedFollow = false;
+      if (viewer) {
+        const fCheck = await dbQuery(
+          `SELECT 1 FROM shopit_follows WHERE follower_id = $1 AND following_id = $2 AND status = 'accepted' LIMIT 1`,
+          [viewer.userId, target.id]
+        );
+        acceptedFollow = fCheck.rows.length > 0;
+      }
+      if (!acceptedFollow) {
+        return res.status(403).json({ status: false, message: 'Only accepted followers can view this profile.' });
+      }
+    }
+
+    if (mode === 'followers' && !privacy.showFollowersList && !isOwner && !isAdmin) {
+      return res.status(403).json({ status: false, message: 'This member has hidden their followers list.' });
+    }
+    if (mode === 'following' && !privacy.showFollowingList && !isOwner && !isAdmin) {
+      return res.status(403).json({ status: false, message: 'This member has hidden who they follow.' });
+    }
+
+    const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit || '50'), 10) || 50));
+    const offset = Math.max(0, parseInt(String(req.query.offset || '0'), 10) || 0);
+
+    const joinCol = mode === 'followers' ? 'f.follower_id' : 'f.following_id';
+    const filterCol = mode === 'followers' ? 'f.following_id' : 'f.follower_id';
+
+    const countRes = await dbQuery(
+      `SELECT COUNT(*) as total
+       FROM shopit_follows f
+       JOIN shopit_users u ON u.id = ${joinCol}
+       WHERE ${filterCol} = $1 AND f.status = 'accepted' AND u.deleted_at IS NULL AND u.is_banned IS NOT TRUE`,
+      [target.id]
+    );
+    const total = parseInt(String(countRes.rows[0]?.total || '0'), 10);
+
+    const rowsRes = await dbQuery(
+      `SELECT u.id, u.name, u.display_name, u.profile_slug, u.avatar_url, u.campus, u.role, s.shop_name, f.created_at
+       FROM shopit_follows f
+       JOIN shopit_users u ON u.id = ${joinCol}
+       LEFT JOIN shopit_sellers s ON (u.id = s.user_id OR u.id = s.id)
+       WHERE ${filterCol} = $1 AND f.status = 'accepted' AND u.deleted_at IS NULL AND u.is_banned IS NOT TRUE
+       ORDER BY f.created_at DESC
+       LIMIT $2 OFFSET $3`,
+      [target.id, limit, offset]
+    );
+
+    return res.json({
+      status: true,
+      total,
+      users: rowsRes.rows.map((r: any) => ({
+        id: r.id,
+        displayName: r.display_name || extractFirstName(r.name || 'Member'),
+        profileSlug: r.profile_slug || r.id,
+        avatarUrl: r.avatar_url || null,
+        campus: r.campus || '',
+        role: r.role,
+        shopName: r.shop_name || undefined,
+        followedAt: r.created_at,
+      })),
+    });
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: `Failed to fetch ${mode} list.` });
+  }
+}
+
+router.get('/profiles/:slug/followers', optionalAuth, (req: AuthenticatedRequest, res: Response) =>
+  handleFollowListRoute(req, res, 'followers')
+);
+
+router.get('/profiles/:slug/following', optionalAuth, (req: AuthenticatedRequest, res: Response) =>
+  handleFollowListRoute(req, res, 'following')
+);
 
 // ============================================================================
 // GET /api/profiles/:slug - Public / Privacy-Aware Profile View
@@ -1045,6 +1589,18 @@ router.get('/profiles/:slug', optionalAuth, async (req: AuthenticatedRequest, re
       }
     }
 
+    let pendingFollowRequestsCount = 0;
+    if (isOwner) {
+      const pendRes = await dbQuery(
+        `SELECT COUNT(*) as total
+         FROM shopit_follows f
+         JOIN shopit_users fu ON fu.id = f.follower_id
+         WHERE f.following_id = $1 AND f.status = 'pending' AND fu.deleted_at IS NULL AND fu.is_banned IS NOT TRUE`,
+        [row.id]
+      ).catch(() => ({ rows: [{ total: 0 }] }));
+      pendingFollowRequestsCount = parseInt(String(pendRes.rows[0]?.total || '0'), 10);
+    }
+
     const completeness = isOwner
       ? computeProfileCompleteness({
           avatarUrl,
@@ -1081,6 +1637,7 @@ router.get('/profiles/:slug', optionalAuth, async (req: AuthenticatedRequest, re
             ? row.last_seen_at || row.last_login_at || row.created_at
             : null,
         followStatus,
+        pendingFollowRequestsCount: isOwner ? pendingFollowRequestsCount : undefined,
         whoCanFollow: privacySettings.whoCanFollow,
         whoCanMessage: privacySettings.whoCanMessage,
         showFollowersList: privacySettings.showFollowersList,

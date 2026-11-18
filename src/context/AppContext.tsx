@@ -27,6 +27,11 @@ import {
   AdminAuditLog,
   NotificationPrefs,
   PrivacySettings,
+  ChatAttachment,
+  FollowRequestItem,
+  FollowListUser,
+  BlockedAccountItem,
+  DbNotificationItem,
 } from '../types';
 import { VALID_COUPONS, INITIAL_SAFE_SPOTS } from '../data/mockData';
 import { getPricingBreakdown, DEFAULT_FEE_SETTINGS } from '../utils/pricing';
@@ -125,6 +130,17 @@ interface AppContextType {
   exportMyData: () => Promise<boolean>;
   deleteMyAccount: (password: string, confirmation: string) => Promise<{ status: boolean; message?: string }>;
 
+  // Social: Follows, Follow Requests, Following Feed & Blocks
+  followUser: (targetUserId: string) => Promise<{ status: boolean; followStatus?: 'pending' | 'accepted'; followersCount?: number; message?: string }>;
+  unfollowUser: (targetUserId: string) => Promise<{ status: boolean; followersCount?: number; message?: string }>;
+  fetchFollowRequests: () => Promise<FollowRequestItem[]>;
+  respondToFollowRequest: (followerId: string, action: 'accept' | 'decline') => Promise<{ status: boolean; followersCount?: number }>;
+  fetchFollowList: (slug: string, mode: 'followers' | 'following') => Promise<{ status: boolean; users: FollowListUser[]; total: number; message?: string }>;
+  fetchFollowingFeed: (page?: number) => Promise<{ status: boolean; products: Product[]; total: number; followingCount: number; message?: string }>;
+  blockUser: (targetUserId: string, reason?: string) => Promise<{ status: boolean; message?: string }>;
+  unblockUser: (targetUserId: string) => Promise<{ status: boolean; message?: string }>;
+  fetchBlockedUsers: () => Promise<BlockedAccountItem[]>;
+
   // Sellers
   sellers: SellerProfile[];
   getSellerById: (id: string) => SellerProfile | undefined;
@@ -206,13 +222,16 @@ interface AppContextType {
   messages: Record<string, ChatMessage[]>;
   activeConversationId: string | null;
   setActiveConversationId: (id: string | null) => void;
+  refreshConversations: () => Promise<void>;
+  markConversationRead: (conversationId: string) => Promise<void>;
   loadConversationMessages: (conversationId: string) => Promise<void>;
   openChat: (conversationId?: string, targetInfo?: { orderId?: string; productId?: string; sellerId?: string }) => Promise<void>;
   sendMessage: (
     conversationId: string,
     content: string,
     customOrder?: any,
-    presetOffer?: { price: number; quantity: number; title?: string }
+    presetOffer?: { price: number; quantity: number; title?: string },
+    attachment?: ChatAttachment | { fileId: string }
   ) => Promise<{ success: boolean; isBlocked?: boolean; warning?: string }>;
 
   // Phase 3: Admin Command Center (Moderator, Finance, Support)
@@ -295,10 +314,15 @@ interface AppContextType {
   theme: 'light' | 'dark';
   toggleTheme: () => void;
 
-  // Toast Notifications
+  // Toast & Database Notification Center
   notifications: NotificationItem[];
   notify: (message: string, type?: 'success' | 'info' | 'error') => void;
   dismissNotification: (id: string) => void;
+  dbNotifications: DbNotificationItem[];
+  unreadNotificationsCount: number;
+  refreshNotifications: () => Promise<void>;
+  markNotificationRead: (id: string) => Promise<void>;
+  markAllNotificationsRead: () => Promise<void>;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -622,7 +646,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Notifications (toast alerts kept separate from DB persistent notifications)
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
-  const [, setDbNotifications] = useState<any[]>([]);
+  const [dbNotifications, setDbNotifications] = useState<DbNotificationItem[]>([]);
 
   // Hydrate authenticated user strictly from server session (/api/auth/me) on initial mount
   useEffect(() => {
@@ -833,9 +857,37 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     } catch {}
   }, [currentUser?.id, currentUser?.role]);
 
+  const refreshConversations = useCallback(async () => {
+    if (!currentUser?.id) return;
+    try {
+      const res = await fetch('/api/chat/conversations', { headers: getAuthHeaders(), credentials: 'include' });
+      if (!res.ok) return;
+      const data = await res.json().catch(() => ({}));
+      if (data.status && Array.isArray(data.conversations)) {
+        setConversations(data.conversations);
+      }
+    } catch {}
+  }, [currentUser?.id]);
+
+  const refreshNotifications = useCallback(async () => {
+    if (!currentUser?.id) return;
+    try {
+      const res = await fetch('/api/notifications', { headers: getAuthHeaders(), credentials: 'include' });
+      if (!res.ok) return;
+      const data = await res.json().catch(() => ({}));
+      if (data.status && Array.isArray(data.notifications)) {
+        setDbNotifications(data.notifications);
+      }
+    } catch {}
+  }, [currentUser?.id]);
+
   // Synchronize authenticated user entities with Neon PostgreSQL
   useEffect(() => {
-    if (!currentUser?.id) return;
+    if (!currentUser?.id) {
+      setDbNotifications([]);
+      setConversations([]);
+      return;
+    }
     const headers = getAuthHeaders();
 
     // Fetch user cart from PostgreSQL
@@ -855,14 +907,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       .catch(() => {});
 
     refreshFinancials();
-
-    // Fetch chat conversations from PostgreSQL
-    fetch('/api/chat/conversations', { headers, credentials: 'include' })
-      .then(res => res.json())
-      .then(data => {
-        if (data.status && Array.isArray(data.conversations)) setConversations(data.conversations);
-      })
-      .catch(() => {});
+    void refreshConversations();
 
     // Fetch disputes from PostgreSQL
     fetch('/api/disputes', { headers, credentials: 'include' })
@@ -872,14 +917,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       })
       .catch(() => {});
 
-    // Fetch notifications from PostgreSQL into dedicated dbNotifications state (never clobber toast queue)
-    fetch('/api/notifications', { headers, credentials: 'include' })
-      .then(res => res.json())
-      .then(data => {
-        if (data.status && Array.isArray(data.notifications)) setDbNotifications(data.notifications);
-      })
-      .catch(() => {});
-  }, [currentUser?.id, currentUser?.role, refreshFinancials]);
+    void refreshNotifications();
+  }, [currentUser?.id, currentUser?.role, refreshFinancials, refreshConversations, refreshNotifications]);
+
+  // Adaptive background sync for notifications & conversations (paused when tab hidden)
+  useEffect(() => {
+    if (!currentUser?.id) return;
+    const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      void refreshConversations();
+      void refreshNotifications();
+    }, 15000);
+    return () => clearInterval(interval);
+  }, [currentUser?.id, refreshConversations, refreshNotifications]);
 
   // Sync cart and wishlist to PostgreSQL only on explicit user changes (not initial hydration)
   useEffect(() => {
@@ -2343,6 +2393,34 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   // Phase 3: Locked Chat Handlers (PostgreSQL-persisted)
+  const markConversationRead = useCallback(
+    async (conversationId: string) => {
+      if (!currentUser?.id || !conversationId) return;
+      try {
+        const res = await fetch(`/api/chat/conversations/${encodeURIComponent(conversationId)}/read`, {
+          method: 'POST',
+          headers: getAuthHeaders(),
+          credentials: 'include',
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.status) {
+          setConversations(prev =>
+            prev.map(c =>
+              c.id === conversationId
+                ? {
+                    ...c,
+                    unreadBuyer: typeof data.unreadBuyer === 'number' ? data.unreadBuyer : c.unreadBuyer,
+                    unreadSeller: typeof data.unreadSeller === 'number' ? data.unreadSeller : c.unreadSeller,
+                  }
+                : c
+            )
+          );
+        }
+      } catch {}
+    },
+    [currentUser?.id]
+  );
+
   const loadConversationMessages = useCallback(
     async (conversationId: string) => {
       if (!currentUser?.id || !conversationId) return;
@@ -2360,11 +2438,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               : m.timestamp || 'Just now',
           }));
           setMessages(prev => ({ ...prev, [conversationId]: formatted }));
+          void markConversationRead(conversationId);
         }
       } catch {}
     },
-    [currentUser?.id]
+    [currentUser?.id, markConversationRead]
   );
+
+  // Adaptive 4s polling for the open chat conversation
+  useEffect(() => {
+    if (!currentUser?.id || activeView !== 'chat' || !activeConversationId) return;
+    const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      void loadConversationMessages(activeConversationId);
+    }, 4000);
+    return () => clearInterval(interval);
+  }, [currentUser?.id, activeView, activeConversationId, loadConversationMessages]);
 
   const openChat = useCallback(
     async (
@@ -2451,8 +2540,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const sendMessage = async (
     conversationId: string,
     content: string,
-    customOrder?: any,
-    presetOffer?: { price: number; quantity: number; title?: string }
+    _customOrder?: any,
+    presetOffer?: { price: number; quantity: number; title?: string },
+    attachment?: ChatAttachment | { fileId: string }
   ): Promise<{ success: boolean; isBlocked?: boolean; warning?: string }> => {
     if (!currentUser?.id) {
       openAuthModal('login');
@@ -2465,6 +2555,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (conv.isChatLocked) {
       notify('This chat is locked by Shop It safety moderation due to repeated bypass attempts.', 'error');
       return { success: false, isBlocked: true, warning: 'Chat locked by moderation' };
+    }
+
+    if (conv.isBlocked) {
+      notify('Messaging is unavailable because one participant has blocked the other.', 'error');
+      return { success: false, isBlocked: true, warning: 'Blocked user' };
     }
 
     // Block typed digits and number words in regular text messages (presetOffer uses curated chip values)
@@ -2480,12 +2575,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     }
 
+    const attachmentFileId =
+      attachment && 'fileId' in attachment
+        ? attachment.fileId
+        : attachment && 'id' in attachment
+          ? attachment.id
+          : undefined;
+
     try {
       const res = await fetch(`/api/chat/conversations/${encodeURIComponent(conversationId)}/messages`, {
         method: 'POST',
         headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
         credentials: 'include',
-        body: JSON.stringify({ content, presetOffer, customOrder }),
+        body: JSON.stringify({
+          content,
+          presetOffer,
+          ...(attachmentFileId ? { attachment: { fileId: attachmentFileId } } : {}),
+        }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.status || !data.message) {
@@ -2506,13 +2612,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return { ...prev, [conversationId]: [...list, savedMsg] };
       });
 
+      const lastPreview = savedMsg.content
+        ? savedMsg.content
+        : savedMsg.attachment
+          ? `[Attachment: ${savedMsg.attachment.originalName}]`
+          : '[Custom Offer]';
+
       setConversations(prev =>
         prev.map(c =>
           c.id === conversationId
             ? {
                 ...c,
-                lastMessage: savedMsg.content,
-                lastMessageAt: savedMsg.timestamp,
+                lastMessage: lastPreview,
+                lastMessageAt: savedMsg.createdAt || savedMsg.timestamp,
                 isChatLocked: Boolean(data.isChatLocked ?? c.isChatLocked),
                 bypassViolationsCount: data.bypassViolationsCount ?? c.bypassViolationsCount,
               }
@@ -2534,6 +2646,242 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { success: false };
     }
   };
+
+  // ==========================================
+  // SOCIAL & NOTIFICATION CENTER ACTIONS
+  // ==========================================
+
+  const followUser = useCallback(
+    async (targetUserId: string) => {
+      if (!currentUser?.id) {
+        openAuthModal('login');
+        return { status: false, message: 'Please sign in to follow artisans and shoppers.' };
+      }
+      try {
+        const res = await fetch('/api/follows', {
+          method: 'POST',
+          headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+          credentials: 'include',
+          body: JSON.stringify({ targetUserId }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.status) {
+          notify(data.message || 'Unable to follow user.', 'error');
+          return { status: false, message: data.message };
+        }
+        notify(
+          data.followStatus === 'pending' ? 'Follow request sent!' : 'Following! You will see their new crafts.',
+          'success'
+        );
+        return {
+          status: true,
+          followStatus: data.followStatus as 'pending' | 'accepted',
+          followersCount: Number(data.followersCount ?? 0),
+        };
+      } catch {
+        notify('Network error following user.', 'error');
+        return { status: false, message: 'Network error' };
+      }
+    },
+    [currentUser?.id]
+  );
+
+  const unfollowUser = useCallback(
+    async (targetUserId: string) => {
+      if (!currentUser?.id) return { status: false };
+      try {
+        const res = await fetch(`/api/follows/${encodeURIComponent(targetUserId)}`, {
+          method: 'DELETE',
+          headers: getAuthHeaders(),
+          credentials: 'include',
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.status) {
+          notify(data.message || 'Unable to unfollow.', 'error');
+          return { status: false, message: data.message };
+        }
+        notify('Unfollowed.', 'info');
+        return { status: true, followersCount: Number(data.followersCount ?? 0) };
+      } catch {
+        notify('Network error unfollowing.', 'error');
+        return { status: false };
+      }
+    },
+    [currentUser?.id]
+  );
+
+  const fetchFollowRequests = useCallback(async (): Promise<FollowRequestItem[]> => {
+    if (!currentUser?.id) return [];
+    try {
+      const res = await fetch('/api/follows/requests', { headers: getAuthHeaders(), credentials: 'include' });
+      const data = await res.json().catch(() => ({}));
+      return res.ok && data.status && Array.isArray(data.requests) ? data.requests : [];
+    } catch {
+      return [];
+    }
+  }, [currentUser?.id]);
+
+  const respondToFollowRequest = useCallback(
+    async (followerId: string, action: 'accept' | 'decline') => {
+      try {
+        const res = await fetch(`/api/follows/requests/${encodeURIComponent(followerId)}`, {
+          method: 'PATCH',
+          headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+          credentials: 'include',
+          body: JSON.stringify({ action }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.status) {
+          notify(data.message || 'Could not update request.', 'error');
+          return { status: false };
+        }
+        notify(action === 'accept' ? 'Follow request accepted.' : 'Follow request declined.', 'success');
+        return { status: true, followersCount: data.followersCount };
+      } catch {
+        notify('Network error handling follow request.', 'error');
+        return { status: false };
+      }
+    },
+    []
+  );
+
+  const fetchFollowList = useCallback(
+    async (slug: string, mode: 'followers' | 'following') => {
+      try {
+        const res = await fetch(`/api/profiles/${encodeURIComponent(slug)}/${mode}`, {
+          headers: getAuthHeaders(),
+          credentials: 'include',
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.status) {
+          return { status: false, users: [], total: 0, message: data.message || `Unable to load ${mode}.` };
+        }
+        return { status: true, users: data.users || [], total: Number(data.total || 0) };
+      } catch {
+        return { status: false, users: [], total: 0, message: 'Network error.' };
+      }
+    },
+    []
+  );
+
+  const fetchFollowingFeed = useCallback(async (page = 1) => {
+    if (!currentUser?.id) {
+      return { status: false, products: [], total: 0, followingCount: 0, message: 'Sign in required' };
+    }
+    try {
+      const res = await fetch(`/api/feed/following?page=${page}&limit=40`, {
+        headers: getAuthHeaders(),
+        credentials: 'include',
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.status) {
+        return { status: false, products: [], total: 0, followingCount: 0, message: data.message || 'Unable to load Following feed.' };
+      }
+      return {
+        status: true,
+        products: data.products || [],
+        total: Number(data.total || 0),
+        followingCount: Number(data.followingCount || 0),
+      };
+    } catch {
+      return { status: false, products: [], total: 0, followingCount: 0, message: 'Network error loading feed.' };
+    }
+  }, [currentUser?.id]);
+
+  const blockUser = useCallback(
+    async (targetUserId: string, reason?: string) => {
+      if (!currentUser?.id) {
+        openAuthModal('login');
+        return { status: false, message: 'Sign in required.' };
+      }
+      try {
+        const res = await fetch('/api/blocks', {
+          method: 'POST',
+          headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+          credentials: 'include',
+          body: JSON.stringify({ targetUserId, ...(reason ? { reason } : {}) }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.status) {
+          notify(data.message || 'Could not block user.', 'error');
+          return { status: false, message: data.message };
+        }
+        notify(data.message || 'User blocked.', 'info');
+        void refreshConversations();
+        return { status: true, message: data.message };
+      } catch {
+        notify('Network error blocking user.', 'error');
+        return { status: false };
+      }
+    },
+    [currentUser?.id, refreshConversations]
+  );
+
+  const unblockUser = useCallback(
+    async (targetUserId: string) => {
+      if (!currentUser?.id) return { status: false };
+      try {
+        const res = await fetch(`/api/blocks/${encodeURIComponent(targetUserId)}`, {
+          method: 'DELETE',
+          headers: getAuthHeaders(),
+          credentials: 'include',
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.status) {
+          notify(data.message || 'Could not unblock user.', 'error');
+          return { status: false, message: data.message };
+        }
+        notify('User unblocked.', 'success');
+        void refreshConversations();
+        return { status: true };
+      } catch {
+        notify('Network error unblocking user.', 'error');
+        return { status: false };
+      }
+    },
+    [currentUser?.id, refreshConversations]
+  );
+
+  const fetchBlockedUsers = useCallback(async (): Promise<BlockedAccountItem[]> => {
+    if (!currentUser?.id) return [];
+    try {
+      const res = await fetch('/api/blocks', { headers: getAuthHeaders(), credentials: 'include' });
+      const data = await res.json().catch(() => ({}));
+      return res.ok && data.status && Array.isArray(data.blocks) ? data.blocks : [];
+    } catch {
+      return [];
+    }
+  }, [currentUser?.id]);
+
+  const markNotificationRead = useCallback(
+    async (id: string) => {
+      setDbNotifications(prev => prev.map(n => (n.id === id ? { ...n, isRead: true } : n)));
+      try {
+        await fetch(`/api/notifications/${encodeURIComponent(id)}/read`, {
+          method: 'PATCH',
+          headers: getAuthHeaders(),
+          credentials: 'include',
+        });
+      } catch {}
+    },
+    []
+  );
+
+  const markAllNotificationsRead = useCallback(async () => {
+    setDbNotifications(prev => prev.map(n => ({ ...n, isRead: true })));
+    try {
+      await fetch('/api/notifications/read-all', {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        credentials: 'include',
+      });
+    } catch {}
+  }, []);
+
+  const unreadNotificationsCount = useMemo(
+    () => dbNotifications.filter(n => !n.isRead).length,
+    [dbNotifications]
+  );
 
   // Phase 3: Admin & Moderation Handlers
   const updateVerificationRequest = async (
@@ -3698,6 +4046,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         confirmEmailChange,
         exportMyData,
         deleteMyAccount,
+        followUser,
+        unfollowUser,
+        fetchFollowRequests,
+        respondToFollowRequest,
+        fetchFollowList,
+        fetchFollowingFeed,
+        blockUser,
+        unblockUser,
+        fetchBlockedUsers,
         sellers,
         getSellerById,
         currentSeller,
@@ -3751,6 +4108,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         messages,
         activeConversationId,
         setActiveConversationId,
+        refreshConversations,
+        markConversationRead,
         loadConversationMessages,
         openChat,
         sendMessage,
@@ -3826,6 +4185,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         notifications,
         notify,
         dismissNotification,
+        dbNotifications,
+        unreadNotificationsCount,
+        refreshNotifications,
+        markNotificationRead,
+        markAllNotificationsRead,
       }}
     >
       {children}

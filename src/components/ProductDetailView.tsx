@@ -19,6 +19,9 @@ import {
   MessageSquare,
   MessageCircle,
   ImageOff,
+  UserPlus,
+  UserCheck,
+  Clock,
 } from 'lucide-react';
 import { ShareButtons } from './ShareButtons';
 import { ReportModal, ReportTarget } from './ReportModal';
@@ -48,6 +51,9 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({ product, o
     userLocation,
     subscribeRestockAlert,
     checkRestockAlert,
+    followUser,
+    unfollowUser,
+    openAuthModal,
   } = useApp();
 
   const seller = getSellerById(product.sellerId);
@@ -79,12 +85,38 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({ product, o
   const [notifyMeSet, setNotifyMeSet] = useState(false);
   const [notifyLoading, setNotifyLoading] = useState(false);
   const [reportTarget, setReportTarget] = useState<ReportTarget | null>(null);
+  const [followStatus, setFollowStatus] = useState<'none' | 'pending' | 'accepted'>('none');
+  const [followBusy, setFollowBusy] = useState(false);
 
   useEffect(() => {
     setSelectedPhotoIndex(0);
     setImageLoaded(false);
     setImageError(false);
   }, [product.id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!currentUser?.id || isOwnProduct) {
+      setFollowStatus('none');
+      return;
+    }
+    const targetSlug = product.sellerProfileSlug || seller?.profileSlug || product.sellerId;
+    const token = typeof localStorage !== 'undefined' ? localStorage.getItem('shopit_session_token') : null;
+    fetch(`/api/profiles/${encodeURIComponent(targetSlug)}`, {
+      headers: token ? { Authorization: `Bearer ${token}`, 'x-session-token': token } : {},
+      credentials: 'include',
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (!cancelled && data.status && data.profile?.followStatus) {
+          setFollowStatus(data.profile.followStatus);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [product.sellerId, product.sellerProfileSlug, seller?.profileSlug, currentUser?.id, isOwnProduct]);
 
   useEffect(() => {
     let cancelled = false;
@@ -193,6 +225,27 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({ product, o
     if (res.subscribed) {
       setNotifyMeSet(true);
     }
+  };
+
+  const handleSellerFollowToggle = async () => {
+    if (followBusy) return;
+    if (!currentUser) {
+      openAuthModal('login');
+      return;
+    }
+    setFollowBusy(true);
+    if (followStatus === 'none') {
+      const res = await followUser(product.sellerId);
+      if (res.status) {
+        setFollowStatus(res.followStatus || 'accepted');
+      }
+    } else {
+      const res = await unfollowUser(product.sellerId);
+      if (res.status) {
+        setFollowStatus('none');
+      }
+    }
+    setFollowBusy(false);
   };
 
   return (
@@ -366,12 +419,45 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({ product, o
               </div>
             </div>
 
-            <button
-              onClick={() => openProfile(product.sellerProfileSlug || seller?.profileSlug || product.sellerId)}
-              className="text-xs font-bold text-[#FF6B00] hover:underline whitespace-nowrap shrink-0"
-            >
-              View Profile
-            </button>
+            <div className="flex flex-col items-end gap-1.5 shrink-0">
+              {!isOwnProduct && (
+                <button
+                  type="button"
+                  disabled={followBusy}
+                  onClick={() => void handleSellerFollowToggle()}
+                  className={`px-2.5 py-1 rounded-lg border text-[11px] font-black flex items-center gap-1 whitespace-nowrap shrink-0 transition-colors ${
+                    followStatus === 'accepted'
+                      ? 'bg-[#9FE870] text-[#111111] border-[#111111]'
+                      : followStatus === 'pending'
+                      ? 'bg-[#FFF4EC] text-[#C2410C] border-[#FF6B00]'
+                      : 'bg-white dark:bg-[#1E2028] text-[#111111] dark:text-white border-[#E4E4E7] dark:border-[#27272A] hover:border-[#FF6B00]'
+                  }`}
+                >
+                  {followStatus === 'accepted' ? (
+                    <>
+                      <UserCheck className="w-3 h-3" />
+                      <span>Following</span>
+                    </>
+                  ) : followStatus === 'pending' ? (
+                    <>
+                      <Clock className="w-3 h-3" />
+                      <span>Requested</span>
+                    </>
+                  ) : (
+                    <>
+                      <UserPlus className="w-3 h-3 text-[#FF6B00]" />
+                      <span>Follow</span>
+                    </>
+                  )}
+                </button>
+              )}
+              <button
+                onClick={() => openProfile(product.sellerProfileSlug || seller?.profileSlug || product.sellerId)}
+                className="text-xs font-bold text-[#FF6B00] hover:underline whitespace-nowrap shrink-0"
+              >
+                View Profile
+              </button>
+            </div>
           </div>
 
           {/* Title & Rating */}

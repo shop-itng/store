@@ -33,7 +33,14 @@ import {
   Loader2,
   Store,
   Heart,
+  UserPlus,
+  UserCheck,
+  Users,
+  Ban,
+  X,
+  Check,
 } from 'lucide-react';
+import { FollowRequestItem, FollowListUser } from '../types';
 
 interface SellerShopViewProps {
   slugOrId: string;
@@ -48,6 +55,7 @@ export const SellerShopView: React.FC<SellerShopViewProps> = ({ slugOrId, onBack
     orders,
     openChat,
     openProduct,
+    openProfile,
     openQuickListModal,
     openAccountSettings,
     openAuthModal,
@@ -57,6 +65,12 @@ export const SellerShopView: React.FC<SellerShopViewProps> = ({ slugOrId, onBack
     toggleProductStock,
     deleteProduct,
     updateProduct,
+    followUser,
+    unfollowUser,
+    fetchFollowRequests,
+    respondToFollowRequest,
+    fetchFollowList,
+    blockUser,
   } = useApp();
 
   const [profile, setProfile] = useState<PublicProfileData | null>(null);
@@ -70,6 +84,21 @@ export const SellerShopView: React.FC<SellerShopViewProps> = ({ slugOrId, onBack
   const [coverError, setCoverError] = useState(false);
   const [avatarError, setAvatarError] = useState(false);
   const [busyProductId, setBusyProductId] = useState<string | null>(null);
+
+  // Social interaction states
+  const [followBusy, setFollowBusy] = useState(false);
+  const [followListModal, setFollowListModal] = useState<{
+    mode: 'followers' | 'following';
+    loading: boolean;
+    users: FollowListUser[];
+    error: string | null;
+  } | null>(null);
+  const [requestsModalOpen, setRequestsModalOpen] = useState(false);
+  const [requestsLoading, setRequestsLoading] = useState(false);
+  const [followRequests, setFollowRequests] = useState<FollowRequestItem[]>([]);
+  const [busyRequestFollowerId, setBusyRequestFollowerId] = useState<string | null>(null);
+  const [blockConfirmOpen, setBlockConfirmOpen] = useState(false);
+  const [blockingUser, setBlockingUser] = useState(false);
 
   const loadProfile = useCallback(async () => {
     if (!slugOrId) return;
@@ -192,6 +221,96 @@ export const SellerShopView: React.FC<SellerShopViewProps> = ({ slugOrId, onBack
     await deleteProduct(prod.id);
     await loadProfile();
     setBusyProductId(null);
+  };
+
+  const handleFollowToggle = async () => {
+    if (!profile || followBusy) return;
+    if (!currentUser) {
+      openAuthModal('login');
+      return;
+    }
+    setFollowBusy(true);
+    const currentStatus = profile.followStatus || 'none';
+    if (currentStatus === 'none') {
+      const res = await followUser(profile.id);
+      if (res.status) {
+        setProfile(prev =>
+          prev
+            ? {
+                ...prev,
+                followStatus: res.followStatus || 'accepted',
+                followersCount: res.followersCount ?? prev.followersCount,
+              }
+            : prev
+        );
+        if (res.followStatus === 'accepted' && isRestricted) {
+          await loadProfile();
+        }
+      }
+    } else {
+      const res = await unfollowUser(profile.id);
+      if (res.status) {
+        setProfile(prev =>
+          prev
+            ? {
+                ...prev,
+                followStatus: 'none',
+                followersCount: res.followersCount ?? prev.followersCount,
+              }
+            : prev
+        );
+      }
+    }
+    setFollowBusy(false);
+  };
+
+  const handleOpenFollowList = async (mode: 'followers' | 'following') => {
+    if (!profile) return;
+    setFollowListModal({ mode, loading: true, users: [], error: null });
+    const res = await fetchFollowList(profile.profileSlug || profile.id, mode);
+    setFollowListModal({
+      mode,
+      loading: false,
+      users: res.users,
+      error: res.status ? null : res.message || `Could not load ${mode}.`,
+    });
+  };
+
+  const handleOpenFollowRequests = async () => {
+    setRequestsModalOpen(true);
+    setRequestsLoading(true);
+    const list = await fetchFollowRequests();
+    setFollowRequests(list);
+    setRequestsLoading(false);
+  };
+
+  const handleRequestAction = async (followerId: string, action: 'accept' | 'decline') => {
+    setBusyRequestFollowerId(followerId);
+    const res = await respondToFollowRequest(followerId, action);
+    if (res.status) {
+      setFollowRequests(prev => prev.filter(r => r.followerId !== followerId));
+      setProfile(prev =>
+        prev
+          ? {
+              ...prev,
+              followersCount: res.followersCount ?? prev.followersCount,
+              pendingFollowRequestsCount: Math.max(0, (prev.pendingFollowRequestsCount || 1) - 1),
+            }
+          : prev
+      );
+    }
+    setBusyRequestFollowerId(null);
+  };
+
+  const handleConfirmBlock = async () => {
+    if (!profile || blockingUser) return;
+    setBlockingUser(true);
+    const res = await blockUser(profile.id);
+    setBlockingUser(false);
+    if (res.status) {
+      setBlockConfirmOpen(false);
+      onBack();
+    }
   };
 
   const renderOwnerListingBar = (prod: Product, inDraftsTab = false) => {
@@ -375,6 +494,16 @@ export const SellerShopView: React.FC<SellerShopViewProps> = ({ slugOrId, onBack
                     <Edit3 className="w-3.5 h-3.5" />
                     <span>Edit Profile</span>
                   </button>
+                  {(profile.pendingFollowRequestsCount || 0) > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => void handleOpenFollowRequests()}
+                      className="px-3.5 py-2 rounded-xl bg-[#FFF4EC] hover:bg-[#FED7AA]/50 text-[#111111] border-2 border-[#FF6B00] font-black text-xs flex items-center gap-1.5"
+                    >
+                      <Users className="w-3.5 h-3.5 text-[#FF6B00]" />
+                      <span>Requests ({profile.pendingFollowRequestsCount})</span>
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={() => openAccountSettings()}
@@ -414,21 +543,53 @@ export const SellerShopView: React.FC<SellerShopViewProps> = ({ slugOrId, onBack
                   )}
                 </>
               ) : (
-                hasSellerPresence && (
+                <>
                   <button
                     type="button"
-                    onClick={() =>
-                      void openChat(undefined, {
-                        sellerId: profile.id,
-                        productId: activeProducts[0]?.id,
-                      })
-                    }
-                    className="px-4 py-2.5 rounded-xl bg-[#111111] hover:bg-[#18181B] text-[#9FE870] border-2 border-[#111111] hover:border-[#FF6B00] font-black text-xs flex items-center gap-2 transition-all shadow-[0_2px_0_#FF6B00]"
+                    disabled={followBusy}
+                    onClick={() => void handleFollowToggle()}
+                    className={`px-4 py-2.5 rounded-xl border-2 font-black text-xs flex items-center gap-1.5 transition-all whitespace-nowrap shrink-0 ${
+                      profile.followStatus === 'accepted'
+                        ? 'bg-[#9FE870] hover:bg-[#AEF083] text-[#111111] border-[#111111]'
+                        : profile.followStatus === 'pending'
+                        ? 'bg-[#FFF4EC] text-[#C2410C] border-[#FF6B00]'
+                        : 'bg-[#FF6B00] hover:bg-[#E55E00] text-[#111111] border-[#111111] shadow-[0_2px_0_#111111]'
+                    }`}
                   >
-                    <MessageSquare className="w-4 h-4 text-[#FF6B00]" />
-                    <span>Message Seller</span>
+                    {profile.followStatus === 'accepted' ? (
+                      <>
+                        <UserCheck className="w-4 h-4" />
+                        <span>Following</span>
+                      </>
+                    ) : profile.followStatus === 'pending' ? (
+                      <>
+                        <Clock className="w-4 h-4" />
+                        <span>Requested</span>
+                      </>
+                    ) : (
+                      <>
+                        <UserPlus className="w-4 h-4" />
+                        <span>{profile.whoCanFollow === 'approval' ? 'Request Follow' : 'Follow'}</span>
+                      </>
+                    )}
                   </button>
-                )
+
+                  {hasSellerPresence && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void openChat(undefined, {
+                          sellerId: profile.id,
+                          productId: activeProducts[0]?.id,
+                        })
+                      }
+                      className="px-4 py-2.5 rounded-xl bg-[#111111] hover:bg-[#18181B] text-[#9FE870] border-2 border-[#111111] hover:border-[#FF6B00] font-black text-xs flex items-center gap-2 transition-all shadow-[0_2px_0_#FF6B00]"
+                    >
+                      <MessageSquare className="w-4 h-4 text-[#FF6B00]" />
+                      <span>Message Seller</span>
+                    </button>
+                  )}
+                </>
               )}
             </div>
           </div>
@@ -442,18 +603,32 @@ export const SellerShopView: React.FC<SellerShopViewProps> = ({ slugOrId, onBack
 
           {/* Read-only DB Stats Grid */}
           <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 mt-5 pt-5 border-t border-[#E4E4E7] dark:border-[#27272A] text-xs">
-            <div>
-              <div className="text-[#71717A] dark:text-[#A1A1AA]">Followers</div>
+            <button
+              type="button"
+              onClick={() => void handleOpenFollowList('followers')}
+              className="text-left p-2 -m-2 rounded-xl hover:bg-[#FAFAFA] dark:hover:bg-[#1E2028] transition-colors cursor-pointer"
+            >
+              <div className="text-[#71717A] dark:text-[#A1A1AA] flex items-center gap-1">
+                <span>Followers</span>
+                <span className="text-[10px] text-[#FF6B00] font-bold">View</span>
+              </div>
               <div className="text-lg font-black text-[#111111] dark:text-white font-mono-numbers mt-0.5">
                 {profile.followersCount ?? 0}
               </div>
-            </div>
-            <div>
-              <div className="text-[#71717A] dark:text-[#A1A1AA]">Following</div>
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleOpenFollowList('following')}
+              className="text-left p-2 -m-2 rounded-xl hover:bg-[#FAFAFA] dark:hover:bg-[#1E2028] transition-colors cursor-pointer"
+            >
+              <div className="text-[#71717A] dark:text-[#A1A1AA] flex items-center gap-1">
+                <span>Following</span>
+                <span className="text-[10px] text-[#FF6B00] font-bold">View</span>
+              </div>
               <div className="text-lg font-black text-[#111111] dark:text-white font-mono-numbers mt-0.5">
                 {profile.followingCount ?? 0}
               </div>
-            </div>
+            </button>
             <div>
               <div className="text-[#71717A] dark:text-[#A1A1AA]">Active Listings</div>
               <div className="text-lg font-black text-emerald-700 dark:text-[#9FE870] font-mono-numbers mt-0.5">
@@ -487,20 +662,32 @@ export const SellerShopView: React.FC<SellerShopViewProps> = ({ slugOrId, onBack
             />
 
             {!isOwner && (
-              <button
-                type="button"
-                onClick={() =>
-                  setReportTarget({
-                    targetType: 'seller',
-                    targetId: profile.id,
-                    targetTitle: primaryTitle,
-                  })
-                }
-                className="flex items-center gap-1.5 text-xs text-[#71717A] hover:text-rose-600 transition-colors ml-auto"
-              >
-                <Flag className="w-3.5 h-3.5" />
-                <span>Report Profile</span>
-              </button>
+              <div className="flex items-center gap-4 ml-auto">
+                {currentUser && (
+                  <button
+                    type="button"
+                    onClick={() => setBlockConfirmOpen(true)}
+                    className="flex items-center gap-1.5 text-xs text-[#71717A] hover:text-rose-600 transition-colors"
+                  >
+                    <Ban className="w-3.5 h-3.5" />
+                    <span>Block User</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() =>
+                    setReportTarget({
+                      targetType: 'seller',
+                      targetId: profile.id,
+                      targetTitle: primaryTitle,
+                    })
+                  }
+                  className="flex items-center gap-1.5 text-xs text-[#71717A] hover:text-rose-600 transition-colors"
+                >
+                  <Flag className="w-3.5 h-3.5" />
+                  <span>Report Profile</span>
+                </button>
+              </div>
             )}
           </div>
         </div>
@@ -575,6 +762,23 @@ export const SellerShopView: React.FC<SellerShopViewProps> = ({ slugOrId, onBack
           <p className="text-xs text-[#71717A] dark:text-[#A1A1AA] max-w-md mx-auto">
             {primaryTitle} set their profile visibility to followers only. Only approved followers can view listings, bio, and activity.
           </p>
+          {!isOwner && (
+            <div className="pt-2 flex justify-center">
+              <button
+                type="button"
+                disabled={followBusy}
+                onClick={() => void handleFollowToggle()}
+                className="px-4 py-2 rounded-xl bg-[#FF6B00] hover:bg-[#E55E00] text-[#111111] border-2 border-[#111111] font-black text-xs flex items-center gap-1.5"
+              >
+                <UserPlus className="w-3.5 h-3.5" />
+                <span>
+                  {profile.followStatus === 'pending'
+                    ? 'Request Sent (Cancel)'
+                    : 'Request to Follow'}
+                </span>
+              </button>
+            </div>
+          )}
         </div>
       ) : (
         <>
@@ -841,6 +1045,197 @@ export const SellerShopView: React.FC<SellerShopViewProps> = ({ slugOrId, onBack
         isOpen={Boolean(reportTarget)}
         onClose={() => setReportTarget(null)}
       />
+
+      {/* Followers / Following List Modal */}
+      {followListModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/65 backdrop-blur-xs animate-backdrop">
+          <div className="bg-white dark:bg-[#15161C] rounded-2xl max-w-md w-full max-h-[80vh] flex flex-col border border-[#E4E4E7] dark:border-[#27272A] shadow-2xl overflow-hidden animate-modal-enter">
+            <div className="px-5 py-4 border-b border-[#E4E4E7] dark:border-[#27272A] flex items-center justify-between">
+              <h3 className="text-sm font-black text-[#111111] dark:text-white capitalize">
+                {followListModal.mode} · {primaryTitle}
+              </h3>
+              <button
+                type="button"
+                onClick={() => setFollowListModal(null)}
+                className="p-1.5 rounded-lg text-[#71717A] hover:text-[#111111] dark:hover:text-white"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 overflow-y-auto flex-1 space-y-2">
+              {followListModal.loading ? (
+                <div className="py-10 text-center text-xs text-[#71717A]">
+                  <Loader2 className="w-6 h-6 animate-spin text-[#FF6B00] mx-auto mb-2" />
+                  <span>Loading {followListModal.mode}...</span>
+                </div>
+              ) : followListModal.error ? (
+                <div className="py-8 text-center text-xs text-[#71717A] dark:text-[#A1A1AA] space-y-1.5">
+                  <Lock className="w-6 h-6 text-[#FF6B00] mx-auto" />
+                  <p className="font-bold text-[#111111] dark:text-white">{followListModal.error}</p>
+                </div>
+              ) : followListModal.users.length === 0 ? (
+                <div className="py-8 text-center text-xs text-[#71717A] dark:text-[#A1A1AA]">
+                  No {followListModal.mode} yet.
+                </div>
+              ) : (
+                followListModal.users.map(u => (
+                  <button
+                    key={u.id}
+                    type="button"
+                    onClick={() => {
+                      setFollowListModal(null);
+                      openProfile(u.profileSlug || u.id);
+                    }}
+                    className="w-full flex items-center justify-between gap-3 p-2.5 rounded-xl border border-[#E4E4E7] dark:border-[#27272A] hover:border-[#FF6B00] bg-[#FAFAFA] dark:bg-[#1E2028] text-left transition-colors"
+                  >
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <span className="w-9 h-9 rounded-full overflow-hidden border border-[#FF6B00] bg-[#FFF4EC] flex items-center justify-center font-black text-xs text-[#FF6B00] shrink-0">
+                        {u.avatarUrl ? (
+                          <img src={u.avatarUrl} alt={u.displayName} className="w-full h-full object-cover" />
+                        ) : (
+                          u.displayName[0]?.toUpperCase() || 'M'
+                        )}
+                      </span>
+                      <div className="min-w-0">
+                        <div className="text-xs font-black text-[#111111] dark:text-white truncate">
+                          {u.displayName}
+                        </div>
+                        <div className="text-[11px] text-[#71717A] dark:text-[#A1A1AA] truncate">
+                          {[u.shopName, u.campus].filter(Boolean).join(' · ') || 'Shop It Member'}
+                        </div>
+                      </div>
+                    </div>
+                    <span className="text-[11px] font-bold text-[#FF6B00] shrink-0">View</span>
+                  </button>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Owner Follow Requests Modal */}
+      {requestsModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/65 backdrop-blur-xs animate-backdrop">
+          <div className="bg-white dark:bg-[#15161C] rounded-2xl max-w-md w-full max-h-[80vh] flex flex-col border border-[#E4E4E7] dark:border-[#27272A] shadow-2xl overflow-hidden animate-modal-enter">
+            <div className="px-5 py-4 border-b border-[#E4E4E7] dark:border-[#27272A] flex items-center justify-between">
+              <h3 className="text-sm font-black text-[#111111] dark:text-white">
+                Follow Requests
+              </h3>
+              <button
+                type="button"
+                onClick={() => setRequestsModalOpen(false)}
+                className="p-1.5 rounded-lg text-[#71717A] hover:text-[#111111] dark:hover:text-white"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 overflow-y-auto flex-1 space-y-2.5">
+              {requestsLoading ? (
+                <div className="py-10 text-center text-xs text-[#71717A]">
+                  <Loader2 className="w-6 h-6 animate-spin text-[#FF6B00] mx-auto mb-2" />
+                  <span>Loading requests...</span>
+                </div>
+              ) : followRequests.length === 0 ? (
+                <div className="py-8 text-center text-xs text-[#71717A] dark:text-[#A1A1AA]">
+                  No pending follow requests.
+                </div>
+              ) : (
+                followRequests.map(req => {
+                  const busy = busyRequestFollowerId === req.followerId;
+                  return (
+                    <div
+                      key={req.id}
+                      className="flex items-center justify-between gap-3 p-3 rounded-xl border border-[#E4E4E7] dark:border-[#27272A] bg-[#FAFAFA] dark:bg-[#1E2028]"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setRequestsModalOpen(false);
+                          openProfile(req.profileSlug || req.followerId);
+                        }}
+                        className="flex items-center gap-2.5 min-w-0 text-left"
+                      >
+                        <span className="w-9 h-9 rounded-full overflow-hidden border border-[#FF6B00] bg-[#FFF4EC] flex items-center justify-center font-black text-xs text-[#FF6B00] shrink-0">
+                          {req.avatarUrl ? (
+                            <img src={req.avatarUrl} alt={req.displayName} className="w-full h-full object-cover" />
+                          ) : (
+                            req.displayName[0]?.toUpperCase() || 'M'
+                          )}
+                        </span>
+                        <div className="min-w-0">
+                          <div className="text-xs font-black text-[#111111] dark:text-white truncate">
+                            {req.displayName}
+                          </div>
+                          <div className="text-[11px] text-[#71717A] dark:text-[#A1A1AA] truncate">
+                            {req.campus || 'Shop It Member'}
+                          </div>
+                        </div>
+                      </button>
+
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => void handleRequestAction(req.followerId, 'accept')}
+                          className="px-2.5 py-1.5 rounded-lg bg-[#9FE870] text-[#111111] border border-[#111111] font-black text-[11px] flex items-center gap-1 disabled:opacity-50"
+                        >
+                          <Check className="w-3 h-3" />
+                          <span>Accept</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => void handleRequestAction(req.followerId, 'decline')}
+                          className="px-2.5 py-1.5 rounded-lg bg-white dark:bg-[#15161C] text-[#52525B] dark:text-[#A1A1AA] border border-[#E4E4E7] dark:border-[#27272A] font-bold text-[11px] disabled:opacity-50"
+                        >
+                          Decline
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Block User Confirmation Modal */}
+      {blockConfirmOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-xs animate-backdrop">
+          <div className="bg-white dark:bg-[#15161C] rounded-2xl max-w-sm w-full border border-rose-300 dark:border-rose-900 p-5 space-y-4 shadow-2xl animate-modal-enter">
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-rose-100 dark:bg-rose-950/50 text-rose-600 flex items-center justify-center shrink-0">
+                <Ban className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-black text-[#111111] dark:text-white">Block {primaryTitle}?</h3>
+                <p className="text-xs text-[#71717A] dark:text-[#A1A1AA] mt-1 leading-relaxed">
+                  They will no longer be able to follow you, view your profile, or message you. You can unblock anytime from Account Settings.
+                </p>
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setBlockConfirmOpen(false)}
+                className="px-4 py-2 rounded-xl border border-[#E4E4E7] dark:border-[#27272A] font-bold text-xs text-[#52525B] dark:text-[#A1A1AA]"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={blockingUser}
+                onClick={() => void handleConfirmBlock()}
+                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white font-black text-xs"
+              >
+                {blockingUser ? 'Blocking...' : 'Block User'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
