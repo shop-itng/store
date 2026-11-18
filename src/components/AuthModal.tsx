@@ -40,7 +40,6 @@ export const AuthModal: React.FC = () => {
     submitSellerRegistration,
     login,
     notify,
-    emergencyControls,
     setActiveView,
   } = useApp();
 
@@ -94,21 +93,19 @@ export const AuthModal: React.FC = () => {
   // Sync preferredSignupRole when AuthModal opens or switches into signup
   useEffect(() => {
     if (isAuthModalOpen && authTab === 'signup') {
-      if (preferredSignupRole === 'seller' && emergencyControls?.pauseSellerSignups) {
-        setRole('buyer');
-      } else if (preferredSignupRole === 'seller' || preferredSignupRole === 'buyer') {
+      if (preferredSignupRole === 'seller' || preferredSignupRole === 'buyer') {
         setRole(preferredSignupRole);
       }
     }
-  }, [isAuthModalOpen, authTab, preferredSignupRole, emergencyControls?.pauseSellerSignups]);
+  }, [isAuthModalOpen, authTab, preferredSignupRole]);
 
-  // Prevent landing on Step 3 (seller_register) unauthenticated without an OTP signupVerificationToken
+  // Prevent landing on Step 3 (seller_register) unauthenticated without pending account info
   useEffect(() => {
-    if (isAuthModalOpen && authTab === 'seller_register' && !currentUser && !pendingAuthData?.signupVerificationToken) {
+    if (isAuthModalOpen && authTab === 'seller_register' && !currentUser && !pendingAuthData?.email) {
       setRole('seller');
       setAuthTab('signup');
     }
-  }, [isAuthModalOpen, authTab, currentUser, pendingAuthData?.signupVerificationToken, setAuthTab]);
+  }, [isAuthModalOpen, authTab, currentUser, pendingAuthData?.email, setAuthTab]);
 
   // Sync under-18 and guardian info captured during Step 1 signup into Seller Setup step
   useEffect(() => {
@@ -256,14 +253,7 @@ export const AuthModal: React.FC = () => {
         matchedUser = { ...data.user, mustChangePassword: Boolean(data.mustChangePassword ?? data.user?.mustChangePassword) };
         sessionToken = data.sessionToken;
       } else {
-        if (data.error === 'EMAIL_NOT_VERIFIED') {
-          notify('Your email is not verified yet. We are sending you a 6-digit verification code now.', 'info');
-          setEmail(cleanEmail);
-          setAuthTab('otp');
-          generateEmailOtp(cleanEmail, 'signup', { name: cleanEmail.split('@')[0] });
-        } else {
-          notify(data.message || 'Invalid email or password.', 'error');
-        }
+        notify(data.message || 'Invalid email or password.', 'error');
         return;
       }
 
@@ -445,12 +435,6 @@ export const AuthModal: React.FC = () => {
 
     setIsSubmitting(true);
     try {
-      const otpResult = await generateEmailOtp(cleanEmail, 'signup', { name: name.trim() });
-      if (!otpResult.success) {
-        notify(otpResult.error || 'Could not send verification code.', 'error');
-        return;
-      }
-
       const authData = {
         id: `user_${Date.now()}`,
         name: name.trim(),
@@ -462,7 +446,43 @@ export const AuthModal: React.FC = () => {
         guardianName: parsedAge < 18 ? signupGuardianName.trim() : undefined,
         agreedToTermsDate: new Date().toISOString(),
       };
+
+      const otpResult = await generateEmailOtp(cleanEmail, 'signup', { name: name.trim() });
       setPendingAuthData(authData);
+
+      // If email delivery fails or OTP dispatch errors, never block user creation: register immediately
+      if (!otpResult.success || otpResult.emailDelivered === false) {
+        if (role === 'seller') {
+          setAuthTab('seller_register');
+          notify('Email delivery is unavailable right now — complete your shop profile to finish signing up.', 'info');
+          return;
+        }
+
+        const resp = await fetch('/api/auth/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({
+            email: cleanEmail,
+            password,
+            name: name.trim(),
+            role: 'buyer',
+            age: parsedAge,
+            hasGuardianConsent: parsedAge < 18 ? guardianConsentGiven : true,
+            guardianName: parsedAge < 18 ? signupGuardianName.trim() : undefined,
+          }),
+        });
+        const regData = await resp.json();
+        if (!resp.ok || !regData.status) {
+          notify(regData.message || 'Unable to create account.', 'error');
+          return;
+        }
+        login({ ...regData.user, sessionToken: regData.sessionToken });
+        closeAuthModal();
+        notify('Account created and saved in database!', 'success');
+        return;
+      }
+
       setSignupCooldown(60);
       setOtpCode('');
       setAuthTab('otp');
@@ -892,31 +912,17 @@ export const AuthModal: React.FC = () => {
               </button>
               <button
                 type="button"
-                onClick={() => {
-                  if (emergencyControls?.pauseSellerSignups) {
-                    notify('New seller registrations are temporarily paused by platform moderation. Please join as a shopper for now.', 'info');
-                    return;
-                  }
-                  setRole('seller');
-                }}
+                onClick={() => setRole('seller')}
                 className={`py-2 text-xs font-bold rounded-lg transition-all flex items-center justify-center gap-1.5 ${
-                  emergencyControls?.pauseSellerSignups ? 'opacity-60 cursor-not-allowed' : ''
-                } ${
                   role === 'seller'
                     ? 'bg-white text-[#111111] shadow-xs font-black'
                     : 'text-slate-600 hover:text-slate-900'
                 }`}
               >
                 <Store className="w-3.5 h-3.5 text-[#FF6B00]" />
-                <span>Youth Seller {emergencyControls?.pauseSellerSignups ? '(Paused)' : ''}</span>
+                <span>Youth Seller</span>
               </button>
             </div>
-
-            {emergencyControls?.pauseSellerSignups && (
-              <div className="p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-[11px] text-amber-900 leading-tight">
-                <strong>Safety Notice:</strong> New artisan seller registrations are temporarily paused for routine safety review. Buyer signups are fully open.
-              </div>
-            )}
 
             <div>
               <label className="text-xs font-semibold text-slate-700 block mb-1">Full Name</label>

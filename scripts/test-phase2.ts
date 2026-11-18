@@ -207,19 +207,19 @@ async function main() {
     );
 
     const productId = `prod_p2_${ts}`;
-    const sellerPriceNaira = 5000;
-    // Server fee tier at ₦5,000 is ₦500 + ₦200 delivery_pickup_fee
+    const sellerPriceKobo = 500000;
+    // Server fee tier at ₦5,000 is ₦500 (50,000 kobo) + ₦200 delivery_pickup_fee (20,000 kobo)
     await query(
       `INSERT INTO shopit_products (
          id, seller_id, seller_shop_name, seller_campus, title, category, description,
-         seller_price, service_fee, display_price,
-         stock, is_sold_out, delivery_pickup_fee, delivery_local_fee, delivery_buyer_arranges
+         seller_price_kobo, service_fee_kobo, display_price_kobo,
+         stock, is_sold_out, delivery_pickup_fee_kobo, delivery_local_fee_kobo, delivery_buyer_arranges
        ) VALUES (
          $1, $2, 'Phase Two Studio', 'UNILAG (Akoka)', 'Handcrafted Bead Bag', 'Beads', 'Crafted for verification',
-         $3, 500, 5500,
-         10, false, 200, 500, false
+         $3, 50000, 550000,
+         10, false, 20000, 50000, false
        )`,
-      [productId, sellerId, sellerPriceNaira]
+      [productId, sellerId, sellerPriceKobo]
     );
 
     // ------------------------------------------------------------------
@@ -647,8 +647,7 @@ async function main() {
       const payoutAccId = `acc_p2_${ts}`;
       await query(
         `UPDATE shopit_wallets
-         SET available_balance = 10000,
-             available_balance_kobo = 1000000,
+         SET available_balance_kobo = 1000000,
              active_payout_account_id = $1,
              payout_accounts = $2
          WHERE seller_id = $3`,

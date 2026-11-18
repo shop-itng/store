@@ -350,7 +350,7 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
                 <li><strong>Location area:</strong> Your campus, town, or local government area to show relevant items and delivery options.</li>
                 <li><strong>Order &amp; transaction records:</strong> What you bought or sold, order reference numbers, and timestamps.</li>
                 <li><strong>In-app chat messages:</strong> Messages sent between buyers and sellers to verify transaction details.</li>
-                <li><strong>Seller verification data:</strong> National Identification Number (NIN), ID slip/card photo, live selfie, and parent/guardian contact for sellers under 18.</li>
+                <li><strong>Seller verification data:</strong> National Identification Number (NIN), ID slip/card photo, live selfie, and parent/guardian co-verification (legal name and NIN) for sellers under 18.</li>
               </ul>
               <div className="p-3 bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-300 dark:border-emerald-800 rounded-xl text-xs text-emerald-900 dark:text-emerald-200">
                 <strong>What we NEVER collect:</strong> We do NOT collect your phone number. We do NOT store your bank card numbers, CVV codes, or card PINs (these are handled directly by Flutterwave).
@@ -360,7 +360,7 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
             <section className="space-y-2">
               <h2 className="text-base font-black text-[#111111] dark:text-white">3. Who Sees Your Information</h2>
               <p>
-                <strong>Between users:</strong> Sellers see buyers only as a masked identifier (like &quot;Buyer #7821&quot;). Your real email address and personal contact details are never shown to the other party.
+                <strong>Between users:</strong> Members see each other&apos;s public display name, avatar, campus/area, and profile information. Your real email address and personal contact details are never shown publicly.
               </p>
               <p>
                 <strong>Delivery information:</strong> Your delivery spot or landmark is shared only with the seller or delivery courier for the purpose of getting your order to you.

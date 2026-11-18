@@ -20,6 +20,88 @@ export interface NigerianLocation {
   area: string;
 }
 
+export interface NotificationPrefs {
+  emailOrders: boolean;
+  emailMessages: boolean;
+  emailFollowers: boolean;
+  emailRestock: boolean;
+}
+
+export interface PrivacySettings {
+  profileVisibility: 'public' | 'followers';
+  showLastSeen: boolean;
+  showFollowersList: boolean;
+  showFollowingList: boolean;
+  whoCanFollow: 'everyone' | 'approval';
+  whoCanMessage: 'everyone' | 'followers' | 'mutual';
+}
+
+export interface ProfileBadge {
+  id: string;
+  label: string;
+}
+
+export interface CompletenessItem {
+  key: string;
+  label: string;
+  done: boolean;
+}
+
+export interface PublicProfileData {
+  id: string;
+  email?: string;
+  fullName?: string;
+  displayName: string;
+  profileSlug: string;
+  role: UserRole;
+  avatarUrl?: string | null;
+  coverUrl?: string | null;
+  bio: string;
+  campus: string;
+  locationArea: string;
+  interests: string[];
+  isVerifiedEmail?: boolean;
+  isUnder18?: boolean;
+  memberSince: string;
+  lastSeenAt?: string | null;
+  followStatus?: 'none' | 'pending' | 'accepted';
+  whoCanFollow?: 'everyone' | 'approval';
+  whoCanMessage?: 'everyone' | 'followers' | 'mutual';
+  showFollowersList?: boolean;
+  showFollowingList?: boolean;
+  isRestricted?: boolean;
+  followersCount: number;
+  followingCount: number;
+  completedOrdersCount?: number;
+  productsCount?: number;
+  totalProductsCount?: number;
+  reviewCount?: number;
+  averageRating?: number;
+  isVerifiedSeller?: boolean;
+  badges: ProfileBadge[];
+  reviews: Array<ProductReview & { productTitle?: string }>;
+  products: Product[];
+  wishlistProducts?: Product[];
+  completeness?: {
+    score: number;
+    items: CompletenessItem[];
+  };
+  notificationPrefs?: NotificationPrefs;
+  privacySettings?: PrivacySettings;
+  seller?: {
+    id: string;
+    shopName: string;
+    bio: string;
+    campus: string;
+    locationArea: string;
+    logoUrl?: string | null;
+    bannerUrl?: string | null;
+    isVerifiedSeller: boolean;
+    verificationStatus: SellerProfile['verificationStatus'];
+    vacationMode: boolean;
+  } | null;
+}
+
 export interface SellerProfile {
   id: string;
   shopName: string;
@@ -31,11 +113,6 @@ export interface SellerProfile {
   locationArea?: string; // Only Area shown publicly as required
   logoUrl?: string;
   bannerUrl?: string;
-  socialLinks?: {
-    instagram?: string;
-    whatsappPreview?: string;
-    tiktok?: string;
-  };
   isVerifiedSeller: boolean;
   verificationStatus: 'not_started' | 'pending' | 'verified' | 'rejected' | 'needs_resubmission' | 'approved'; // 'approved' retained for backward-compat
   verificationRejectionReason?: string;
@@ -45,7 +122,6 @@ export interface SellerProfile {
   under18: boolean;
   guardianConsent: boolean;
   guardianName?: string;
-  guardianPhone?: string;
   badges: ('verified' | 'fast_responder' | 'sales_10' | 'top_rated')[];
   level: number; // 1 to 5
   rating: number;
@@ -54,11 +130,14 @@ export interface SellerProfile {
   viewsCount: number;
   vacationMode: boolean;
   joinedDate: string;
+  profileSlug?: string;
 }
 
 export type AppView =
   | 'catalog'
   | 'product_detail'
+  | 'profile'
+  | 'account_settings'
   | 'seller_shop'
   | 'seller_dashboard'
   | 'wishlist'
@@ -67,8 +146,6 @@ export type AppView =
   | 'admin'
   | 'chat'
   | 'campus_logistics'
-  | 'craft_studio'
-  | 'campus_ambassadors'
   | 'terms'
   | 'privacy'
   | 'refunds'
@@ -83,6 +160,16 @@ export interface User {
   id: string;
   email: string;
   name: string;
+  displayName?: string;
+  profileSlug?: string;
+  avatarUrl?: string;
+  coverUrl?: string;
+  bio?: string;
+  campus?: string;
+  interests?: string[];
+  notificationPrefs?: NotificationPrefs;
+  privacySettings?: PrivacySettings;
+  lastSeenAt?: string;
   password?: string;
   role: UserRole;
   subRole?: 'superadmin' | 'moderator' | 'finance' | 'support' | string;
@@ -90,7 +177,6 @@ export interface User {
   isVerifiedEmail: boolean;
   mustChangePassword?: boolean;
   isBanned?: boolean;
-  avatarUrl?: string;
   sellerProfile?: SellerProfile;
   savedDeliveryArea?: string;
   location?: NigerianLocation;
@@ -132,7 +218,10 @@ export interface DeliverySetting {
 export interface ProductReview {
   id: string;
   productId: string;
-  buyerMaskedId: string; // e.g. "Buyer #7821" for anti-bypass privacy
+  reviewerId?: string;
+  reviewerName: string;
+  reviewerAvatarUrl?: string;
+  reviewerProfileSlug?: string;
   rating: number;
   comment: string;
   date: string;
@@ -143,6 +232,9 @@ export interface Product {
   id: string;
   sellerId: string;
   sellerShopName: string;
+  sellerDisplayName?: string;
+  sellerAvatarUrl?: string;
+  sellerProfileSlug?: string;
   sellerCampus?: Campus;
   location?: NigerianLocation;
   locationArea?: string; // Only Area shown publicly as required
@@ -162,6 +254,10 @@ export interface Product {
   delivery: DeliverySetting;
   isSoldOut: boolean;
   isNewArrival: boolean;
+  isPaused?: boolean;
+  isDraft?: boolean;
+  isPinned?: boolean;
+  pinnedAt?: string;
   createdAt: string;
 }
 
@@ -207,7 +303,9 @@ export interface OrderItem {
 export interface Order {
   id: string; // e.g. "ORD-84192"
   buyerId: string;
-  buyerMaskedId: string; // e.g. "Buyer #7821" for anti-bypass privacy
+  buyerDisplayName: string;
+  buyerAvatarUrl?: string;
+  buyerProfileSlug?: string;
   buyerName?: string; // Visible only to admin, NOT seller!
   buyerEmail?: string;
   deliveryArea: string;
@@ -323,22 +421,6 @@ export interface PaymentWebhookEvent {
   channel: 'card' | 'bank_transfer' | 'ussd' | 'opay';
 }
 
-export interface SecuritySession {
-  id: string;
-  device: string;
-  ip: string;
-  location: string;
-  lastActive: string;
-  isCurrent: boolean;
-}
-
-export interface SecurityProfile {
-  twoFactorEnabled: boolean;
-  loginAlertsEnabled: boolean;
-  failedLoginAttempts: number;
-  isAccountLocked: boolean;
-  sessions: SecuritySession[];
-}
 
 export interface FeeSettings {
   tierMode: 'tiered' | 'flat';
@@ -362,7 +444,10 @@ export interface ChatMessage {
   id: string;
   conversationId: string;
   senderRole: 'buyer' | 'seller' | 'system' | 'admin';
-  senderMaskedName: string; // e.g. "Buyer #7821" or "Amaka Beads & Charms"
+  senderDisplayName: string;
+  senderAvatarUrl?: string;
+  senderProfileSlug?: string;
+  senderName?: string;
   senderId: string;
   content: string; // [blocked] if bypass attempt
   originalContent?: string;
@@ -390,9 +475,14 @@ export interface Conversation {
   productTitle?: string;
   productImage?: string;
   buyerId: string;
-  buyerMaskedId: string;
+  buyerDisplayName: string;
+  buyerAvatarUrl?: string;
+  buyerProfileSlug?: string;
   sellerId: string;
   sellerShopName: string;
+  sellerDisplayName?: string;
+  sellerAvatarUrl?: string;
+  sellerProfileSlug?: string;
   lastMessage: string;
   lastMessageAt: string;
   unreadBuyer: number;
@@ -408,7 +498,9 @@ export interface Conversation {
 export interface DisputeTicket {
   id: string;
   orderId: string;
-  buyerMaskedId: string;
+  buyerDisplayName: string;
+  buyerAvatarUrl?: string;
+  buyerProfileSlug?: string;
   buyerName?: string; // Visible only to Admin
   sellerId: string;
   sellerShopName: string;
@@ -455,7 +547,6 @@ export interface SellerVerificationRequest {
   livenessScore?: number; // 0-100
   under18: boolean;
   guardianName?: string;
-  guardianPhone?: string;
   guardianNinLast4?: string;
   guardianIdCardPhotoUrl?: string;
   guardianConsentSigned?: boolean;
@@ -488,7 +579,7 @@ export interface AntiBypassFlag {
   conversationId: string;
   senderId: string;
   senderRole: 'buyer' | 'seller';
-  senderMaskedName: string;
+  senderDisplayName: string;
   offendingText: string;
   maskedText: string;
   detectedPatterns: string[];
@@ -513,147 +604,6 @@ export interface SafePickupSpot {
   contactPorterTitle?: string;
 }
 
-export interface CampusRunner {
-  id: string;
-  name: string;
-  campus: Campus;
-  studentLevel: string;
-  rating: number;
-  completedTrips: number;
-  isAvailable: boolean;
-  avatarUrl: string;
-  currentZone: string;
-  feePerTrip: number;
-  phoneMasked: string;
-}
-
-export interface RunnerTrip {
-  id: string;
-  orderId: string;
-  runnerId: string;
-  runnerName: string;
-  pickupSpot: string;
-  dropoffSpot: string;
-  status: 'assigned' | 'collected_from_seller' | 'in_transit' | 'arrived_at_spot' | 'handed_over';
-  etaMinutes: number;
-  otpCode: string;
-  lastCheckpointTime: string;
-}
-
-// ==========================================
-// PHASE 5: ARTISAN COMMISSIONS, DROPS & SOCIAL COMMERCE
-// ==========================================
-
-export type CraftCommissionType =
-  | 'waist_bead'
-  | 'fragrance_blend'
-  | 'crochet_wear'
-  | 'leather_craft'
-  | 'custom_jewelry';
-
-export interface CustomCommissionRequest {
-  id: string;
-  artisanId: string;
-  artisanShopName: string;
-  buyerMaskedId: string;
-  craftType: CraftCommissionType;
-  title: string;
-  sizingDetails: string;
-  colorPalette: string[];
-  inscriptions?: string;
-  specialInstructions: string;
-  estimatedPrice: number;
-  depositAmount: number; // 50% escrow deposit
-  status:
-    | 'pending_quote'
-    | 'artisan_accepted'
-    | 'deposit_locked'
-    | 'crafting_in_progress'
-    | 'photo_proof_ready'
-    | 'completed';
-  artisanWorkInProgressPhoto?: string;
-  createdAt: string;
-}
-
-export interface CampusFlashDrop {
-  id: string;
-  artisanId: string;
-  artisanShopName: string;
-  artisanAvatar: string;
-  campus: Campus;
-  title: string;
-  tagline: string;
-  batchSize: number;
-  claimedCount: number;
-  price: number;
-  originalPrice: number;
-  dropTime: string;
-  isLive: boolean;
-  imageUrl: string;
-  perks: string[];
-}
-
-export interface CampusStylePost {
-  id: string;
-  buyerMaskedId: string;
-  campus: Campus;
-  hallOrLocation: string;
-  photoUrl: string;
-  caption: string;
-  productTitle: string;
-  artisanShopName: string;
-  artisanId: string;
-  likesCount: number;
-  userHasLiked?: boolean;
-  timeAgo: string;
-  tags: string[];
-}
-
-export interface ArtisanTierInfo {
-  level: number;
-  title: string;
-  salesRequired: number;
-  escrowReleaseTimeHours: number;
-  dailyWithdrawalLimit: number;
-  feeDiscountPercent: number;
-  badgeName: string;
-  perks: string[];
-}
-
-// ==========================================
-// PHASE 6: CAMPUS AMBASSADOR & HALL LEADERBOARD TYPES
-// ==========================================
-
-export interface CampusAmbassador {
-  id: string;
-  name: string;
-  campus: Campus;
-  hallOfResidence: string;
-  referralCode: string;
-  avatarUrl: string;
-  totalReferrals: number;
-  totalEarnedNaira: number;
-  activeMakersReferred: number;
-  rank: number;
-}
-
-export interface HallLeaderboardEntry {
-  hallName: string;
-  campus: Campus;
-  activeArtisansCount: number;
-  totalCraftsListed: number;
-  totalVolumeNaira: number;
-  rankBadge: string;
-}
-
-export interface ReferralReward {
-  id: string;
-  ambassadorId: string;
-  referredMakerName: string;
-  rewardAmount: number;
-  status: 'credited' | 'pending_first_sale';
-  date: string;
-}
 
 // ==========================================
 // MODERATOR EMERGENCY BROADCAST & AUDIT LOGS

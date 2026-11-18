@@ -264,12 +264,12 @@ async function main() {
     await query(
       `INSERT INTO shopit_products (
          id, seller_id, seller_shop_name, seller_campus, title, description, category,
-         seller_price, service_fee, display_price,
-         stock, images, delivery_pickup_fee, delivery_local_fee, created_at, updated_at
+         seller_price_kobo, service_fee_kobo, display_price_kobo,
+         stock, images, delivery_pickup_fee_kobo, delivery_local_fee_kobo, created_at, updated_at
        ) VALUES (
          $1, $2, 'Adult Bead Craft', 'UNILAG', 'Handwoven Bead Bracelet', 'Authentic bead craft', 'beads',
-         5000, 500, 5500,
-         10, $3, 0, 200, NOW(), NOW()
+         500000, 50000, 550000,
+         10, $3, 0, 20000, NOW(), NOW()
        )`,
       [
         prodId,
@@ -516,9 +516,9 @@ async function main() {
     await test('9. Two parallel withdrawals via Promise.all cannot overspend wallet balance', async () => {
       const accId = `acc_race_${ts}`;
       await query(
-        `INSERT INTO shopit_wallets (seller_id, available_balance, available_balance_kobo, active_payout_account_id, payout_accounts)
-         VALUES ($1, 5000, 500000, $2, $3)
-         ON CONFLICT (seller_id) DO UPDATE SET available_balance = 5000, available_balance_kobo = 500000, active_payout_account_id = $2, payout_accounts = $3`,
+        `INSERT INTO shopit_wallets (seller_id, available_balance_kobo, active_payout_account_id, payout_accounts)
+         VALUES ($1, 500000, $2, $3)
+         ON CONFLICT (seller_id) DO UPDATE SET available_balance_kobo = 500000, active_payout_account_id = $2, payout_accounts = $3`,
         [
           sellerId,
           accId,
@@ -641,9 +641,9 @@ async function main() {
     });
 
     // -------------------------------------------------------------------------
-    // TEST 14: POST /auth/register without verified signupVerificationToken rejected (403)
+    // TEST 14: POST /auth/register allows unverified signup (201, isVerifiedEmail=false) & writes admin alert
     // -------------------------------------------------------------------------
-    await test('14. POST /api/auth/register without verified signupVerificationToken is rejected (403)', async () => {
+    await test('14. POST /api/auth/register without signupVerificationToken still saves user (201) and alerts admin', async () => {
       const unverifiedEmail = `unverified_${ts}@shopit.ng`;
       const res = await origFetch(`${baseUrl}/api/auth/register`, {
         method: 'POST',
@@ -651,14 +651,18 @@ async function main() {
         body: JSON.stringify({
           email: unverifiedEmail,
           password: 'Password123!',
-          name: 'Hacker',
+          name: 'Unverified Buyer',
           role: 'buyer',
           age: 20,
         }),
       });
-      assert.strictEqual(res.status, 403);
+      assert.strictEqual(res.status, 201);
+      const regData: any = await res.json();
+      assert.strictEqual(regData.user.isVerifiedEmail, false);
       const userCheck = await query('SELECT id FROM shopit_users WHERE email = $1', [unverifiedEmail]);
-      assert.strictEqual(userCheck.rows.length, 0);
+      assert.strictEqual(userCheck.rows.length, 1);
+      const alertCheck = await query('SELECT alert_key FROM shopit_admin_alerts WHERE user_id = $1', [regData.user.id]);
+      assert.strictEqual(alertCheck.rows.length, 1);
     });
 
     // -------------------------------------------------------------------------
@@ -731,7 +735,7 @@ async function main() {
       // Credit minor wallet ₦50,000 and bypass 24h cooling so we specifically isolate Admin approval & daily cap
       await query(
         `UPDATE shopit_wallets
-         SET available_balance = 50000, available_balance_kobo = 5000000,
+         SET available_balance_kobo = 5000000,
              payout_accounts = $1
          WHERE seller_id = $2`,
         [
@@ -807,9 +811,9 @@ async function main() {
         [uSellerId, uSellerEmail]
       );
       await query(
-        `INSERT INTO shopit_wallets (seller_id, pending_balance, pending_balance_kobo, available_balance, available_balance_kobo)
-         VALUES ($1, 12000, 1200000, 0, 0)
-         ON CONFLICT (seller_id) DO UPDATE SET pending_balance = 12000, pending_balance_kobo = 1200000`,
+        `INSERT INTO shopit_wallets (seller_id, pending_balance_kobo, available_balance_kobo)
+         VALUES ($1, 1200000, 0)
+         ON CONFLICT (seller_id) DO UPDATE SET pending_balance_kobo = 1200000`,
         [uSellerId]
       );
 
@@ -817,8 +821,8 @@ async function main() {
       await query(
         `INSERT INTO shopit_products (
            id, seller_id, seller_shop_name, title, description, category,
-           seller_price, service_fee, display_price, stock, delivery_pickup_fee, delivery_local_fee
-         ) VALUES ($1, $2, 'Slow Studio', 'Clay Mug', 'Handmade clay mug', 'crafts', 4000, 500, 4500, 2, 0, 0)`,
+           seller_price_kobo, service_fee_kobo, display_price_kobo, stock, delivery_pickup_fee_kobo, delivery_local_fee_kobo
+         ) VALUES ($1, $2, 'Slow Studio', 'Clay Mug', 'Handmade clay mug', 'crafts', 400000, 50000, 450000, 2, 0, 0)`,
         [uProdId, uSellerId]
       );
 
@@ -832,12 +836,10 @@ async function main() {
         await query(
           `INSERT INTO shopit_orders (
              id, buyer_id, buyer_name, buyer_email, items,
-             subtotal, service_fee_total, delivery_total, discount_total, grand_total,
              subtotal_kobo, service_fee_kobo, delivery_fee_kobo, discount_total_kobo, grand_total_kobo,
              payment_method, payment_reference, status, stock_reserved, admin_hold, paid_at, created_at, updated_at
            ) VALUES (
              $1, $2, 'Ada Buyer', $3, $4,
-             4000, 500, 0, 0, 4500,
              400000, 50000, 0, 0, 450000,
              'flutterwave_card', $5, 'paid', true, $6, $7, $7, NOW()
            )`,
@@ -845,9 +847,9 @@ async function main() {
         );
         await query(
           `INSERT INTO shopit_payments (
-             reference, order_id, amount_kobo, amount_naira, currency, channel, status, webhook_received, customer_email, data, updated_at
+             reference, order_id, amount_kobo, currency, channel, status, webhook_received, customer_email, data, updated_at
            ) VALUES (
-             $1, $2, 450000, 4500, 'NGN', 'card', 'paid', true, $3, $4, NOW()
+             $1, $2, 450000, 'NGN', 'card', 'paid', true, $3, $4, NOW()
            )`,
           [ref, ordId, buyerEmail, JSON.stringify({ flwTransactionId: `9900${suffix}` })]
         );
@@ -861,8 +863,8 @@ async function main() {
 
       // Insert open dispute on day5DisputeOrderId
       await query(
-        `INSERT INTO shopit_disputes (id, order_id, buyer_id, seller_id, reason, amount_held_in_escrow, status, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, 'Seller late', 4500, 'open', NOW(), NOW())`,
+        `INSERT INTO shopit_disputes (id, order_id, buyer_id, seller_id, reason, amount_held_in_escrow_kobo, status, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, 'Seller late', 450000, 'open', NOW(), NOW())`,
         [`disp_uns_${ts}`, day5DisputeOrderId, buyerId, uSellerId]
       );
 
@@ -1079,26 +1081,24 @@ async function main() {
       assert.strictEqual(adminDocRes.status, 200, 'Moderator admin session should stream decrypted image (200)');
     });
 
-    await test('CR4: Calling /api/cron/daily 10 times in a row changes nothing after the first run', async () => {
+    await test('CR4: /api/cron/daily rejects missing CRON_SECRET (401) and calling 10 times changes nothing after first run', async () => {
       // Seed one overdue pending_payment order with reserved stock to verify run 1 processes it and runs 2-10 are zero-ops
       const cronProdId = `prod_cron_${ts}`;
       await query(
         `INSERT INTO shopit_products (
            id, seller_id, seller_shop_name, title, description, category,
-           seller_price, service_fee, display_price, stock, is_sold_out, created_at, updated_at
-         ) VALUES ($1, $2, 'Adult Bead Craft', 'Cron Test Item', 'Item', 'crafts', 2000, 500, 2500, 4, false, NOW(), NOW())`,
+           seller_price_kobo, service_fee_kobo, display_price_kobo, stock, is_sold_out, created_at, updated_at
+         ) VALUES ($1, $2, 'Adult Bead Craft', 'Cron Test Item', 'Item', 'crafts', 200000, 50000, 250000, 4, false, NOW(), NOW())`,
         [cronProdId, sellerId]
       );
       const cronOrdId = `ORD_CRON10_${ts}`;
       await query(
         `INSERT INTO shopit_orders (
            id, buyer_id, buyer_name, buyer_email, items,
-           subtotal, service_fee_total, delivery_total, discount_total, grand_total,
            subtotal_kobo, service_fee_kobo, delivery_fee_kobo, discount_total_kobo, grand_total_kobo,
            payment_method, payment_reference, status, stock_reserved, expires_at, created_at, updated_at
          ) VALUES (
            $1, $2, 'Ada Buyer', $3, $4,
-           2000, 500, 0, 0, 2500,
            200000, 50000, 0, 0, 250000,
            'flutterwave_card', $5, 'pending_payment', true, NOW() - INTERVAL '2 minutes', NOW() - INTERVAL '2 hours', NOW()
          )`,
@@ -1111,7 +1111,13 @@ async function main() {
         ]
       );
 
-      const firstRes = await origFetch(`${baseUrl}/api/cron/daily`, { method: 'GET' });
+      const unauthCron = await origFetch(`${baseUrl}/api/cron/daily`, { method: 'GET' });
+      assert.strictEqual(unauthCron.status, 401, 'Missing CRON_SECRET must return 401');
+
+      const firstRes = await origFetch(`${baseUrl}/api/cron/daily`, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${process.env.CRON_SECRET}` },
+      });
       assert.strictEqual(firstRes.status, 200);
       const firstBody: any = await firstRes.json();
       assert.strictEqual(firstBody.ok, true);
@@ -1121,7 +1127,10 @@ async function main() {
       assert.strictEqual(stockAfterFirst, 5);
 
       for (let i = 2; i <= 10; i++) {
-        const res = await origFetch(`${baseUrl}/api/cron/daily`, { method: 'GET' });
+        const res = await origFetch(`${baseUrl}/api/cron/daily`, {
+          method: 'GET',
+          headers: { Authorization: `Bearer ${process.env.CRON_SECRET}` },
+        });
         assert.strictEqual(res.status, 200, `Cron run #${i} failed with ${res.status}`);
         const body: any = await res.json();
         assert.strictEqual(body.ok, true);
@@ -1150,13 +1159,12 @@ async function main() {
       }
     });
 
-    await test('CR6: Five removed legacy env var names no longer appear anywhere in codebase', async () => {
+    await test('CR6: Four removed legacy APP_SECRET-derived env var names no longer appear anywhere in codebase', async () => {
       const forbiddenNames = [
         ['OTP', 'HASH', 'SALT'].join('_'),
         ['NIN', 'HASH', 'SALT'].join('_'),
         ['DOC', 'TOKEN', 'SECRET'].join('_'),
         ['DOC', 'ENCRYPTION', 'KEY'].join('_'),
-        ['CRON', 'SECRET'].join('_'),
       ];
 
       const filesToScan: string[] = [];

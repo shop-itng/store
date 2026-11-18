@@ -48,20 +48,25 @@ async function main() {
       tokenVersion: 1,
     });
 
-    // C11: Registration enforcement (OTP token, password >= 8, minor consent)
-    await test('C11: POST /api/auth/register rejects without verified signupVerificationToken (403)', async () => {
+    // C11: Registration enforcement (unverified signup allowed & persisted + admin alert; password >= 8, minor consent)
+    await test('C11: POST /api/auth/register allows unverified signup (201) and writes admin alert', async () => {
+      const noOtpEmail = `nootp_${Date.now()}@shopit.ng`;
       const res = await fetch(`${baseUrl}/api/auth/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          email: 'nootp@shopit.ng',
+          email: noOtpEmail,
           password: 'ValidPassword123',
           name: 'No OTP Buyer',
           role: 'buyer',
           age: 20,
         }),
       });
-      assert.strictEqual(res.status, 403);
+      assert.strictEqual(res.status, 201);
+      const data: any = await res.json();
+      assert.strictEqual(data.user.isVerifiedEmail, false);
+      const alertCheck = await query('SELECT alert_key FROM shopit_admin_alerts WHERE user_id = $1', [data.user.id]);
+      assert.ok(alertCheck.rows.length >= 1, 'Admin alert must be inserted in the same transaction');
     });
 
     await test('C11: POST /api/auth/register rejects password shorter than 8 chars (400)', async () => {
@@ -349,14 +354,14 @@ async function main() {
       await query(
         `INSERT INTO shopit_orders (
            id, buyer_id, buyer_name, buyer_email, items,
-           subtotal, subtotal_kobo, service_fee_total, service_fee_kobo,
-           delivery_total, delivery_fee_kobo, discount_total, discount_total_kobo,
-           grand_total, grand_total_kobo, status, payment_method, payment_reference, handshake_otp
+           subtotal_kobo, service_fee_kobo,
+           delivery_fee_kobo, discount_total_kobo,
+           grand_total_kobo, status, payment_method, payment_reference, handshake_otp
          ) VALUES (
            $1, $2, 'Test Buyer', $3, $4,
-           2000, 200000, 500, 50000,
-           0, 0, 0, 0,
-           2500, 250000, 'paid', 'card', $5, '4829'
+           200000, 50000,
+           0, 0,
+           250000, 'paid', 'card', $5, '4829'
          )`,
         [
           ordId,
@@ -420,9 +425,15 @@ async function main() {
       assert.strictEqual(otpRes.status, 400);
     });
 
-    // Unified idempotent public-safe daily cron endpoint check
-    await test('C8: /api/cron/daily is public-safe, idempotent, and returns zero sensitive data', async () => {
-      const r1 = await fetch(`${baseUrl}/api/cron/daily`, { method: 'GET' });
+    // Unified idempotent CRON_SECRET-protected daily cron endpoint check
+    await test('C8: /api/cron/daily rejects unauthorized (401) and runs idempotently with CRON_SECRET (200)', async () => {
+      const unauth = await fetch(`${baseUrl}/api/cron/daily`, { method: 'GET' });
+      assert.strictEqual(unauth.status, 401);
+
+      const r1 = await fetch(`${baseUrl}/api/cron/daily`, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${process.env.CRON_SECRET}` },
+      });
       assert.strictEqual(r1.status, 200);
       const body1: any = await r1.json();
       assert.strictEqual(body1.ok, true);

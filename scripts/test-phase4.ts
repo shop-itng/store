@@ -75,7 +75,7 @@ async function testPhase4() {
     console.log('4. Testing product listing persistence...');
     const testProductId = `PROD-${Date.now()}`;
     await query(`
-      INSERT INTO shopit_products (id, seller_id, seller_shop_name, seller_campus, title, description, category, seller_price, service_fee, display_price, images, stock)
+      INSERT INTO shopit_products (id, seller_id, seller_shop_name, seller_campus, title, description, category, seller_price_kobo, service_fee_kobo, display_price_kobo, images, stock)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
     `, [
       testProductId,
@@ -85,16 +85,16 @@ async function testPhase4() {
       'Handcrafted Campus Crystal Beads',
       'Authentic jewelry',
       'beads',
-      3500,
-      300,
-      3800,
+      350000,
+      30000,
+      380000,
       JSON.stringify(['https://images.unsplash.com/photo-1535632066927-ab7c9ab60908']),
       15
     ]);
 
-    const prodRow = (await query('SELECT id, title, display_price, seller_id FROM shopit_products WHERE id = $1', [testProductId])).rows[0];
+    const prodRow = (await query('SELECT id, title, display_price_kobo, seller_id FROM shopit_products WHERE id = $1', [testProductId])).rows[0];
     console.log('   Listed product row:', prodRow);
-    if (!prodRow || prodRow.id !== testProductId) {
+    if (!prodRow || prodRow.id !== testProductId || Number(prodRow.display_price_kobo) !== 380000) {
       throw new Error('Product failed to persist into database');
     }
 

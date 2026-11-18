@@ -1,8 +1,9 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
 import { NIGERIAN_STATES } from '../data/nigerianLocations';
 import { ProductCategory } from '../types';
 import { getPricingBreakdown, formatNaira } from '../utils/pricing';
+import { clientContainsForbiddenContactInfo } from '../utils/profileConstants';
 import {
   X,
   Upload,
@@ -11,26 +12,30 @@ import {
   MapPin,
   ShieldCheck,
   AlertCircle,
+  Save,
+  AlertTriangle,
 } from 'lucide-react';
 
 export const QuickListModal: React.FC = () => {
   const {
     isQuickListModalOpen,
+    editingProduct,
     closeQuickListModal,
     openVerificationModal,
     addProduct,
+    updateProduct,
     currentSeller,
     currentUser,
     sellers,
     refreshCurrentUser,
     setActiveView,
+    openProfile,
     userLocation,
     notify,
     verificationRequests,
   } = useApp();
 
-  // Auto-sync status from PostgreSQL when modal opens
-  React.useEffect(() => {
+  useEffect(() => {
     if (isQuickListModalOpen) {
       refreshCurrentUser();
     }
@@ -61,7 +66,7 @@ export const QuickListModal: React.FC = () => {
   const [cityName, setCityName] = useState(userLocation.city || 'Lagos Mainland');
   const [areaName, setAreaName] = useState(userLocation.area || 'Yaba');
 
-  // Custom craft state
+  // Craft state
   const [title, setTitle] = useState('');
   const [category, setCategory] = useState<ProductCategory>('beads');
   const [sellerPrice, setSellerPrice] = useState<number>(3500);
@@ -71,8 +76,38 @@ export const QuickListModal: React.FC = () => {
   const [pickupFee, setPickupFee] = useState<number>(200);
   const [localDeliveryFee, setLocalDeliveryFee] = useState<number>(500);
   const [isCompressing, setIsCompressing] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!isQuickListModalOpen) return;
+    if (editingProduct) {
+      setTitle(editingProduct.title || '');
+      setCategory(editingProduct.category || 'beads');
+      setSellerPrice(editingProduct.sellerPrice || 3500);
+      setStock(typeof editingProduct.stock === 'number' ? editingProduct.stock : 1);
+      setDescription(editingProduct.description || '');
+      setImageUrl(editingProduct.images?.[0] || '');
+      setPickupFee(editingProduct.delivery?.pickupFee ?? 200);
+      setLocalDeliveryFee(editingProduct.delivery?.localDeliveryFee ?? 500);
+      setStateName(editingProduct.location?.state || userLocation.state || 'Lagos');
+      setCityName(editingProduct.location?.city || userLocation.city || 'Lagos Mainland');
+      setAreaName(editingProduct.location?.area || editingProduct.locationArea || userLocation.area || 'Yaba');
+    } else {
+      setTitle('');
+      setCategory('beads');
+      setSellerPrice(3500);
+      setStock(5);
+      setDescription('');
+      setImageUrl('');
+      setPickupFee(200);
+      setLocalDeliveryFee(500);
+      setStateName(userLocation.state || 'Lagos');
+      setCityName(userLocation.city || 'Lagos Mainland');
+      setAreaName(userLocation.area || 'Yaba');
+    }
+  }, [isQuickListModalOpen, editingProduct, userLocation]);
 
   if (!isQuickListModalOpen) return null;
 
@@ -94,6 +129,9 @@ export const QuickListModal: React.FC = () => {
   };
 
   const pricing = getPricingBreakdown(sellerPrice);
+
+  const titleCheck = title.trim() ? clientContainsForbiddenContactInfo(title) : { blocked: false };
+  const descCheck = description.trim() ? clientContainsForbiddenContactInfo(description) : { blocked: false };
 
   const handleImageFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -119,11 +157,14 @@ export const QuickListModal: React.FC = () => {
     }
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-
-    if (!isSellerVerified) {
-      notify('Craft published! Complete your NIN identity verification anytime before requesting bank withdrawals.', 'info');
+  const submitListing = async (saveAsDraft: boolean) => {
+    if (titleCheck.blocked) {
+      notify(titleCheck.reason || 'Title contains forbidden contact details.', 'error');
+      return;
+    }
+    if (descCheck.blocked) {
+      notify(descCheck.reason || 'Description contains forbidden contact details.', 'error');
+      return;
     }
 
     if (!imageUrl) {
@@ -143,44 +184,91 @@ export const QuickListModal: React.FC = () => {
 
     const seller = currentSeller || sellers[0];
     const sId = seller?.id || currentUser?.id || `seller_${Date.now()}`;
-    const sName = seller?.shopName || currentUser?.name || 'Independent Maker';
+    const sName = seller?.shopName || currentUser?.displayName || currentUser?.name || 'Independent Maker';
 
-    addProduct({
-      sellerId: sId,
-      sellerShopName: sName,
-      location: {
-        state: stateName,
-        city: cityName,
-        area: areaName,
-      },
-      locationArea: areaName, // Only area is shown publicly
-      sellerBadges: isSellerVerified ? ['verified'] : [],
-      title: title.trim(),
-      description: description.trim() || `${title} crafted with care in ${areaName}.`,
-      category,
-      sellerPrice,
-      images: [imageUrl],
-      stock,
-      delivery: {
-        allowsPickup: true,
-        pickupLocation: `${areaName} Safe Handoff Spot`,
-        pickupFee,
-        allowsLocalDelivery: true,
-        localDeliveryFee,
-        minOrderForDelivery: 1000,
-      },
-    });
+    setIsSubmitting(true);
+    try {
+      if (editingProduct) {
+        await updateProduct(editingProduct.id, {
+          title: title.trim(),
+          description: description.trim() || `${title.trim()} crafted with care in ${areaName}.`,
+          category,
+          sellerPrice,
+          stock,
+          images: [imageUrl, ...(editingProduct.images?.slice(1) || [])],
+          location: { state: stateName, city: cityName, area: areaName },
+          locationArea: areaName,
+          isDraft: saveAsDraft,
+          isSoldOut: stock <= 0,
+          delivery: {
+            allowsPickup: true,
+            pickupLocation: `${areaName} Safe Handoff Spot`,
+            pickupFee,
+            allowsLocalDelivery: true,
+            localDeliveryFee,
+            minOrderForDelivery: 1000,
+          },
+        });
+        notify(
+          saveAsDraft ? `Saved "${title.trim()}" to Drafts.` : `Updated "${title.trim()}"!`,
+          'success'
+        );
+      } else {
+        if (!saveAsDraft && !isSellerVerified) {
+          notify('Craft published! Complete NIN identity verification anytime before requesting withdrawals.', 'info');
+        }
+        await addProduct({
+          sellerId: sId,
+          sellerShopName: sName,
+          location: {
+            state: stateName,
+            city: cityName,
+            area: areaName,
+          },
+          locationArea: areaName,
+          sellerBadges: isSellerVerified ? ['verified'] : [],
+          title: title.trim(),
+          description: description.trim() || `${title.trim()} crafted with care in ${areaName}.`,
+          category,
+          sellerPrice,
+          images: [imageUrl],
+          stock,
+          isDraft: saveAsDraft,
+          delivery: {
+            allowsPickup: true,
+            pickupLocation: `${areaName} Safe Handoff Spot`,
+            pickupFee,
+            allowsLocalDelivery: true,
+            localDeliveryFee,
+            minOrderForDelivery: 1000,
+          },
+        });
+        notify(
+          saveAsDraft ? `"${title.trim()}" saved to Drafts on your profile.` : `Your craft "${title.trim()}" was published in ${areaName}!`,
+          'success'
+        );
+      }
+      closeQuickListModal();
+      if (saveAsDraft && currentUser) {
+        openProfile(currentUser.profileSlug || currentUser.id);
+      } else if (!editingProduct) {
+        setActiveView('catalog');
+      }
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
 
-    notify(`Your craft "${title}" was published in ${areaName}!`, 'success');
-    closeQuickListModal();
-    setActiveView('catalog');
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    void submitListing(false);
   };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 overflow-y-auto animate-backdrop">
-      <div className="bg-white rounded-2xl max-w-xl w-full max-h-[92vh] flex flex-col border border-[#E4E4E7] shadow-2xl overflow-hidden my-auto animate-modal-enter">
+      <div className="bg-white dark:bg-[#15161C] rounded-2xl max-w-xl w-full max-h-[92vh] flex flex-col border border-[#E4E4E7] dark:border-[#27272A] shadow-2xl overflow-hidden my-auto animate-modal-enter">
         {/* Header */}
-        <div className="p-4 sm:p-5 border-b border-[#E4E4E7] flex items-center justify-between bg-white">
+        <div className="p-4 sm:p-5 border-b border-[#E4E4E7] dark:border-[#27272A] flex items-center justify-between bg-white dark:bg-[#15161C]">
           <div className="flex items-center gap-3">
             <img
               src="/shopit-logo.png"
@@ -188,17 +276,17 @@ export const QuickListModal: React.FC = () => {
               className="w-10 h-10 rounded-xl object-contain shadow-xs"
             />
             <div>
-              <h3 className="text-base font-black text-[#111111]">
-                List Your Product
+              <h3 className="text-base font-black text-[#111111] dark:text-white">
+                {editingProduct ? 'Edit Product Listing' : 'List Your Product'}
               </h3>
-              <p className="text-[11px] text-[#71717A] font-medium">
+              <p className="text-[11px] text-[#71717A] dark:text-[#A1A1AA] font-medium">
                 Upload your real craft photo and set your price
               </p>
             </div>
           </div>
           <button
             onClick={closeQuickListModal}
-            className="text-[#71717A] hover:text-[#111111] p-1.5 rounded-lg hover:bg-[#F4F4F5] transition-colors"
+            className="text-[#71717A] hover:text-[#111111] dark:hover:text-white p-1.5 rounded-lg hover:bg-[#F4F4F5] dark:hover:bg-[#1E2028] transition-colors"
           >
             <X className="w-5 h-5" />
           </button>
@@ -206,21 +294,21 @@ export const QuickListModal: React.FC = () => {
 
         {/* Verification Alert for Unverified Sellers / Badge for Verified Sellers */}
         {isSellerVerified ? (
-          <div className="mx-4 mt-3 p-2.5 bg-emerald-50 border border-emerald-200 rounded-xl flex items-center justify-between text-xs text-emerald-900">
+          <div className="mx-4 mt-3 p-2.5 bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 rounded-xl flex items-center justify-between text-xs text-emerald-900 dark:text-emerald-200">
             <div className="flex items-center gap-2">
               <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
               <span className="font-bold">Verified Maker Store &bull; Verified Badge Active</span>
             </div>
-            <span className="text-[10px] font-black uppercase tracking-wider bg-emerald-200/80 text-emerald-800 px-2 py-0.5 rounded-md">
+            <span className="text-[10px] font-black uppercase tracking-wider bg-emerald-200/80 dark:bg-emerald-900 text-emerald-800 dark:text-emerald-200 px-2 py-0.5 rounded-md">
               NIMC Verified
             </span>
           </div>
         ) : (
-          <div className="mx-4 mt-3 p-3 bg-amber-50 border border-amber-200 rounded-xl flex items-start gap-2.5 text-xs text-amber-900">
+          <div className="mx-4 mt-3 p-3 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-xl flex items-start gap-2.5 text-xs text-amber-900 dark:text-amber-200">
             <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
             <div className="flex-1">
               <span className="font-bold block">Recommended: Verify Identity Before Withdrawals</span>
-              <p className="text-[11px] text-amber-700 mt-0.5">
+              <p className="text-[11px] text-amber-700 dark:text-amber-300 mt-0.5">
                 You can publish products right away. Under NDPA 2023 guidelines, you will only need to submit your NIN and live selfie before requesting bank withdrawals.
               </p>
               <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -251,8 +339,8 @@ export const QuickListModal: React.FC = () => {
         )}
 
         {/* Location Selector (State > City > Area) */}
-        <div className="px-4 py-3 bg-[#FAFAFA] border-b border-[#E4E4E7]">
-          <span className="block text-[11px] font-bold text-[#111111] mb-1.5 flex items-center gap-1">
+        <div className="px-4 py-3 bg-[#FAFAFA] dark:bg-[#1E2028] border-b border-[#E4E4E7] dark:border-[#27272A]">
+          <span className="block text-[11px] font-bold text-[#111111] dark:text-white mb-1.5 flex items-center gap-1">
             <MapPin className="w-3.5 h-3.5 text-[#FF6B00]" />
             <span>Product Location: State &gt; City &gt; Area (Only Area is shown publicly)</span>
           </span>
@@ -260,7 +348,7 @@ export const QuickListModal: React.FC = () => {
             <select
               value={stateName}
               onChange={e => handleStateChange(e.target.value)}
-              className="px-2.5 py-1.5 bg-white border border-[#E4E4E7] rounded-lg text-xs font-medium focus:border-[#FF6B00] focus:outline-none"
+              className="px-2.5 py-1.5 bg-white dark:bg-[#15161C] dark:text-white border border-[#E4E4E7] dark:border-[#27272A] rounded-lg text-xs font-medium focus:border-[#FF6B00] focus:outline-none"
             >
               {NIGERIAN_STATES.map(s => (
                 <option key={s.state} value={s.state}>
@@ -272,7 +360,7 @@ export const QuickListModal: React.FC = () => {
             <select
               value={cityName}
               onChange={e => handleCityChange(e.target.value)}
-              className="px-2.5 py-1.5 bg-white border border-[#E4E4E7] rounded-lg text-xs font-medium focus:border-[#FF6B00] focus:outline-none"
+              className="px-2.5 py-1.5 bg-white dark:bg-[#15161C] dark:text-white border border-[#E4E4E7] dark:border-[#27272A] rounded-lg text-xs font-medium focus:border-[#FF6B00] focus:outline-none"
             >
               {activeStateObj.cities.map(c => (
                 <option key={c.city} value={c.city}>
@@ -284,7 +372,7 @@ export const QuickListModal: React.FC = () => {
             <select
               value={areaName}
               onChange={e => setAreaName(e.target.value)}
-              className="px-2.5 py-1.5 bg-white border border-[#E4E4E7] rounded-lg text-xs font-bold text-[#FF6B00] focus:border-[#FF6B00] focus:outline-none"
+              className="px-2.5 py-1.5 bg-white dark:bg-[#15161C] border border-[#E4E4E7] dark:border-[#27272A] rounded-lg text-xs font-bold text-[#FF6B00] focus:border-[#FF6B00] focus:outline-none"
             >
               {activeCityObj?.areas.map(a => (
                 <option key={a} value={a}>
@@ -298,7 +386,7 @@ export const QuickListModal: React.FC = () => {
         {/* Form Body */}
         <form onSubmit={handleSubmit} className="p-4 sm:p-5 overflow-y-auto space-y-4 flex-1 text-xs">
           {/* Real Photo Upload Requirement Notice */}
-          <div className="p-3 bg-[#FFF4EC] border border-[#FED7AA] rounded-xl flex items-start gap-2 text-[#C2410C]">
+          <div className="p-3 bg-[#FFF4EC] dark:bg-[#1E2028] border border-[#FED7AA] dark:border-[#27272A] rounded-xl flex items-start gap-2 text-[#C2410C] dark:text-[#FDBA74]">
             <Camera className="w-4 h-4 text-[#FF6B00] shrink-0 mt-0.5" />
             <div className="text-[11px] leading-relaxed">
               <strong>Real Product Photo Required: </strong>
@@ -308,12 +396,12 @@ export const QuickListModal: React.FC = () => {
 
           {/* Photo Upload Area */}
           <div>
-            <label className="block text-xs font-bold text-[#111111] mb-1.5">
+            <label className="block text-xs font-bold text-[#111111] dark:text-white mb-1.5">
               Product Picture *
             </label>
 
             {imageUrl ? (
-              <div className="relative rounded-2xl overflow-hidden border border-[#E4E4E7] bg-[#F4F4F5] aspect-video sm:aspect-2/1 flex items-center justify-center">
+              <div className="relative rounded-2xl overflow-hidden border border-[#E4E4E7] dark:border-[#27272A] bg-[#F4F4F5] dark:bg-[#1E2028] aspect-video sm:aspect-2/1 flex items-center justify-center">
                 <img
                   src={imageUrl}
                   alt="Product preview"
@@ -330,13 +418,13 @@ export const QuickListModal: React.FC = () => {
             ) : (
               <div
                 onClick={() => fileInputRef.current?.click()}
-                className="border-2 border-dashed border-[#E4E4E7] hover:border-[#FF6B00] rounded-2xl p-6 text-center cursor-pointer transition-colors bg-[#FAFAFA]"
+                className="border-2 border-dashed border-[#E4E4E7] dark:border-[#27272A] hover:border-[#FF6B00] rounded-2xl p-6 text-center cursor-pointer transition-colors bg-[#FAFAFA] dark:bg-[#1E2028]"
               >
                 <Upload className="w-8 h-8 text-[#FF6B00] mx-auto mb-2" />
-                <span className="text-xs font-bold text-[#111111] block">
+                <span className="text-xs font-bold text-[#111111] dark:text-white block">
                   {isCompressing ? 'Loading photo...' : 'Tap to Upload Product Photo from Device / PC'}
                 </span>
-                <span className="text-[11px] text-[#71717A] mt-1 block">
+                <span className="text-[11px] text-[#71717A] dark:text-[#A1A1AA] mt-1 block">
                   PNG, JPG, or WEBP · Clear photo of your real item
                 </span>
                 <input
@@ -351,7 +439,7 @@ export const QuickListModal: React.FC = () => {
           </div>
 
           <div>
-            <label className="block text-xs font-bold text-[#111111] mb-1">
+            <label className="block text-xs font-bold text-[#111111] dark:text-white mb-1">
               Product Title *
             </label>
             <input
@@ -360,19 +448,25 @@ export const QuickListModal: React.FC = () => {
               placeholder="e.g. Handmade Blue Crystal Waist Beads (Set of 2)"
               value={title}
               onChange={e => setTitle(e.target.value)}
-              className="w-full px-3 py-2 border border-[#E4E4E7] rounded-xl text-xs sm:text-sm text-[#111111] focus:border-[#FF6B00] focus:outline-none"
+              className="w-full px-3 py-2 border border-[#E4E4E7] dark:border-[#27272A] bg-white dark:bg-[#1E2028] rounded-xl text-xs sm:text-sm text-[#111111] dark:text-white focus:border-[#FF6B00] focus:outline-none"
             />
+            {titleCheck.blocked && (
+              <p className="text-[11px] text-rose-600 font-semibold mt-1 flex items-center gap-1">
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                <span>{titleCheck.reason}</span>
+              </p>
+            )}
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
-              <label className="block text-xs font-bold text-[#111111] mb-1">
+              <label className="block text-xs font-bold text-[#111111] dark:text-white mb-1">
                 Category *
               </label>
               <select
                 value={category}
                 onChange={e => setCategory(e.target.value as ProductCategory)}
-                className="w-full px-3 py-2 border border-[#E4E4E7] rounded-xl text-xs bg-white text-[#111111] focus:border-[#FF6B00] focus:outline-none"
+                className="w-full px-3 py-2 border border-[#E4E4E7] dark:border-[#27272A] rounded-xl text-xs bg-white dark:bg-[#1E2028] text-[#111111] dark:text-white focus:border-[#FF6B00] focus:outline-none"
               >
                 <option value="beads">Waist Beads & Jewelry</option>
                 <option value="fragrance">Perfume Oils & Scents</option>
@@ -384,32 +478,32 @@ export const QuickListModal: React.FC = () => {
             </div>
 
             <div>
-              <label className="block text-xs font-bold text-[#111111] mb-1">
+              <label className="block text-xs font-bold text-[#111111] dark:text-white mb-1">
                 Stock Quantity *
               </label>
               <input
                 type="number"
                 required
-                min={1}
+                min={0}
                 value={stock}
                 onChange={e => setStock(Number(e.target.value))}
-                className="w-full px-3 py-2 border border-[#E4E4E7] rounded-xl text-xs font-bold font-mono-numbers focus:border-[#FF6B00] focus:outline-none"
+                className="w-full px-3 py-2 border border-[#E4E4E7] dark:border-[#27272A] bg-white dark:bg-[#1E2028] text-[#111111] dark:text-white rounded-xl text-xs font-bold font-mono-numbers focus:border-[#FF6B00] focus:outline-none"
               />
             </div>
           </div>
 
           {/* Pricing Box */}
-          <div className="p-3.5 bg-[#F0FDF4] border border-[#DCFCE7] rounded-xl space-y-1.5">
+          <div className="p-3.5 bg-[#F0FDF4] dark:bg-emerald-950/30 border border-[#DCFCE7] dark:border-emerald-800 rounded-xl space-y-1.5">
             <div className="flex items-center justify-between">
-              <label className="text-xs font-bold text-[#14532D]">
+              <label className="text-xs font-bold text-[#14532D] dark:text-emerald-300">
                 Your Price (₦ You Earn) *
               </label>
-              <span className="text-[11px] text-[#166534] font-semibold">
+              <span className="text-[11px] text-[#166534] dark:text-emerald-200 font-semibold">
                 Buyer sees {formatNaira(pricing.displayPrice)}
               </span>
             </div>
             <div className="relative">
-              <span className="absolute left-3 top-1/2 -translate-y-1/2 font-bold text-[#166534]">
+              <span className="absolute left-3 top-1/2 -translate-y-1/2 font-bold text-[#166534] dark:text-emerald-300">
                 ₦
               </span>
               <input
@@ -419,17 +513,17 @@ export const QuickListModal: React.FC = () => {
                 step={50}
                 value={sellerPrice}
                 onChange={e => setSellerPrice(Number(e.target.value))}
-                className="w-full pl-8 pr-3 py-2 bg-white border border-[#86EFAC] rounded-xl text-xs sm:text-sm font-black font-mono-numbers text-[#111111] focus:outline-none focus:ring-2 focus:ring-[#16A34A]"
+                className="w-full pl-8 pr-3 py-2 bg-white dark:bg-[#15161C] border border-[#86EFAC] dark:border-emerald-700 rounded-xl text-xs sm:text-sm font-black font-mono-numbers text-[#111111] dark:text-white focus:outline-none focus:ring-2 focus:ring-[#16A34A]"
               />
             </div>
-            <div className="flex justify-between text-[11px] text-[#166534] pt-1">
+            <div className="flex justify-between text-[11px] text-[#166534] dark:text-emerald-300 pt-1">
               <span>Includes Shop It Escrow Protection:</span>
               <span>+{formatNaira(pricing.serviceFee)}</span>
             </div>
           </div>
 
           <div>
-            <label className="block text-xs font-bold text-[#111111] mb-1">
+            <label className="block text-xs font-bold text-[#111111] dark:text-white mb-1">
               Description & Craft Details
             </label>
             <textarea
@@ -437,45 +531,67 @@ export const QuickListModal: React.FC = () => {
               placeholder="Describe materials, sizing, color variants, or how you make it..."
               value={description}
               onChange={e => setDescription(e.target.value)}
-              className="w-full px-3 py-2 border border-[#E4E4E7] rounded-xl text-xs focus:border-[#FF6B00] focus:outline-none"
+              className="w-full px-3 py-2 border border-[#E4E4E7] dark:border-[#27272A] bg-white dark:bg-[#1E2028] text-[#111111] dark:text-white rounded-xl text-xs focus:border-[#FF6B00] focus:outline-none"
             />
+            {descCheck.blocked && (
+              <p className="text-[11px] text-rose-600 font-semibold mt-1 flex items-center gap-1">
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                <span>{descCheck.reason}</span>
+              </p>
+            )}
           </div>
 
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="block text-[11px] text-[#71717A] mb-1 font-semibold">
+              <label className="block text-[11px] text-[#71717A] dark:text-[#A1A1AA] mb-1 font-semibold">
                 Area Pickup Fee (₦)
               </label>
               <input
                 type="number"
                 value={pickupFee}
                 onChange={e => setPickupFee(Number(e.target.value))}
-                className="w-full px-2.5 py-1.5 border border-[#E4E4E7] rounded-lg text-xs font-mono-numbers"
+                className="w-full px-2.5 py-1.5 border border-[#E4E4E7] dark:border-[#27272A] bg-white dark:bg-[#1E2028] text-[#111111] dark:text-white rounded-lg text-xs font-mono-numbers"
               />
             </div>
 
             <div>
-              <label className="block text-[11px] text-[#71717A] mb-1 font-semibold">
+              <label className="block text-[11px] text-[#71717A] dark:text-[#A1A1AA] mb-1 font-semibold">
                 Local Dispatch Fee (₦)
               </label>
               <input
                 type="number"
                 value={localDeliveryFee}
                 onChange={e => setLocalDeliveryFee(Number(e.target.value))}
-                className="w-full px-2.5 py-1.5 border border-[#E4E4E7] rounded-lg text-xs font-mono-numbers"
+                className="w-full px-2.5 py-1.5 border border-[#E4E4E7] dark:border-[#27272A] bg-white dark:bg-[#1E2028] text-[#111111] dark:text-white rounded-lg text-xs font-mono-numbers"
               />
             </div>
           </div>
 
-          <div className="pt-2 space-y-2">
+          <div className="pt-2 flex flex-col sm:flex-row gap-2">
+            <button
+              type="button"
+              disabled={isSubmitting || titleCheck.blocked || descCheck.blocked}
+              onClick={() => void submitListing(true)}
+              className="sm:w-44 py-3 bg-[#FAFAFA] dark:bg-[#1E2028] hover:bg-[#F4F4F5] dark:hover:bg-[#27272A] text-[#111111] dark:text-white border border-[#E4E4E7] dark:border-[#27272A] font-bold text-xs rounded-xl transition-all flex items-center justify-center gap-1.5 disabled:opacity-50"
+            >
+              <Save className="w-3.5 h-3.5 text-[#FF6B00]" />
+              <span>Save as Draft</span>
+            </button>
             <button
               type="submit"
-              className="w-full py-3.5 bg-[#FF6B00] hover:bg-[#FF7A1A] text-[#111111] border-2 border-[#111111] font-black text-xs sm:text-sm rounded-xl shadow-[0_3px_0_#111111] transition-all flex items-center justify-center gap-2 active:translate-y-0.5 cursor-pointer"
+              disabled={isSubmitting || titleCheck.blocked || descCheck.blocked}
+              className="flex-1 py-3 bg-[#FF6B00] hover:bg-[#FF7A1A] disabled:opacity-50 text-[#111111] border-2 border-[#111111] font-black text-xs sm:text-sm rounded-xl shadow-[0_3px_0_#111111] transition-all flex items-center justify-center gap-2 active:translate-y-0.5 cursor-pointer"
             >
               <span className="w-5 h-5 rounded-full bg-[#9FE870] text-[#111111] flex items-center justify-center font-black">
                 ✓
               </span>
-              <span>Publish Product in {areaName}</span>
+              <span>
+                {isSubmitting
+                  ? 'Saving...'
+                  : editingProduct
+                  ? 'Save & Publish Listing'
+                  : `Publish Product in ${areaName}`}
+              </span>
             </button>
           </div>
         </form>

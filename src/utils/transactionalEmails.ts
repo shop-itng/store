@@ -20,7 +20,8 @@ export type EmailTemplateKey =
   | 'dispute_resolved'
   | 'seller_verified'
   | 'verification_not_approved'
-  | 'welcome';
+  | 'welcome'
+  | 'email_change';
 
 export interface EmailRenderResult {
   subject: string;
@@ -88,6 +89,17 @@ export function renderTransactionalEmail(
         <p style="margin: 0 0 16px; font-size: 15px; color: #0f172a; line-height: 1.6;">
           Your code is <strong style="font-size: 22px; color: #0f172a; letter-spacing: 4px; font-family: monospace; display: inline-block; padding: 4px 12px; background: #f1f5f9; border-radius: 8px; border: 1px solid #cbd5e1;">${code}</strong>. It expires in 10 minutes. Never share it.
         </p>
+      `;
+      break;
+
+    case 'email_change':
+      subject = 'Confirm your new Shop It email address';
+      bodyText = `Your code to switch your Shop It account email is ${code}. It expires in 10 minutes. Never share it.`;
+      bodyHtmlContent = `
+        <p style="margin: 0 0 16px; font-size: 15px; color: #0f172a; line-height: 1.6;">
+          You asked to update the email address on your Shop It account. Enter code <strong style="font-size: 22px; color: #0f172a; letter-spacing: 4px; font-family: monospace; display: inline-block; padding: 4px 12px; background: #f1f5f9; border-radius: 8px; border: 1px solid #cbd5e1;">${code}</strong>. It expires in 10 minutes.
+        </p>
+        <p style="margin: 0; font-size: 14px; color: #dc2626;">If you did not request this change, secure your password immediately.</p>
       `;
       break;
 

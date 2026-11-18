@@ -1,8 +1,18 @@
 import './testEnv.js';
-import { query, withTransaction, runMigration } from '../api/db/postgres.js';
+import { query, withTransaction, runMigration, getDatabaseUrl } from '../api/db/postgres.js';
 import { commitPaidOrderTransaction, calculatePricingInKobo } from '../api/lib/payments.js';
 
-async function seedVerificationScenario() {
+function isProductionRuntime(): boolean {
+  return process.env.NODE_ENV === 'production' || Boolean(process.env.VERCEL);
+}
+
+async function seedLocalVerificationScenario() {
+  if (isProductionRuntime() || getDatabaseUrl()) {
+    throw new Error(
+      'Refusing to seed test financial data: --seed-local is strictly restricted to non-production in-memory databases.'
+    );
+  }
+
   const existingOrders = await query(
     `SELECT COUNT(*)::int AS cnt FROM shopit_orders WHERE status IN ('paid', 'packed', 'shipped', 'delivered', 'completed')`
   );
@@ -10,7 +20,7 @@ async function seedVerificationScenario() {
     return { seeded: false };
   }
 
-  console.log('[Reconcile] No existing paid orders found — seeding deterministic financial test scenario in local DB...');
+  console.log('[Reconcile] --seed-local enabled on pg-mem — seeding deterministic verification scenario...');
   const buyerId = 'rec_buyer_1';
   const sellerId1 = 'rec_seller_1';
   const sellerId2 = 'rec_seller_2';
@@ -35,10 +45,10 @@ async function seedVerificationScenario() {
   );
 
   await query(
-    `INSERT INTO shopit_wallets (seller_id, pending_balance, available_balance, total_withdrawn, pending_balance_kobo, available_balance_kobo, total_withdrawn_kobo)
+    `INSERT INTO shopit_wallets (seller_id, pending_balance_kobo, available_balance_kobo, total_withdrawn_kobo)
      VALUES
-       ($1, 0, 0, 0, 0, 0, 0),
-       ($2, 0, 0, 0, 0, 0, 0)
+       ($1, 0, 0, 0),
+       ($2, 0, 0, 0)
      ON CONFLICT (seller_id) DO NOTHING`,
     [sellerId1, sellerId2]
   );
@@ -50,15 +60,11 @@ async function seedVerificationScenario() {
   await query(
     `INSERT INTO shopit_orders (
        id, buyer_id, buyer_name, buyer_email, items,
-       subtotal, subtotal_kobo, service_fee_total, service_fee_kobo,
-       delivery_total, delivery_fee_kobo, discount_total, discount_total_kobo,
-       grand_total, grand_total_kobo,
+       subtotal_kobo, service_fee_kobo, delivery_fee_kobo, discount_total_kobo, grand_total_kobo,
        status, payment_method, payment_reference, handshake_otp
      ) VALUES (
        'REC-ORD-1', $1, 'Reconcile Buyer', 'rec_buyer@shopit.ng', $2,
-       5000, 500000, 500, 50000,
-       0, 0, 0, 0,
-       5500, 550000,
+       500000, 50000, 0, 0, 550000,
        'pending_payment', 'card', 'rec_ref_1', '1111'
      ) ON CONFLICT (id) DO NOTHING`,
     [
@@ -95,15 +101,11 @@ async function seedVerificationScenario() {
   await query(
     `INSERT INTO shopit_orders (
        id, buyer_id, buyer_name, buyer_email, items,
-       subtotal, subtotal_kobo, service_fee_total, service_fee_kobo,
-       delivery_total, delivery_fee_kobo, discount_total, discount_total_kobo,
-       grand_total, grand_total_kobo,
+       subtotal_kobo, service_fee_kobo, delivery_fee_kobo, discount_total_kobo, grand_total_kobo,
        status, payment_method, payment_reference, handshake_otp
      ) VALUES (
        'REC-ORD-2', $1, 'Reconcile Buyer', 'rec_buyer@shopit.ng', $2,
-       3000, 300000, 500, 50000,
-       0, 0, 0, 0,
-       3500, 350000,
+       300000, 50000, 0, 0, 350000,
        'pending_payment', 'card', 'rec_ref_2', '2222'
      ) ON CONFLICT (id) DO NOTHING`,
     [
@@ -140,18 +142,16 @@ async function seedVerificationScenario() {
     await client.query(`UPDATE shopit_orders SET status = 'completed', completed_at = NOW() WHERE id = 'REC-ORD-2'`);
     await client.query(
       `UPDATE shopit_wallets
-       SET pending_balance = pending_balance - 3000,
-           available_balance = available_balance + 3000,
-           pending_balance_kobo = pending_balance_kobo - 300000,
+       SET pending_balance_kobo = pending_balance_kobo - 300000,
            available_balance_kobo = available_balance_kobo + 300000
        WHERE seller_id = $1`,
       [sellerId2]
     );
     await client.query(
       `INSERT INTO shopit_ledger_entries (
-         id, wallet_id, order_id, type, amount, amount_kobo, fee, fee_kobo,
-         balance_type, balance_after, balance_after_kobo, description, reference, idempotency_key, created_at
-       ) VALUES ($1, $2, 'REC-ORD-2', 'escrow_release', 3000, 300000, 0, 0, 'available', 3000, 300000, 'Reconcile Release REC-ORD-2', 'REC-ORD-2', 'rel_REC-ORD-2', NOW())
+         id, wallet_id, order_id, type, amount_kobo, fee_kobo,
+         balance_type, balance_after_kobo, description, reference, idempotency_key, created_at
+       ) VALUES ($1, $2, 'REC-ORD-2', 'escrow_release', 300000, 0, 'available', 300000, 'Reconcile Release REC-ORD-2', 'REC-ORD-2', 'rel_REC-ORD-2', NOW())
        ON CONFLICT (idempotency_key) DO NOTHING`,
       [`led_rel_${Date.now()}`, sellerId2]
     );
@@ -159,18 +159,16 @@ async function seedVerificationScenario() {
     // Withdraw ₦1,500 (150,000 kobo) net + ₦50 fee (5,000 kobo) = ₦1,550 total debit
     await client.query(
       `UPDATE shopit_wallets
-       SET available_balance = available_balance - 1550,
-           total_withdrawn = total_withdrawn + 1500,
-           available_balance_kobo = available_balance_kobo - 155000,
+       SET available_balance_kobo = available_balance_kobo - 155000,
            total_withdrawn_kobo = total_withdrawn_kobo + 150000
        WHERE seller_id = $1`,
       [sellerId2]
     );
     await client.query(
       `INSERT INTO shopit_ledger_entries (
-         id, wallet_id, type, amount, amount_kobo, fee, fee_kobo,
-         balance_type, balance_after, balance_after_kobo, description, reference, idempotency_key, created_at
-       ) VALUES ($1, $2, 'withdrawal', 1500, 150000, 50, 5000, 'available', 1450, 145000, 'Reconcile Withdrawal', 'wd_rec_1', 'wd_key_rec_1', NOW())
+         id, wallet_id, type, amount_kobo, fee_kobo,
+         balance_type, balance_after_kobo, description, reference, idempotency_key, created_at
+       ) VALUES ($1, $2, 'withdrawal', 150000, 5000, 'available', 145000, 'Reconcile Withdrawal', 'wd_rec_1', 'wd_key_rec_1', NOW())
        ON CONFLICT (idempotency_key) DO NOTHING`,
       [`led_wd_${Date.now()}`, sellerId2]
     );
@@ -179,12 +177,17 @@ async function seedVerificationScenario() {
   return { seeded: true };
 }
 
-async function main() {
-  await runMigration();
-  await seedVerificationScenario();
-
+export async function runReadOnlyReconciliation(): Promise<{
+  ok: boolean;
+  errors: number;
+  walletsChecked: number;
+  ordersChecked: number;
+  totalPendingKobo: number;
+  totalAvailableKobo: number;
+  totalWithdrawnKobo: number;
+}> {
   let errors = 0;
-  console.log('\n=== SHOP IT LEDGER & WALLET RECONCILIATION ===');
+  console.log('\n=== SHOP IT LEDGER & WALLET RECONCILIATION (READ-ONLY) ===');
 
   // 1. Check no negative balances
   const negRes = await query(
@@ -199,7 +202,7 @@ async function main() {
     console.log('[PASS] Zero negative wallet balances.');
   }
 
-  // 2. Check every paid/active/completed order has exactly 1 paid payment record and 1 sale_pending ledger set
+  // 2. Check every paid/active/completed order has exactly 1 paid payment record and matching sale_pending ledger set
   const paidOrdersRes = await query(
     `SELECT id, payment_reference, status, items
      FROM shopit_orders
@@ -227,23 +230,18 @@ async function main() {
     }, 0);
 
     const ledRes = await query(
-      `SELECT type, amount_kobo, amount
+      `SELECT type, amount_kobo
        FROM shopit_ledger_entries
        WHERE order_id = $1`,
       [ord.id]
     );
 
-    const toKobo = (row: any) =>
-      Number(row.amount_kobo) !== 0 && row.amount_kobo !== null && row.amount_kobo !== undefined
-        ? Number(row.amount_kobo)
-        : Math.round(Number(row.amount || 0) * 100);
-
     const salePendingKobo = ledRes.rows
       .filter((l: any) => l.type === 'sale_pending')
-      .reduce((s: number, l: any) => s + toKobo(l), 0);
+      .reduce((s: number, l: any) => s + Number(l.amount_kobo || 0), 0);
     const releaseKobo = ledRes.rows
       .filter((l: any) => l.type === 'escrow_release')
-      .reduce((s: number, l: any) => s + toKobo(l), 0);
+      .reduce((s: number, l: any) => s + Number(l.amount_kobo || 0), 0);
 
     if (salePendingKobo !== expectedSellerKobo) {
       errors++;
@@ -258,7 +256,7 @@ async function main() {
 
   // 3. Wallet conservation equation check per wallet and globally
   const walletsRes = await query(
-    `SELECT seller_id, pending_balance_kobo, pending_balance, available_balance_kobo, available_balance, total_withdrawn_kobo, total_withdrawn
+    `SELECT seller_id, pending_balance_kobo, available_balance_kobo, total_withdrawn_kobo
      FROM shopit_wallets`
   );
 
@@ -266,15 +264,10 @@ async function main() {
   let totalAvailableWallets = 0;
   let totalWithdrawnWallets = 0;
 
-  const fieldKobo = (koboVal: any, nairaVal: any) =>
-    koboVal !== null && koboVal !== undefined && Number(koboVal) !== 0
-      ? Number(koboVal)
-      : Math.round(Number(nairaVal || 0) * 100);
-
   for (const w of walletsRes.rows) {
     const sid = w.seller_id;
     const ledRes = await query(
-      `SELECT type, balance_type, description, amount_kobo, amount, fee_kobo, fee
+      `SELECT type, balance_type, amount_kobo, fee_kobo
        FROM shopit_ledger_entries
        WHERE wallet_id = $1`,
       [sid]
@@ -284,8 +277,8 @@ async function main() {
     let derivedAvailable = 0;
 
     for (const l of ledRes.rows) {
-      const amt = fieldKobo(l.amount_kobo, l.amount);
-      const fee = fieldKobo(l.fee_kobo, l.fee);
+      const amt = Number(l.amount_kobo || 0);
+      const fee = Number(l.fee_kobo || 0);
       if (l.type === 'sale_pending') {
         derivedPending += amt;
       } else if (l.type === 'escrow_release') {
@@ -299,9 +292,9 @@ async function main() {
       }
     }
 
-    const wPending = fieldKobo(w.pending_balance_kobo, w.pending_balance);
-    const wAvail = fieldKobo(w.available_balance_kobo, w.available_balance);
-    const wWithdrawn = fieldKobo(w.total_withdrawn_kobo, w.total_withdrawn);
+    const wPending = Number(w.pending_balance_kobo || 0);
+    const wAvail = Number(w.available_balance_kobo || 0);
+    const wWithdrawn = Number(w.total_withdrawn_kobo || 0);
 
     if (wPending !== derivedPending || wAvail !== derivedAvailable) {
       errors++;
@@ -316,22 +309,23 @@ async function main() {
   }
 
   const allLedgerRes = await query(
-    `SELECT type, balance_type, amount_kobo, amount, fee_kobo, fee FROM shopit_ledger_entries`
+    `SELECT type, balance_type, amount_kobo, fee_kobo FROM shopit_ledger_entries`
   );
   let withdrawalFeesKobo = 0;
-  let gross_sales_kobo = 0;
-  let pending_refunds_kobo = 0;
-  let released_earnings_kobo = 0;
+  let grossSalesKobo = 0;
+  let pendingRefundsKobo = 0;
+  let releasedEarningsKobo = 0;
 
   for (const l of allLedgerRes.rows) {
-    const amt = fieldKobo(l.amount_kobo, l.amount);
-    const fee = fieldKobo(l.fee_kobo, l.fee);
+    const amt = Number(l.amount_kobo || 0);
+    const fee = Number(l.fee_kobo || 0);
     if (l.type === 'withdrawal') withdrawalFeesKobo += fee;
-    if (l.type === 'sale_pending') gross_sales_kobo += amt;
-    if (l.type === 'refund' && l.balance_type === 'pending') pending_refunds_kobo += amt;
-    if (l.type === 'escrow_release') released_earnings_kobo += amt;
+    if (l.type === 'sale_pending') grossSalesKobo += amt;
+    if (l.type === 'refund' && l.balance_type === 'pending') pendingRefundsKobo += amt;
+    if (l.type === 'escrow_release') releasedEarningsKobo += amt;
   }
-  const expectedAvailablePlusWithdrawn = Number(released_earnings_kobo);
+
+  const expectedAvailablePlusWithdrawn = Number(releasedEarningsKobo);
   const actualAvailablePlusWithdrawn = totalAvailableWallets + totalWithdrawnWallets + withdrawalFeesKobo;
 
   console.log(`Total Wallets Checked          : ${walletsRes.rows.length}`);
@@ -339,7 +333,7 @@ async function main() {
   console.log(`Available Balance Total (kobo) : ${totalAvailableWallets}`);
   console.log(`Total Withdrawn Net (kobo)     : ${totalWithdrawnWallets} (+ withdrawal fees ${withdrawalFeesKobo})`);
   console.log(`Released Order Earnings (kobo) : ${expectedAvailablePlusWithdrawn}`);
-  console.log(`Gross Sales - Pending Refunds  : ${Number(gross_sales_kobo) - Number(pending_refunds_kobo)} (Actual Wallet+Withdrawn+Fees = ${totalPendingWallets + actualAvailablePlusWithdrawn})`);
+  console.log(`Gross Sales - Pending Refunds  : ${Number(grossSalesKobo) - Number(pendingRefundsKobo)} (Actual Wallet+Withdrawn+Fees = ${totalPendingWallets + actualAvailablePlusWithdrawn})`);
 
   if (actualAvailablePlusWithdrawn !== expectedAvailablePlusWithdrawn) {
     errors++;
@@ -348,21 +342,46 @@ async function main() {
     console.log('[PASS] Sum of available wallet balances + withdrawals (+ fees) == sum of released order earnings.');
   }
 
-  if (totalPendingWallets + actualAvailablePlusWithdrawn !== Number(gross_sales_kobo) - Number(pending_refunds_kobo)) {
+  if (totalPendingWallets + actualAvailablePlusWithdrawn !== Number(grossSalesKobo) - Number(pendingRefundsKobo)) {
     errors++;
     console.error('[FAIL] Gross pending + available + withdrawn != net sales.');
   } else {
     console.log('[PASS] Full conservation across pending + available + withdrawn == net credited sales.');
   }
 
-  if (errors > 0) {
-    console.error(`\nRECONCILIATION FAILED with ${errors} error(s).`);
-    process.exit(1);
-  }
-  console.log('\nRECONCILIATION PASSED CLEANLY.');
+  return {
+    ok: errors === 0,
+    errors,
+    walletsChecked: walletsRes.rows.length,
+    ordersChecked: paidOrdersRes.rows.length,
+    totalPendingKobo: totalPendingWallets,
+    totalAvailableKobo: totalAvailableWallets,
+    totalWithdrawnKobo: totalWithdrawnWallets,
+  };
 }
 
-main().catch(err => {
-  console.error('Reconciliation crashed:', err);
-  process.exit(1);
-});
+async function main() {
+  await runMigration();
+
+  if (process.argv.includes('--seed-local')) {
+    await seedLocalVerificationScenario();
+  }
+
+  const report = await runReadOnlyReconciliation();
+  if (!report.ok) {
+    console.error(`\nRECONCILIATION FAILED with ${report.errors} error(s).`);
+    process.exit(1);
+  }
+  console.log('\nRECONCILIATION PASSED CLEANLY (STRICTLY READ-ONLY).');
+}
+
+const isDirectExec =
+  process.argv[1] &&
+  (process.argv[1].endsWith('reconcile-ledger.ts') || process.argv[1].endsWith('reconcile-ledger.js'));
+
+if (isDirectExec) {
+  main().catch(err => {
+    console.error('Reconciliation crashed:', err);
+    process.exit(1);
+  });
+}

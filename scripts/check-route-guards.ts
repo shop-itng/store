@@ -31,6 +31,7 @@ const PUBLIC_ALLOW_LIST = new Set([
   'GET /products/:id',
   'GET /sellers',
   'GET /sellers/:id',
+  'GET /profiles/:slug',
   'POST /reports',
   'POST /support/contact',
   'POST /activity/track',
@@ -86,9 +87,12 @@ function isGuardedOrAllowed(route: DiscoveredRoute): { ok: boolean; reason: stri
       : { ok: false, reason: 'Webhook missing requirePaymentsEnabled gate' };
   }
 
-  // Public-safe, rate-limited, idempotent daily cron endpoint
+  // Cron endpoints must enforce requireCronSecret
   if (route.path === '/cron/daily' || route.path === '/cron/escrow') {
-    return { ok: true, reason: 'Public-safe rate-limited & idempotent daily cron endpoint' };
+    const hasCronGuard = route.middlewares.includes('requireCronSecret');
+    return hasCronGuard
+      ? { ok: true, reason: 'Guarded by [requireCronSecret]' }
+      : { ok: false, reason: `Cron route missing requireCronSecret! Middlewares=[${route.middlewares.join(', ')}]` };
   }
 
   const matchedGuards = route.middlewares.filter(

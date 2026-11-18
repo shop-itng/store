@@ -63,36 +63,44 @@ export function verifyOtpHash(enteredCode: string, storedHash: string): boolean 
   }
 }
 
-const KV_URL = (process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || '').trim();
-const KV_TOKEN = (process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || '').trim();
+function getKvUrl(): string {
+  return (process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || '').trim();
+}
+
+function getKvToken(): string {
+  return (process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || '').trim();
+}
 
 async function runKvCommand(command: string, ...args: any[]): Promise<any> {
-  if (!KV_URL || !KV_TOKEN) return null;
+  const kvUrl = getKvUrl();
+  const kvToken = getKvToken();
+  if (!kvUrl || !kvToken) return null;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 1500);
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 4000);
     const commandPayload = [
       command.toUpperCase(),
       ...args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))),
     ];
-    const url = KV_URL.replace(/\/$/, '');
+    const url = kvUrl.replace(/\/$/, '');
 
     const res = await fetch(url, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${KV_TOKEN}`,
+        Authorization: `Bearer ${kvToken}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(commandPayload),
       signal: controller.signal,
     });
-    clearTimeout(timeout);
 
     if (!res.ok) return null;
     const json: any = await res.json();
     return json.result;
   } catch {
     return null;
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
@@ -107,11 +115,11 @@ export async function checkAndRecordRateLimit(
   const now = Date.now();
   const cleanKey = `rl:${bucketKey}`;
 
-  if (KV_URL && KV_TOKEN) {
+  if (getKvUrl() && getKvToken()) {
     try {
       const windowSec = Math.max(1, Math.ceil(windowMs / 1000));
       const countRaw = await runKvCommand('INCR', cleanKey);
-      if (countRaw !== null) {
+      if (countRaw !== null && countRaw !== undefined) {
         const count = Number(countRaw);
         if (count === 1) {
           await runKvCommand('EXPIRE', cleanKey, windowSec);
@@ -160,32 +168,35 @@ export async function checkRateLimit(
   const emailKey = `shopit_rl_email_${cleanEmail}`;
   const devKey = `shopit_rl_dev_${cleanDevice}`;
 
-  if (KV_URL && KV_TOKEN) {
+  if (getKvUrl() && getKvToken()) {
     try {
-      const emailRaw = await runKvCommand('GET', emailKey);
-      const emailTimes: number[] = (emailRaw ? JSON.parse(emailRaw) : []).filter(
-        (t: number) => now - t < RATE_LIMIT_WINDOW_MS
-      );
-      if (emailTimes.length >= MAX_EMAIL_REQUESTS) {
-        return {
-          allowed: false,
-          reason: 'Too many OTP requests for this email. Please wait before trying again.',
-        };
-      }
-
-      if (cleanDevice !== 'dev_unknown') {
-        const devRaw = await runKvCommand('GET', devKey);
-        const devTimes: number[] = (devRaw ? JSON.parse(devRaw) : []).filter(
+      const pingRes = await runKvCommand('PING');
+      if (pingRes !== null) {
+        const emailRaw = await runKvCommand('GET', emailKey);
+        const emailTimes: number[] = (emailRaw ? JSON.parse(emailRaw) : []).filter(
           (t: number) => now - t < RATE_LIMIT_WINDOW_MS
         );
-        if (devTimes.length >= MAX_DEVICE_REQUESTS) {
+        if (emailTimes.length >= MAX_EMAIL_REQUESTS) {
           return {
             allowed: false,
-            reason: 'Too many OTP requests from this device. Please wait before trying again.',
+            reason: 'Too many OTP requests for this email. Please wait before trying again.',
           };
         }
+
+        if (cleanDevice !== 'dev_unknown') {
+          const devRaw = await runKvCommand('GET', devKey);
+          const devTimes: number[] = (devRaw ? JSON.parse(devRaw) : []).filter(
+            (t: number) => now - t < RATE_LIMIT_WINDOW_MS
+          );
+          if (devTimes.length >= MAX_DEVICE_REQUESTS) {
+            return {
+              allowed: false,
+              reason: 'Too many OTP requests from this device. Please wait before trying again.',
+            };
+          }
+        }
+        return { allowed: true };
       }
-      return { allowed: true };
     } catch {}
   }
 
@@ -223,14 +234,14 @@ export async function recordRateLimit(email: string, deviceId?: string): Promise
   const emailKey = `shopit_rl_email_${cleanEmail}`;
   const devKey = `shopit_rl_dev_${cleanDevice}`;
 
-  if (KV_URL && KV_TOKEN) {
+  if (getKvUrl() && getKvToken()) {
     try {
       const emailRaw = await runKvCommand('GET', emailKey);
       const emailTimes: number[] = (emailRaw ? JSON.parse(emailRaw) : []).filter(
         (t: number) => now - t < RATE_LIMIT_WINDOW_MS
       );
       emailTimes.push(now);
-      await runKvCommand('SET', emailKey, JSON.stringify(emailTimes));
+      const setOk = await runKvCommand('SET', emailKey, JSON.stringify(emailTimes));
 
       if (cleanDevice !== 'dev_unknown') {
         const devRaw = await runKvCommand('GET', devKey);
@@ -240,7 +251,9 @@ export async function recordRateLimit(email: string, deviceId?: string): Promise
         devTimes.push(now);
         await runKvCommand('SET', devKey, JSON.stringify(devTimes));
       }
-      return;
+      if (setOk !== null) {
+        return;
+      }
     } catch {}
   }
 
@@ -493,21 +506,23 @@ export interface PaymentRecord {
 }
 
 export async function savePaymentRecord(record: PaymentRecord): Promise<void> {
+  const amountKobo = Number.isFinite(Number(record.amountKobo)) && Number(record.amountKobo) > 0
+    ? Math.round(Number(record.amountKobo))
+    : Math.round(Number(record.amountNaira || 0) * 100);
   await dbQuery(
     `INSERT INTO shopit_payments (
-      reference, order_id, amount_kobo, amount_naira, currency, channel, status, webhook_received, customer_email, data, updated_at
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+      reference, order_id, amount_kobo, currency, channel, status, webhook_received, customer_email, data, updated_at
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
     ON CONFLICT (reference) DO UPDATE SET
-      status = $7,
-      webhook_received = $8,
-      channel = COALESCE($6, shopit_payments.channel),
+      status = $6,
+      webhook_received = $7,
+      channel = COALESCE($5, shopit_payments.channel),
       updated_at = NOW(),
-      data = $10`,
+      data = $9`,
     [
       record.reference,
       record.orderId,
-      record.amountKobo,
-      record.amountNaira,
+      amountKobo,
       record.currency || 'NGN',
       record.channel?.trim() || null,
       record.status,
@@ -522,11 +537,12 @@ export async function getPaymentRecord(reference: string): Promise<PaymentRecord
   const res = await dbQuery('SELECT * FROM shopit_payments WHERE reference = $1', [reference]);
   if (res.rows.length > 0) {
     const row = res.rows[0];
+    const amountKobo = Number(row.amount_kobo || 0);
     return {
       reference: row.reference,
       orderId: row.order_id,
-      amountKobo: Number(row.amount_kobo),
-      amountNaira: Number(row.amount_naira),
+      amountKobo,
+      amountNaira: Math.round(amountKobo) / 100,
       currency: row.currency,
       channel: row.channel,
       status: row.status,
@@ -542,20 +558,23 @@ export async function getPaymentRecord(reference: string): Promise<PaymentRecord
 
 export async function getAllPaymentRecords(): Promise<PaymentRecord[]> {
   const res = await dbQuery('SELECT * FROM shopit_payments ORDER BY created_at DESC LIMIT 200');
-  return res.rows.map((row: any) => ({
-    reference: row.reference,
-    orderId: row.order_id,
-    amountKobo: Number(row.amount_kobo),
-    amountNaira: Number(row.amount_naira),
-    currency: row.currency,
-    channel: row.channel,
-    status: row.status,
-    webhookReceived: Boolean(row.webhook_received),
-    customerEmail: row.customer_email,
-    data: row.data,
-    createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
-    updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : new Date().toISOString(),
-  }));
+  return res.rows.map((row: any) => {
+    const amountKobo = Number(row.amount_kobo || 0);
+    return {
+      reference: row.reference,
+      orderId: row.order_id,
+      amountKobo,
+      amountNaira: Math.round(amountKobo) / 100,
+      currency: row.currency,
+      channel: row.channel,
+      status: row.status,
+      webhookReceived: Boolean(row.webhook_received),
+      customerEmail: row.customer_email,
+      data: row.data,
+      createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
+      updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : new Date().toISOString(),
+    };
+  });
 }
 
 // -------------------------------------------------------------
@@ -643,10 +662,10 @@ export async function pingHealth(): Promise<{
     dbStatus = 'error';
   }
 
-  if (KV_URL && KV_TOKEN) {
+  if (getKvUrl() && getKvToken()) {
     try {
-      await runKvCommand('PING');
-      redisStatus = 'connected';
+      const pong = await runKvCommand('PING');
+      redisStatus = pong ? 'connected' : 'error';
     } catch {
       redisStatus = 'error';
     }

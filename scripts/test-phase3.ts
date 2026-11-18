@@ -82,17 +82,29 @@ async function runPhase3Tests() {
     const testRef = `FLW_TEST_${Date.now()}`;
     const testOrderId = `ORD_ESCROW_${Date.now()}`;
     const testSellerId = `seller_escrow_${Date.now()}`;
+    const testBuyerId = `buyer_123_${Date.now()}`;
+
+    await dbQuery(
+      `INSERT INTO shopit_users (id, email, name, password_hash, role, is_verified_email, age)
+       VALUES
+         ($1, $2, 'Emeka Okafor', 'hash_placeholder', 'buyer', true, 21),
+         ($3, $4, 'Owerri Artisan', 'hash_placeholder', 'seller', true, 23)`,
+      [testBuyerId, `emeka_${Date.now()}@futo.edu.ng`, testSellerId, `seller_${Date.now()}@futo.edu.ng`]
+    );
+    await dbQuery(
+      `INSERT INTO shopit_sellers (id, user_id, shop_name, owner_name, email, is_verified_seller, verification_status)
+       VALUES ($1, $1, 'Owerri Leather Works', 'Owerri Artisan', $2, true, 'verified')`,
+      [testSellerId, `seller_${Date.now()}@futo.edu.ng`]
+    );
 
     await dbQuery(`
       INSERT INTO shopit_orders (
         id, buyer_id, buyer_name, buyer_email,
-        items, subtotal, service_fee_total, delivery_total, discount_total, grand_total,
-        subtotal_kobo, service_fee_kobo, delivery_fee_kobo, discount_total_kobo, grand_total_kobo,
+        items, subtotal_kobo, service_fee_kobo, delivery_fee_kobo, discount_total_kobo, grand_total_kobo,
         payment_method, payment_reference, campus, status, auto_release_at, created_at, updated_at
       ) VALUES (
-        $1, 'buyer_123', 'Emeka Okafor', 'emeka@futo.edu.ng',
-        $2, 10000, 500, 1000, 0, 11500,
-        1000000, 50000, 100000, 0, 1150000,
+        $1, $4, 'Emeka Okafor', 'emeka@futo.edu.ng',
+        $2, 1000000, 50000, 100000, 0, 1150000,
         'flutterwave_card', $3, 'FUTO', 'pending_payment', NULL, NOW(), NOW()
       )
     `, [
@@ -105,6 +117,7 @@ async function runPhase3Tests() {
         quantity: 1,
       }]),
       testRef,
+      testBuyerId,
     ]);
 
     const origFetch = globalThis.fetch;
@@ -185,21 +198,35 @@ async function runPhase3Tests() {
     const autoReleaseOrderId = `ORD_EXPIRED_${Date.now()}`;
     const unshippedOrderId = `ORD_UNSHIPPED_${Date.now()}`;
     const autoReleaseSellerId = `seller_auto_${Date.now()}`;
+    const autoBuyerId = `buyer_test_${Date.now()}`;
+
+    await dbQuery(
+      `INSERT INTO shopit_users (id, email, name, password_hash, role, is_verified_email, age)
+       VALUES
+         ($1, $2, 'Chidi', 'hash_placeholder', 'buyer', true, 21),
+         ($3, $4, 'UNN Maker', 'hash_placeholder', 'seller', true, 23)`,
+      [autoBuyerId, `chidi_${Date.now()}@unn.edu.ng`, autoReleaseSellerId, `unn_${Date.now()}@unn.edu.ng`]
+    );
+    await dbQuery(
+      `INSERT INTO shopit_sellers (id, user_id, shop_name, owner_name, email, is_verified_seller, verification_status)
+       VALUES ($1, $1, 'UNN Craft Store', 'UNN Maker', $2, true, 'verified')`,
+      [autoReleaseSellerId, `unn_${Date.now()}@unn.edu.ng`]
+    );
 
     await dbQuery(`
       INSERT INTO shopit_orders (
         id, buyer_id, buyer_name, buyer_email,
-        items, subtotal, service_fee_total, delivery_total, discount_total, grand_total,
+        items, subtotal_kobo, service_fee_kobo, delivery_fee_kobo, discount_total_kobo, grand_total_kobo,
         payment_method, payment_reference, campus, status, auto_release_at, created_at, updated_at
       ) VALUES
       (
-        $1, 'buyer_test', 'Chidi', 'chidi@unn.edu.ng',
-        $2, 8000, 400, 0, 0, 8400,
+        $1, $6, 'Chidi', 'chidi@unn.edu.ng',
+        $2, 800000, 40000, 0, 0, 840000,
         'flutterwave_card', $3, 'UNN', 'shipped', NOW() - INTERVAL '1 hour', NOW() - INTERVAL '6 days', NOW()
       ),
       (
-        $4, 'buyer_test', 'Chidi', 'chidi@unn.edu.ng',
-        $2, 8000, 400, 0, 0, 8400,
+        $4, $6, 'Chidi', 'chidi@unn.edu.ng',
+        $2, 800000, 40000, 0, 0, 840000,
         'flutterwave_card', $5, 'UNN', 'paid', NOW() - INTERVAL '1 hour', NOW() - INTERVAL '6 days', NOW()
       )
     `, [
@@ -214,11 +241,12 @@ async function runPhase3Tests() {
       `REF_EXPIRED_${Date.now()}`,
       unshippedOrderId,
       `REF_UNSHIPPED_${Date.now()}`,
+      autoBuyerId,
     ]);
 
     await dbQuery(`
-      INSERT INTO shopit_wallets (seller_id, pending_balance, available_balance, total_withdrawn, is_frozen, pending_balance_kobo, available_balance_kobo, total_withdrawn_kobo, created_at, updated_at)
-      VALUES ($1, 80, 0, 0, false, 800000, 0, 0, NOW(), NOW())
+      INSERT INTO shopit_wallets (seller_id, is_frozen, pending_balance_kobo, available_balance_kobo, total_withdrawn_kobo, created_at, updated_at)
+      VALUES ($1, false, 800000, 0, 0, NOW(), NOW())
       ON CONFLICT (seller_id) DO UPDATE SET pending_balance_kobo = 800000, available_balance_kobo = 0
     `, [autoReleaseSellerId]);
 

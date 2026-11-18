@@ -397,11 +397,59 @@ export const AdminPanel: React.FC = () => {
   const [activityCategory, setActivityCategory] = useState<'all' | 'users' | 'browsing' | 'orders_payments' | 'marketplace' | 'security'>('all');
   const [activityActorEmail, setActivityActorEmail] = useState('');
   const [livePolling, setLivePolling] = useState(true);
+  const [newUsersFeed, setNewUsersFeed] = useState<any[]>([]);
+  const [newUsersTotal, setNewUsersTotal] = useState(0);
+  const [newUsersUnreadCount, setNewUsersUnreadCount] = useState(0);
+  const [newUsersPage, setNewUsersPage] = useState(1);
+  const [newUsersTotalPages, setNewUsersTotalPages] = useState(1);
+  const [loadingNewUsersFeed, setLoadingNewUsersFeed] = useState(false);
   const [adminError, setAdminError] = useState<string | null>(null);
   const [adminErrorCode, setAdminErrorCode] = useState<string | null>(null);
   const [initialNewPw, setInitialNewPw] = useState('');
   const [initialConfirmPw, setInitialConfirmPw] = useState('');
   const [savingInitialPw, setSavingInitialPw] = useState(false);
+
+  const fetchNewUsersFeed = async (page = 1) => {
+    if (currentUser?.role !== 'admin') return;
+    setLoadingNewUsersFeed(true);
+    try {
+      const res = await fetch(`/api/admin/new-users?page=${page}&limit=12`, {
+        headers: getAuthHeaders(),
+        credentials: 'include',
+      });
+      const data = await res.json();
+      if (!res.ok || !data.status) {
+        if (data?.error === 'PASSWORD_CHANGE_REQUIRED') {
+          setAdminErrorCode('PASSWORD_CHANGE_REQUIRED');
+          setAdminError(data?.message || null);
+        }
+        return;
+      }
+      setNewUsersFeed(Array.isArray(data.items) ? data.items : []);
+      setNewUsersTotal(data.total || 0);
+      setNewUsersUnreadCount(data.unreadCount || 0);
+      setNewUsersPage(data.page || 1);
+      setNewUsersTotalPages(data.totalPages || 1);
+    } catch (e) {
+      console.error('Failed to load new users feed:', e);
+    } finally {
+      setLoadingNewUsersFeed(false);
+    }
+  };
+
+  const handleMarkAlertRead = async (idOrAll: string) => {
+    try {
+      const res = await fetch(`/api/admin/alerts/${encodeURIComponent(idOrAll)}/read`, {
+        method: 'PATCH',
+        headers: getAuthHeaders(),
+        credentials: 'include',
+      });
+      const data = await res.json();
+      if (res.ok && data.status) {
+        await fetchNewUsersFeed(newUsersPage);
+      }
+    } catch {}
+  };
 
   const fetchMetrics = async () => {
     if (currentUser?.role !== 'admin') return;
@@ -600,6 +648,7 @@ export const AdminPanel: React.FC = () => {
     fetchPayments();
     fetchReports();
     fetchMetrics();
+    fetchNewUsersFeed(1);
     fetchDbUsers(1);
     fetchActivityLogs(1);
     fetchPendingGuardianPayouts();
@@ -609,6 +658,7 @@ export const AdminPanel: React.FC = () => {
     if (currentUser?.role !== 'admin' || !livePolling) return;
     const interval = setInterval(() => {
       fetchMetrics();
+      fetchNewUsersFeed(newUsersPage);
       fetchActivityLogs(activityPage);
       fetchDbUsers(dbUsersPage);
       refreshAdminData('admin');
@@ -617,6 +667,7 @@ export const AdminPanel: React.FC = () => {
   }, [
     currentUser?.role,
     livePolling,
+    newUsersPage,
     activityPage,
     activitySearch,
     activityCategory,
@@ -668,7 +719,7 @@ export const AdminPanel: React.FC = () => {
         <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
           <div className="flex items-center bg-stone-900 p-1.5 rounded-xl border border-stone-800 shrink-0 overflow-x-auto gap-1">
             {[
-              { id: 'activity', label: 'Live Activity & New Users', icon: Activity, badge: metricsData?.metrics?.newLast24Hours ?? 0 },
+              { id: 'activity', label: 'Live Activity & New Users', icon: Activity, badge: newUsersUnreadCount > 0 ? newUsersUnreadCount : (metricsData?.metrics?.newLast24Hours ?? 0) },
               { id: 'moderator', label: 'NIN & Safety', icon: ShieldCheck, badge: verificationRequests.filter(r => r.status === 'pending').length },
               { id: 'payments', label: 'Payments & Gateway', icon: CreditCard, badge: undefined },
               { id: 'reports', label: 'Reports Queue', icon: Flag, badge: reportsList.filter(r => r.status === 'open').length },
@@ -687,6 +738,7 @@ export const AdminPanel: React.FC = () => {
                     setAdminSubRole(tab.id as AdminSubRole);
                     if (tab.id === 'activity') {
                       fetchMetrics();
+                      fetchNewUsersFeed(1);
                       fetchActivityLogs(1);
                     }
                     if (tab.id === 'moderator') refreshAdminData('admin');
@@ -967,154 +1019,197 @@ export const AdminPanel: React.FC = () => {
                 type="button"
                 onClick={() => {
                   fetchMetrics();
+                  fetchNewUsersFeed(newUsersPage);
                   fetchActivityLogs(activityPage);
                   fetchDbUsers(dbUsersPage);
                   refreshAdminData('admin');
                 }}
-                disabled={loadingActivity}
+                disabled={loadingActivity || loadingNewUsersFeed}
                 className="px-3 py-1.5 rounded-xl bg-stone-900 hover:bg-stone-800 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
               >
-                <RefreshCw className={`w-3.5 h-3.5 ${loadingActivity ? 'animate-spin' : ''}`} />
+                <RefreshCw className={`w-3.5 h-3.5 ${loadingActivity || loadingNewUsersFeed ? 'animate-spin' : ''}`} />
                 <span>Refresh Feed</span>
               </button>
             </div>
           </div>
 
-          {/* Panel 1: Newest Registered Users Sent Automatically to Admin */}
+          {/* Panel 1: New Users Feed (Transactional shopit_admin_alerts + shopit_users) */}
           <div className="bg-white rounded-2xl border-2 border-stone-900 overflow-hidden shadow-xs">
             <div className="p-4 sm:p-5 border-b border-stone-200 bg-emerald-50/50 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div>
-                <h4 className="text-sm sm:text-base font-black text-stone-900 flex items-center gap-2">
+                <h4 className="text-sm sm:text-base font-black text-stone-900 flex items-center gap-2 flex-wrap">
                   <UserCheck className="w-4 h-4 text-emerald-700" />
-                  <span>Newest Registered Users (Auto-Delivered to Admin)</span>
+                  <span>New Users Feed (Instant DB Alerts)</span>
                   <span className="px-2 py-0.5 rounded-full bg-emerald-600 text-white text-[10px] font-black">
-                    {metricsData?.metrics?.newLast24Hours ?? 0} in 24h
+                    {newUsersUnreadCount} unread · {newUsersTotal} total
                   </span>
                 </h4>
                 <p className="text-xs text-stone-600 mt-0.5">
-                  All new buyers and sellers appear here the moment they sign up.
+                  Every new user is recorded in the same DB transaction and backfilled here automatically (auto-refreshes every 15s).
                 </p>
               </div>
-              <button
-                type="button"
-                onClick={() => {
-                  setOnlyNewUsers(true);
-                  setActiveTab('accounts');
-                  setAdminSubRole('accounts');
-                  fetchDbUsers(1, searchUserQuery, filterUserRole, true);
-                }}
-                className="px-3 py-1.5 rounded-xl bg-white border border-stone-300 hover:bg-stone-100 text-xs font-bold text-stone-800 flex items-center gap-1.5 cursor-pointer self-start sm:self-auto"
-              >
-                <span>Open Full New Users List</span>
-                <ArrowRight className="w-3.5 h-3.5" />
-              </button>
+              <div className="flex items-center gap-2 self-start sm:self-auto">
+                {newUsersUnreadCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => handleMarkAlertRead('all')}
+                    className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold cursor-pointer"
+                  >
+                    Mark All Read
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOnlyNewUsers(true);
+                    setActiveTab('accounts');
+                    setAdminSubRole('accounts');
+                    fetchDbUsers(1, searchUserQuery, filterUserRole, true);
+                  }}
+                  className="px-3 py-1.5 rounded-xl bg-white border border-stone-300 hover:bg-stone-100 text-xs font-bold text-stone-800 flex items-center gap-1.5 cursor-pointer"
+                >
+                  <span>Open Full Users Table</span>
+                  <ArrowRight className="w-3.5 h-3.5" />
+                </button>
+              </div>
             </div>
 
-            {!metricsData?.latestUsers || metricsData.latestUsers.length === 0 ? (
+            {newUsersFeed.length === 0 ? (
               <div className="p-8 text-center text-xs text-stone-500">
-                No registered users found yet.
+                {loadingNewUsersFeed ? 'Loading new users feed...' : 'No registered users found yet.'}
               </div>
             ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-left border-collapse text-xs">
-                  <thead>
-                    <tr className="border-b border-stone-200 bg-stone-100/70 text-stone-600 font-bold uppercase text-[10px] tracking-wider">
-                      <th className="py-2.5 px-4">User &amp; Email</th>
-                      <th className="py-2.5 px-3">Role / Shop</th>
-                      <th className="py-2.5 px-3">Age / Guardian</th>
-                      <th className="py-2.5 px-3">Verification</th>
-                      <th className="py-2.5 px-3">Signed Up</th>
-                      <th className="py-2.5 px-4 text-right">Inspect</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-stone-100">
-                    {metricsData.latestUsers.map((u: any) => (
-                      <tr key={u.id} className="hover:bg-stone-50/80">
-                        <td className="py-3 px-4">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <span className="font-bold text-stone-900">{u.name}</span>
-                            {u.isNew && (
-                              <span className="px-1.5 py-0.5 rounded bg-emerald-600 text-white text-[9px] font-black uppercase">
-                                NEW
-                              </span>
-                            )}
-                            {u.isBanned && (
-                              <span className="px-1.5 py-0.5 rounded bg-red-100 text-red-800 text-[9px] font-black uppercase">
-                                BANNED
-                              </span>
-                            )}
-                          </div>
-                          <div className="text-[11px] text-stone-500 font-mono">{u.email}</div>
-                        </td>
-                        <td className="py-3 px-3">
-                          <span
-                            className={`px-2 py-0.5 rounded-full text-[10px] font-black uppercase ${
-                              u.role === 'admin'
-                                ? 'bg-black text-[#9FE870]'
-                                : u.role === 'seller'
-                                ? 'bg-[#FF6B00] text-white'
-                                : 'bg-blue-100 text-blue-800'
-                            }`}
-                          >
-                            {u.role}
-                          </span>
-                          {u.shopName && (
-                            <div className="text-[11px] text-stone-700 font-semibold mt-0.5">
-                              {u.shopName}{u.campus ? ` · ${u.campus}` : ''}
-                            </div>
-                          )}
-                        </td>
-                        <td className="py-3 px-3 text-[11px] text-stone-700">
-                          {u.age ? `${u.age} yrs` : '—'}
-                          {u.age && u.age < 18 && (
-                            <div className="text-[10px] text-amber-700 font-semibold">
-                              Minor{u.guardianName ? ` · Guardian: ${u.guardianName}` : ''}
-                            </div>
-                          )}
-                        </td>
-                        <td className="py-3 px-3">
-                          <span
-                            className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                              u.isVerifiedEmail ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'
-                            }`}
-                          >
-                            Email: {u.isVerifiedEmail ? 'Verified' : 'Pending'}
-                          </span>
-                        </td>
-                        <td className="py-3 px-3 text-[11px] text-stone-600 whitespace-nowrap">
-                          {u.createdAt ? new Date(u.createdAt).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—'}
-                        </td>
-                        <td className="py-3 px-4 text-right">
-                          <div className="flex items-center justify-end gap-1.5">
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setActivityActorEmail(u.email);
-                                fetchActivityLogs(1, { actorEmail: u.email });
-                              }}
-                              className="px-2.5 py-1 rounded-lg border border-stone-300 bg-white hover:bg-stone-100 text-[11px] font-bold text-stone-800 cursor-pointer"
-                            >
-                              User Actions
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setSearchUserQuery(u.email);
-                                setActiveTab('accounts');
-                                setAdminSubRole('accounts');
-                                fetchDbUsers(1, u.email, 'all', false);
-                              }}
-                              className="px-2.5 py-1 rounded-lg bg-stone-900 hover:bg-stone-800 text-white text-[11px] font-bold cursor-pointer"
-                            >
-                              Manage
-                            </button>
-                          </div>
-                        </td>
+              <>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse text-xs">
+                    <thead>
+                      <tr className="border-b border-stone-200 bg-stone-100/70 text-stone-600 font-bold uppercase text-[10px] tracking-wider">
+                        <th className="py-2.5 px-4">User &amp; Email</th>
+                        <th className="py-2.5 px-3">Role / Shop</th>
+                        <th className="py-2.5 px-3">Age / Guardian</th>
+                        <th className="py-2.5 px-3">Status</th>
+                        <th className="py-2.5 px-3">Signed Up</th>
+                        <th className="py-2.5 px-4 text-right">Inspect</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+                    </thead>
+                    <tbody className="divide-y divide-stone-100">
+                      {newUsersFeed.map((u: any) => (
+                        <tr key={u.userId} className={`hover:bg-stone-50/80 ${!u.isRead ? 'bg-emerald-50/30' : ''}`}>
+                          <td className="py-3 px-4">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="font-bold text-stone-900">{u.name}</span>
+                              {!u.isRead && (
+                                <span className="px-1.5 py-0.5 rounded bg-emerald-600 text-white text-[9px] font-black uppercase">
+                                  UNREAD
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-[11px] text-stone-500 font-mono">{u.email}</div>
+                          </td>
+                          <td className="py-3 px-3">
+                            <span
+                              className={`px-2 py-0.5 rounded-full text-[10px] font-black uppercase ${
+                                u.role === 'admin'
+                                  ? 'bg-black text-[#9FE870]'
+                                  : u.role === 'seller'
+                                  ? 'bg-[#FF6B00] text-white'
+                                  : 'bg-blue-100 text-blue-800'
+                              }`}
+                            >
+                              {u.role}
+                            </span>
+                            {u.shopName && (
+                              <div className="text-[11px] text-stone-700 font-semibold mt-0.5">
+                                {u.shopName}{u.campus ? ` · ${u.campus}` : ''}
+                              </div>
+                            )}
+                          </td>
+                          <td className="py-3 px-3 text-[11px] text-stone-700">
+                            {u.age ? `${u.age} yrs` : '—'}
+                            {u.age && u.age < 18 && (
+                              <div className="text-[10px] text-amber-700 font-semibold">
+                                Minor{u.guardianName ? ` · Guardian: ${u.guardianName}` : ''}
+                              </div>
+                            )}
+                          </td>
+                          <td className="py-3 px-3">
+                            <span
+                              className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                u.isVerifiedEmail ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'
+                              }`}
+                            >
+                              Email: {u.isVerifiedEmail ? 'Verified' : 'Unverified'}
+                            </span>
+                          </td>
+                          <td className="py-3 px-3 text-[11px] text-stone-600 whitespace-nowrap">
+                            {u.createdAt ? new Date(u.createdAt).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—'}
+                          </td>
+                          <td className="py-3 px-4 text-right">
+                            <div className="flex items-center justify-end gap-1.5">
+                              {!u.isRead && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleMarkAlertRead(u.alertId || u.userId)}
+                                  className="px-2 py-1 rounded-lg border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-[11px] font-bold text-emerald-800 cursor-pointer"
+                                >
+                                  Ack
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setActivityActorEmail(u.email);
+                                  fetchActivityLogs(1, { actorEmail: u.email });
+                                }}
+                                className="px-2.5 py-1 rounded-lg border border-stone-300 bg-white hover:bg-stone-100 text-[11px] font-bold text-stone-800 cursor-pointer"
+                              >
+                                Actions
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setSearchUserQuery(u.email);
+                                  setActiveTab('accounts');
+                                  setAdminSubRole('accounts');
+                                  fetchDbUsers(1, u.email, 'all', false);
+                                }}
+                                className="px-2.5 py-1 rounded-lg bg-stone-900 hover:bg-stone-800 text-white text-[11px] font-bold cursor-pointer"
+                              >
+                                Manage
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                {newUsersTotalPages > 1 && (
+                  <div className="px-4 py-3 border-t border-stone-200 bg-stone-50 flex items-center justify-between text-xs">
+                    <span className="text-stone-600 font-semibold">
+                      Page {newUsersPage} of {newUsersTotalPages} ({newUsersTotal} users)
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        disabled={newUsersPage <= 1}
+                        onClick={() => fetchNewUsersFeed(newUsersPage - 1)}
+                        className="px-2.5 py-1 rounded-lg border border-stone-300 bg-white disabled:opacity-40 font-bold cursor-pointer"
+                      >
+                        Prev
+                      </button>
+                      <button
+                        type="button"
+                        disabled={newUsersPage >= newUsersTotalPages}
+                        onClick={() => fetchNewUsersFeed(newUsersPage + 1)}
+                        className="px-2.5 py-1 rounded-lg border border-stone-300 bg-white disabled:opacity-40 font-bold cursor-pointer"
+                      >
+                        Next
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </>
             )}
           </div>
 
@@ -1476,7 +1571,7 @@ export const AdminPanel: React.FC = () => {
 
                         {isMinor && (
                           <div className="text-xs text-stone-700 bg-amber-50 p-2.5 rounded-xl border border-amber-200 space-y-0.5">
-                            <div><strong>Guardian Name:</strong> {req.guardianName || 'N/A'} · <strong>Phone:</strong> {req.guardianPhone || 'N/A'}</div>
+                            <div><strong>Guardian Name:</strong> {req.guardianName || 'N/A'}</div>
                             {req.guardianNinLast4 && <div><strong>Guardian NIN:</strong> <span className="font-mono font-bold">***-***-{req.guardianNinLast4}</span></div>}
                             <div className="text-[11px] text-amber-800 font-semibold">✓ Parent/Guardian Signed NDPA Consent on file</div>
                           </div>
@@ -1557,7 +1652,7 @@ export const AdminPanel: React.FC = () => {
                 <div key={flag.id} className="p-4 flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs">
                   <div className="space-y-1 max-w-xl">
                     <div className="flex items-center gap-2">
-                      <span className="font-bold text-stone-900">{flag.senderMaskedName}</span>
+                      <span className="font-bold text-stone-900">{flag.senderDisplayName}</span>
                       <span className="text-stone-400">· {flag.timestamp}</span>
                       <span className="px-2 py-0.5 rounded-md bg-stone-100 text-stone-700 text-[10px] font-semibold uppercase">
                         {flag.senderRole}
@@ -2450,7 +2545,7 @@ export const AdminPanel: React.FC = () => {
                             </span>
                           </td>
                           <td className="p-3.5">
-                            <span className="font-medium text-stone-900 block">{order.buyerName || order.buyerMaskedId}</span>
+                            <span className="font-medium text-stone-900 block">{order.buyerName || order.buyerDisplayName}</span>
                             <span className="text-[11px] text-stone-500">{order.deliveryArea}</span>
                           </td>
                           <td className="p-3.5">
@@ -2938,7 +3033,7 @@ export const AdminPanel: React.FC = () => {
                     <h4 className="text-sm font-bold text-stone-900">{disp.reason}</h4>
                     <p className="text-xs text-stone-600 mt-1 leading-relaxed">{disp.description}</p>
                     <div className="mt-2 text-[11px] text-stone-500">
-                      <strong>Parties:</strong> {disp.buyerMaskedId} ({disp.buyerName}) vs {disp.sellerShopName}
+                      <strong>Parties:</strong> {disp.buyerDisplayName} ({disp.buyerName}) vs {disp.sellerShopName}
                     </div>
                   </div>
 
@@ -3378,44 +3473,7 @@ export const AdminPanel: React.FC = () => {
                 </div>
               </div>
 
-              {/* Killswitch 3: Pause Seller Signups */}
-              <div className={`p-4 rounded-2xl border-2 transition-all space-y-3 ${
-                emergencyControls.pauseSellerSignups
-                  ? 'border-stone-900 bg-stone-100'
-                  : 'border-stone-200 bg-stone-50/50'
-              }`}>
-                <div className="flex items-center justify-between">
-                  <div className={`w-9 h-9 rounded-xl flex items-center justify-center ${
-                    emergencyControls.pauseSellerSignups ? 'bg-stone-900 text-white' : 'bg-stone-200 text-stone-700'
-                  }`}>
-                    <Store className="w-5 h-5" />
-                  </div>
-                  <button
-                    type="button"
-                    disabled={isSavingKillswitch === 'pauseSellerSignups'}
-                    onClick={async () => {
-                      setIsSavingKillswitch('pauseSellerSignups');
-                      await updateEmergencyControls({ pauseSellerSignups: !emergencyControls.pauseSellerSignups });
-                      setIsSavingKillswitch(null);
-                    }}
-                    className={`px-3 py-1 rounded-xl text-xs font-black transition-all border disabled:opacity-60 cursor-pointer ${
-                      emergencyControls.pauseSellerSignups
-                        ? 'bg-stone-900 text-white border-stone-950 shadow-xs'
-                        : 'bg-white text-stone-800 border-stone-300'
-                    }`}
-                  >
-                    {isSavingKillswitch === 'pauseSellerSignups' ? '...' : emergencyControls.pauseSellerSignups ? 'CLOSED' : 'OPEN'}
-                  </button>
-                </div>
-                <div>
-                  <h4 className="text-sm font-bold text-stone-950">Pause Seller Signups</h4>
-                  <p className="text-[11px] text-stone-500 mt-1 leading-relaxed">
-                    Temporarily freezes new artisan registrations during spam waves or manual NIN verification backlogs.
-                  </p>
-                </div>
-              </div>
-
-              {/* Killswitch 4: Nuclear Database Wipe */}
+              {/* Killswitch 3: Account Registration Policy (Always Unblocked) */}
               <div className="p-4 rounded-2xl border border-stone-200 bg-stone-50/80 space-y-3">
                 <div className="flex items-center justify-between">
                   <div className="w-9 h-9 rounded-xl bg-emerald-600 text-white flex items-center justify-center">
@@ -4354,7 +4412,7 @@ export const AdminPanel: React.FC = () => {
                       <span>Minor Seller Under 18 Years Old (NDPA Guardian Compliance)</span>
                     </span>
                     <p className="text-[11px] text-amber-800">
-                      Guardian Name: <strong>{inspectRequest.guardianName || 'N/A'}</strong> · Phone: <strong>{inspectRequest.guardianPhone || 'N/A'}</strong>
+                      Guardian Name: <strong>{inspectRequest.guardianName || 'N/A'}</strong>
                       {inspectRequest.guardianNinLast4 && ` · Guardian NIN Last 4: ***-***-${inspectRequest.guardianNinLast4}`}
                     </p>
                     <p className="text-[11px] text-amber-700">

@@ -274,32 +274,30 @@ async function runTests() {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${adminToken}`,
       },
-      body: JSON.stringify({ pauseSellerSignups: true, pauseNewOrders: true, maintenanceMode: false }),
+      body: JSON.stringify({ pauseSellerSignups: true, pauseNewOrders: true, maintenanceMode: true }),
     });
     assert.strictEqual(ksRes.status, 200);
 
-    // Server-side enforcement: seller signup blocked (503 SELLER_SIGNUPS_PAUSED), buyer signup still allowed
-    const pausedSellerEmail = `paused_seller_${ts}@test.edu.ng`;
-    const pausedSellerProof = await issueSignupVerificationToken(pausedSellerEmail);
-    const blockedSellerRegRes = await fetch(`${baseUrl}/api/auth/register`, {
+    // Server-side guarantee: NOTHING blocks new user registration (not pauseSellerSignups, not maintenanceMode)
+    const unblockedSellerEmail = `unblocked_seller_${ts}@test.edu.ng`;
+    const unblockedSellerRegRes = await fetch(`${baseUrl}/api/auth/register`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        email: pausedSellerEmail,
+        email: unblockedSellerEmail,
         password: 'SellerPass123!',
-        name: 'Paused Seller',
+        name: 'Unblocked Seller',
         role: 'seller',
         age: 21,
-        shopName: 'Blocked Shop',
+        shopName: 'Always Open Shop',
         campus: 'UNILAG (Akoka)',
-        signupVerificationToken: pausedSellerProof,
       }),
     });
-    const blockedSellerRegData: any = await blockedSellerRegRes.json();
-    assert.strictEqual(blockedSellerRegRes.status, 503);
-    assert.strictEqual(blockedSellerRegData.error, 'SELLER_SIGNUPS_PAUSED');
+    const unblockedSellerRegData: any = await unblockedSellerRegRes.json();
+    assert.strictEqual(unblockedSellerRegRes.status, 201);
+    assert.ok(unblockedSellerRegData.user?.id);
 
-    // Server-side enforcement: buyer-to-seller upgrade also blocked when pauseSellerSignups=true
+    // Buyer registration & buyer-to-seller upgrade also succeed under pauseSellerSignups=true
     const buyerEmail2 = `buyer_ks_${ts}@test.edu.ng`;
     const buyerProof2 = await issueSignupVerificationToken(buyerEmail2);
     const buyerReg2Res = await fetch(`${baseUrl}/api/auth/register`, {
@@ -317,15 +315,15 @@ async function runTests() {
     assert.strictEqual(buyerReg2Res.status, 201);
     const buyer2Token = ((await buyerReg2Res.json()) as any).sessionToken;
 
-    const blockedUpgradeRes = await fetch(`${baseUrl}/api/sellers/upgrade`, {
+    const allowedUpgradeRes = await fetch(`${baseUrl}/api/sellers/upgrade`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${buyer2Token}`,
       },
-      body: JSON.stringify({ shopName: 'Blocked Upgrade Shop', campus: 'UNILAG (Akoka)' }),
+      body: JSON.stringify({ shopName: 'Allowed Upgrade Shop', campus: 'UNILAG (Akoka)' }),
     });
-    assert.strictEqual(blockedUpgradeRes.status, 503);
+    assert.strictEqual(allowedUpgradeRes.status, 200);
 
     // Server-side enforcement: new order & checkout initialization blocked when pauseNewOrders=true
     const prevPaymentsEnabled = process.env.PAYMENTS_ENABLED;
@@ -441,12 +439,10 @@ async function runTests() {
     await dbQuery(
       `INSERT INTO shopit_orders (
         id, buyer_id, buyer_name, buyer_email, items,
-        subtotal, service_fee_total, delivery_total, discount_total, grand_total,
         subtotal_kobo, service_fee_kobo, delivery_fee_kobo, discount_total_kobo, grand_total_kobo,
         payment_method, payment_reference, status, stock_reserved, paid_at, created_at, updated_at
       ) VALUES (
         $1, $2, 'Temi Buyer', $3, $4::jsonb,
-        4000, 500, 0, 0, 4500,
         400000, 50000, 0, 0, 450000,
         'flutterwave_card', $5, 'paid', true, NOW(), NOW(), NOW()
       )`,
@@ -459,7 +455,7 @@ async function runTests() {
       ]
     );
     await dbQuery(
-      `UPDATE shopit_wallets SET pending_balance = 4000, pending_balance_kobo = 400000 WHERE seller_id = $1`,
+      `UPDATE shopit_wallets SET pending_balance_kobo = 400000 WHERE seller_id = $1`,
       [userId]
     );
     const dispOpenRes = await fetch(`${baseUrl}/api/disputes`, {
@@ -663,12 +659,10 @@ async function runTests() {
     await dbQuery(
       `INSERT INTO shopit_orders (
         id, buyer_id, buyer_name, buyer_email, items,
-        subtotal, service_fee_total, delivery_total, discount_total, grand_total,
         subtotal_kobo, service_fee_kobo, delivery_fee_kobo, discount_total_kobo, grand_total_kobo,
         payment_method, payment_reference, status, has_review, stock_reserved, paid_at, created_at, updated_at
       ) VALUES (
         $1, $2, 'Chidi Buyer', $3, $4::jsonb,
-        3000, 300, 0, 0, 3300,
         300000, 30000, 0, 0, 330000,
         'flutterwave_card', $5, 'completed', false, true, NOW(), NOW(), NOW()
       )`,
@@ -695,16 +689,14 @@ async function runTests() {
     // Buyer cancels a paid order -> restores product stock & reverses seller pending balance
     const cancelOrderId = `ORD-CXL-${ts}`;
     await dbQuery('UPDATE shopit_products SET stock = 3 WHERE id = $1', [soldOutProdId]);
-    await dbQuery('UPDATE shopit_wallets SET pending_balance = 3000, pending_balance_kobo = 300000 WHERE seller_id = $1', [userId]);
+    await dbQuery('UPDATE shopit_wallets SET pending_balance_kobo = 300000 WHERE seller_id = $1', [userId]);
     await dbQuery(
       `INSERT INTO shopit_orders (
         id, buyer_id, buyer_name, buyer_email, items,
-        subtotal, service_fee_total, delivery_total, discount_total, grand_total,
         subtotal_kobo, service_fee_kobo, delivery_fee_kobo, discount_total_kobo, grand_total_kobo,
         payment_method, payment_reference, status, stock_reserved, paid_at, created_at, updated_at
       ) VALUES (
         $1, $2, 'Chidi Buyer', $3, $4::jsonb,
-        3000, 300, 0, 0, 3300,
         300000, 30000, 0, 0, 330000,
         'flutterwave_card', $5, 'paid', true, NOW(), NOW(), NOW()
       )`,

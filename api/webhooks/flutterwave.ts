@@ -205,16 +205,14 @@ export default async function handler(req: any, res: any) {
             const idempotencyKey = `transfer_failed:${payout.reference}`;
             const ledIns = await client.query(
               `INSERT INTO shopit_ledger_entries (
-                id, wallet_id, type, amount, fee, balance_after, balance_type, status,
+                id, wallet_id, type, balance_type, status,
                 amount_kobo, fee_kobo, balance_after_kobo, description, reference, idempotency_key, created_at
-              ) VALUES ($1, $2, 'refund', $3, 0, $4, 'available', 'completed', $5, 0, $6, $7, $8, $9, NOW())
+              ) VALUES ($1, $2, 'refund', 'available', 'completed', $3, 0, $4, $5, $6, $7, NOW())
               ON CONFLICT (idempotency_key) DO NOTHING
               RETURNING id`,
               [
                 `LEDGER-WTD-REV-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
                 payout.seller_id,
-                koboToNaira(totalRestoreKobo),
-                koboToNaira(restoredAvail),
                 totalRestoreKobo,
                 restoredAvail,
                 `Failed payout reversal · ${payout.reference}`,
@@ -226,10 +224,10 @@ export default async function handler(req: any, res: any) {
             if (ledIns.rows.length > 0) {
               await client.query(
                 `UPDATE shopit_wallets
-                 SET available_balance_kobo = $1, available_balance = $2,
-                     total_withdrawn_kobo = $3, total_withdrawn = $4, updated_at = NOW()
-                 WHERE seller_id = $5`,
-                [restoredAvail, koboToNaira(restoredAvail), restoredWtd, koboToNaira(restoredWtd), payout.seller_id]
+                 SET available_balance_kobo = $1,
+                     total_withdrawn_kobo = $2, updated_at = NOW()
+                 WHERE seller_id = $3`,
+                [restoredAvail, restoredWtd, payout.seller_id]
               );
             }
           }

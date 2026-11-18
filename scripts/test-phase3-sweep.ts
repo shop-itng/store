@@ -189,9 +189,9 @@ async function main() {
     await test('1. Option 1 payout fee is ₦0 for ₦2,000 withdrawal (wallet debited strictly 200,000 kobo)', async () => {
       const payoutAccId = `acc_p3s_${ts}`;
       await query(
-        `INSERT INTO shopit_wallets (seller_id, available_balance, available_balance_kobo, active_payout_account_id, payout_accounts)
-         VALUES ($1, 5000, 500000, $2, $3)
-         ON CONFLICT (seller_id) DO UPDATE SET available_balance = 5000, available_balance_kobo = 500000, active_payout_account_id = $2, payout_accounts = $3`,
+        `INSERT INTO shopit_wallets (seller_id, available_balance_kobo, active_payout_account_id, payout_accounts)
+         VALUES ($1, 500000, $2, $3)
+         ON CONFLICT (seller_id) DO UPDATE SET available_balance_kobo = 500000, active_payout_account_id = $2, payout_accounts = $3`,
         [
           sellerId,
           payoutAccId,

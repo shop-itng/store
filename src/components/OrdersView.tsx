@@ -33,7 +33,7 @@ export const OrdersView: React.FC = () => {
     submitOrderReview,
     setActiveView,
     openProduct,
-    openSellerShop,
+    openProfile,
     notify,
     openChat,
     openReportProblemModal,
@@ -448,7 +448,7 @@ export const OrdersView: React.FC = () => {
                         <div className="text-[11px] text-slate-500 mt-0.5">
                           Shop:{' '}
                           <span
-                            onClick={() => openSellerShop(item.sellerId)}
+                            onClick={() => openProfile(item.sellerId)}
                             className="font-medium text-slate-700 hover:underline cursor-pointer"
                           >
                             {item.sellerShopName}

@@ -12,11 +12,8 @@ import {
   OrderStatus,
   Coupon,
   SellerWallet,
-  PayoutAccount,
-  WalletTransaction,
   LedgerEntry,
   PaymentWebhookEvent,
-  SecurityProfile,
   ChatMessage,
   Conversation,
   DisputeTicket,
@@ -25,44 +22,15 @@ import {
   AdminSubRole,
   FeeSettings,
   SafePickupSpot,
-  CampusRunner,
-  RunnerTrip,
-  CustomCommissionRequest,
-  CampusFlashDrop,
-  CampusStylePost,
-  ArtisanTierInfo,
-  CampusAmbassador,
-  HallLeaderboardEntry,
-  ReferralReward,
   BroadcastAnnouncement,
   EmergencyControls,
   AdminAuditLog,
+  NotificationPrefs,
+  PrivacySettings,
 } from '../types';
-import {
-  INITIAL_PRODUCTS,
-  INITIAL_SELLERS,
-  INITIAL_ORDERS,
-  VALID_COUPONS,
-  INITIAL_WALLETS,
-  INITIAL_SECURITY_PROFILES,
-  INITIAL_CONVERSATIONS,
-  INITIAL_MESSAGES,
-  INITIAL_DISPUTES,
-  INITIAL_ANTI_BYPASS_FLAGS,
-  INITIAL_SAFE_SPOTS,
-  INITIAL_CAMPUS_RUNNERS,
-  INITIAL_RUNNER_TRIPS,
-  INITIAL_COMMISSIONS,
-  INITIAL_CAMPUS_DROPS,
-  INITIAL_STYLE_POSTS,
-  ARTISAN_TIERS,
-  PRESET_CRAFT_TEMPLATES,
-  INITIAL_AMBASSADORS,
-  INITIAL_HALL_LEADERBOARD,
-  INITIAL_REFERRAL_REWARDS,
-} from '../data/mockData';
+import { VALID_COUPONS, INITIAL_SAFE_SPOTS } from '../data/mockData';
 import { getPricingBreakdown, DEFAULT_FEE_SETTINGS } from '../utils/pricing';
-import { filterAntiBypass, checkNumbersInText } from '../utils/antiBypass';
+import { checkNumbersInText } from '../utils/antiBypass';
 import { NigerianLocation } from '../types';
 import { calculateDeliveryFee } from '../data/nigerianLocations';
 import {
@@ -117,7 +85,6 @@ interface AppContextType {
     bio: string;
     under18: boolean;
     guardianName?: string;
-    guardianPhone?: string;
   }) => Promise<void>;
   refreshCurrentUser: () => Promise<void>;
 
@@ -126,11 +93,37 @@ interface AppContextType {
   filteredProducts: Product[];
   addProduct: (
     newProd: Omit<Product, 'id' | 'createdAt' | 'rating' | 'reviewCount' | 'reviews' | 'serviceFee' | 'displayPrice' | 'isSoldOut' | 'isNewArrival'> &
-      Partial<Pick<Product, 'serviceFee' | 'displayPrice' | 'isSoldOut' | 'isNewArrival'>>
+      Partial<Pick<Product, 'serviceFee' | 'displayPrice' | 'isSoldOut' | 'isNewArrival' | 'isDraft' | 'isPaused'>>
   ) => Promise<void>;
   updateProduct: (id: string, updates: Partial<Product>) => Promise<void>;
   deleteProduct: (id: string) => Promise<void>;
   toggleProductStock: (id: string) => Promise<void>;
+  fetchMyListings: () => Promise<Product[]>;
+  toggleProductPin: (productId: string, isPinned: boolean) => Promise<boolean>;
+  toggleProductPause: (productId: string, isPaused: boolean) => Promise<boolean>;
+
+  // Profiles & Account Settings (Phase A)
+  updateMyProfile: (payload: {
+    displayName?: string;
+    avatarUrl?: string | null;
+    coverUrl?: string | null;
+    bio?: string;
+    campus?: string;
+    locationArea?: string;
+    interests?: string[];
+    shopName?: string;
+    shopBio?: string;
+    logoUrl?: string | null;
+    bannerUrl?: string | null;
+  }) => Promise<{ status: boolean; message?: string; profile?: any }>;
+  updateMySettings: (payload: {
+    notificationPrefs?: Partial<NotificationPrefs>;
+    privacySettings?: Partial<PrivacySettings>;
+  }) => Promise<{ status: boolean; message?: string; notificationPrefs?: NotificationPrefs; privacySettings?: PrivacySettings }>;
+  requestEmailChangeOtp: (newEmail: string, currentPassword: string) => Promise<{ status: boolean; message?: string }>;
+  confirmEmailChange: (newEmail: string, code: string, currentPassword: string) => Promise<{ status: boolean; message?: string }>;
+  exportMyData: () => Promise<boolean>;
+  deleteMyAccount: (password: string, confirmation: string) => Promise<{ status: boolean; message?: string }>;
 
   // Sellers
   sellers: SellerProfile[];
@@ -167,9 +160,10 @@ interface AppContextType {
   setActiveView: (view: AppView) => void;
   isCatalogLoading: boolean;
   selectedProductId: string | null;
-  selectedSellerId: string | null;
+  activeProfileSlug: string | null;
   openProduct: (id: string) => void;
-  openSellerShop: (sellerId: string) => void;
+  openProfile: (slugOrId: string) => void;
+  openAccountSettings: () => void;
 
   // Restock alerts
   subscribeRestockAlert: (productId: string) => Promise<{ subscribed: boolean; inStock?: boolean }>;
@@ -199,34 +193,12 @@ interface AppContextType {
 
   // Phase 4: Campus Safe Logistics & Handshake OTP Verification
   safePickupSpots: SafePickupSpot[];
-  campusRunners: CampusRunner[];
-  runnerTrips: RunnerTrip[];
   verifyHandshakeOtp: (orderId: string, inputOtp: string) => Promise<{ success: boolean; message: string }>;
-
-  // Phase 5: Student Artisan Growth, Bespoke Commissions & Social Drops
-  commissions: CustomCommissionRequest[];
-  campusDrops: CampusFlashDrop[];
-  stylePosts: CampusStylePost[];
-  artisanTiers: ArtisanTierInfo[];
-  submitCommissionRequest: (
-    request: Omit<CustomCommissionRequest, 'id' | 'createdAt' | 'status' | 'buyerMaskedId'>
-  ) => void;
-  updateCommissionStatus: (
-    commissionId: string,
-    status: CustomCommissionRequest['status'],
-    wipPhoto?: string
-  ) => void;
-  toggleLikeStylePost: (postId: string) => void;
-
-  // Phase 6: Campus Ambassador Network & Hall Leaderboard
-  ambassadors: CampusAmbassador[];
-  hallLeaderboard: HallLeaderboardEntry[];
-  referralRewards: ReferralReward[];
-  activeAmbassadorCode: string | null;
 
   // Quick-List Product & Catalog Management
   isQuickListModalOpen: boolean;
-  openQuickListModal: () => void;
+  editingProduct: Product | null;
+  openQuickListModal: (productToEdit?: Product) => void;
   closeQuickListModal: () => void;
 
   // Phase 3: Locked Chat & Privacy Anti-Bypass
@@ -303,9 +275,6 @@ interface AppContextType {
   resendSignupOtp: () => Promise<{ success: boolean; error?: string; waitSeconds?: number }>;
   toggleWalletFreeze: (sellerId: string, freeze: boolean, reason?: string) => Promise<boolean>;
 
-  // Security Hardening
-  securityProfile: SecurityProfile;
-
   // Safety switch flags
   paymentsEnabled: boolean;
   payoutsEnabled: boolean;
@@ -338,71 +307,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // User identity is hydrated strictly from server DB (/api/auth/me), never from localStorage.
   const [currentUser, setCurrentUser] = useState<User | null>(null);
 
-  const [products, setProducts] = useState<Product[]>(() => {
-    try {
-      const saved = localStorage.getItem('shopit_products_ready_made');
-      return saved ? JSON.parse(saved) : [];
-    } catch {
-      return [];
-    }
-  });
-
-  const [sellers, setSellers] = useState<SellerProfile[]>(() => {
-    try {
-      const saved = localStorage.getItem('shopit_sellers');
-      return saved ? JSON.parse(saved) : [];
-    } catch {
-      return [];
-    }
-  });
-
-  const [wishlist, setWishlist] = useState<string[]>(() => {
-    try {
-      const saved = localStorage.getItem('shopit_wishlist');
-      return saved ? JSON.parse(saved) : [];
-    } catch {
-      return [];
-    }
-  });
-
-  const [cart, setCart] = useState<CartItem[]>(() => {
-    try {
-      const saved = localStorage.getItem('shopit_cart');
-      return saved ? JSON.parse(saved) : [];
-    } catch {
-      return [];
-    }
-  });
-
-  const [orders, setOrders] = useState<Order[]>(() => {
-    try {
-      const saved = localStorage.getItem('shopit_orders');
-      return saved ? JSON.parse(saved) : [];
-    } catch {
-      return [];
-    }
-  });
-
-  const [wallets, setWallets] = useState<Record<string, SellerWallet>>(() => {
-    try {
-      const saved = localStorage.getItem('shopit_wallets');
-      return saved ? JSON.parse(saved) : {};
-    } catch {
-      return {};
-    }
-  });
-
-  // Rule 5: All balances come from an append-only ledger (sale, fee, withdrawal, refund)
-  const [ledgerEntries, setLedgerEntries] = useState<LedgerEntry[]>(() => {
-    const saved = localStorage.getItem('shopit_ledger_entries_v5');
-    return saved ? JSON.parse(saved) : [];
-  });
-
-  // Processed payment webhook events (idempotency tracker)
-  const [paymentWebhooks, setPaymentWebhooks] = useState<PaymentWebhookEvent[]>(() => {
-    const saved = localStorage.getItem('shopit_payment_webhooks_v5');
-    return saved ? JSON.parse(saved) : [];
-  });
+  const [products, setProducts] = useState<Product[]>([]);
+  const [sellers, setSellers] = useState<SellerProfile[]>([]);
+  const [wishlist, setWishlist] = useState<string[]>([]);
+  const [cart, setCart] = useState<CartItem[]>([]);
+  const [orders, setOrders] = useState<Order[]>([]);
+  const [wallets, setWallets] = useState<Record<string, SellerWallet>>({});
+  const [ledgerEntries, setLedgerEntries] = useState<LedgerEntry[]>([]);
+  const [paymentWebhooks] = useState<PaymentWebhookEvent[]>([]);
 
   // Rule 4: Send an Email OTP before every withdrawal
   const [activeWithdrawalOtp, setActiveWithdrawalOtp] = useState<{
@@ -411,8 +323,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     expiresAt: number;
     amount: number;
   } | null>(null);
-
-  const [securityProfiles, setSecurityProfiles] = useState<Record<string, SecurityProfile>>(INITIAL_SECURITY_PROFILES);
 
   const [lowDataMode, setLowDataMode] = useState<boolean>(() => {
     return localStorage.getItem('shopit_low_data') === 'true';
@@ -491,11 +401,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (params.get('view') === 'orders' || params.has('payment_ref') || params.has('tx_ref')) {
         return 'orders';
       }
+      if (params.get('view') === 'settings') {
+        return 'account_settings';
+      }
       if (params.get('product')) {
         return 'product_detail';
       }
-      if (params.get('shop')) {
-        return 'seller_shop';
+      if (params.get('profile') || params.get('shop')) {
+        return 'profile';
       }
       if (LEGAL_SLUGS.includes(path as AppView)) {
         return path as AppView;
@@ -513,9 +426,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
     return null;
   });
-  const [selectedSellerId, setSelectedSellerId] = useState<string | null>(() => {
+  const [activeProfileSlug, setActiveProfileSlug] = useState<string | null>(() => {
     if (typeof window !== 'undefined') {
-      return new URLSearchParams(window.location.search).get('shop');
+      const params = new URLSearchParams(window.location.search);
+      return params.get('profile') || params.get('shop');
     }
     return null;
   });
@@ -569,6 +483,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         if (window.location.pathname !== `/${view}`) {
           window.history.pushState({ view }, '', `/${view}`);
         }
+      } else if (view === 'account_settings') {
+        if (window.location.pathname !== '/' || window.location.search !== '?view=settings') {
+          window.history.pushState({ view: 'account_settings' }, '', '/?view=settings');
+        }
       } else if (view === 'catalog') {
         if (window.location.pathname !== '/' || window.location.search !== '') {
           window.history.pushState({ view: 'catalog' }, '', '/');
@@ -582,20 +500,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const path = window.location.pathname.replace(/^\//, '').toLowerCase();
       const params = new URLSearchParams(window.location.search);
       const productParam = params.get('product');
-      const shopParam = params.get('shop');
+      const profileParam = params.get('profile') || params.get('shop');
+      const viewParam = params.get('view');
       if (path === 'reset-password' || path === 'forgot-password') {
         _setActiveView('reset-password');
       } else if (productParam) {
         setSelectedProductId(productParam);
         _setActiveView('product_detail');
-      } else if (shopParam) {
-        setSelectedSellerId(shopParam);
-        _setActiveView('seller_shop');
+      } else if (profileParam) {
+        setActiveProfileSlug(profileParam);
+        _setActiveView('profile');
+      } else if (viewParam === 'settings') {
+        _setActiveView('account_settings');
       } else if (LEGAL_SLUGS.includes(path as AppView)) {
         _setActiveView(path as AppView);
       } else if (path === '' || path === '/') {
         setSelectedProductId(null);
-        setSelectedSellerId(null);
+        setActiveProfileSlug(null);
         _setActiveView('catalog');
       }
     };
@@ -640,50 +561,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return () => clearInterval(interval);
   }, []);
 
-  // Phase 4: Campus Safe Logistics & Handshake States
-  const [safePickupSpots, setSafePickupSpots] = useState<SafePickupSpot[]>(() => {
-    const saved = localStorage.getItem('shopit_safe_spots');
-    return saved ? JSON.parse(saved) : INITIAL_SAFE_SPOTS;
-  });
-  const [campusRunners, setCampusRunners] = useState<CampusRunner[]>(() => {
-    const saved = localStorage.getItem('shopit_campus_runners');
-    return saved ? JSON.parse(saved) : INITIAL_CAMPUS_RUNNERS;
-  });
-  const [runnerTrips, setRunnerTrips] = useState<RunnerTrip[]>(() => {
-    const saved = localStorage.getItem('shopit_runner_trips');
-    return saved ? JSON.parse(saved) : INITIAL_RUNNER_TRIPS;
-  });
-
-  // Phase 5: Student Artisan Growth, Bespoke Commissions & Social Commerce
-  const [commissions, setCommissions] = useState<CustomCommissionRequest[]>(() => {
-    const saved = localStorage.getItem('shopit_commissions');
-    return saved ? JSON.parse(saved) : INITIAL_COMMISSIONS;
-  });
-  const [campusDrops, setCampusDrops] = useState<CampusFlashDrop[]>(() => {
-    const saved = localStorage.getItem('shopit_campus_drops');
-    return saved ? JSON.parse(saved) : INITIAL_CAMPUS_DROPS;
-  });
-  const [stylePosts, setStylePosts] = useState<CampusStylePost[]>(() => {
-    const saved = localStorage.getItem('shopit_style_posts');
-    return saved ? JSON.parse(saved) : INITIAL_STYLE_POSTS;
-  });
-  const [artisanTiers] = useState<ArtisanTierInfo[]>(ARTISAN_TIERS);
-
-  // Phase 6: Campus Ambassador Network, Leaderboard & Quick-List States
-  const [ambassadors, setAmbassadors] = useState<CampusAmbassador[]>(() => {
-    const saved = localStorage.getItem('shopit_ambassadors');
-    return saved ? JSON.parse(saved) : INITIAL_AMBASSADORS;
-  });
-  const [hallLeaderboard, setHallLeaderboard] = useState<HallLeaderboardEntry[]>(() => {
-    const saved = localStorage.getItem('shopit_hall_leaderboard');
-    return saved ? JSON.parse(saved) : INITIAL_HALL_LEADERBOARD;
-  });
-  const [referralRewards, setReferralRewards] = useState<ReferralReward[]>(() => {
-    const saved = localStorage.getItem('shopit_referral_rewards');
-    return saved ? JSON.parse(saved) : INITIAL_REFERRAL_REWARDS;
-  });
-  const [activeAmbassadorCode, setActiveAmbassadorCode] = useState<string | null>(null);
+  // Phase 4: Campus Safe Pickup Spots (verified static locations)
+  const [safePickupSpots] = useState<SafePickupSpot[]>(INITIAL_SAFE_SPOTS);
   const [isQuickListModalOpen, setIsQuickListModalOpen] = useState<boolean>(false);
+  const [editingProduct, setEditingProduct] = useState<Product | null>(null);
   const [isVerificationModalOpen, setIsVerificationModalOpen] = useState<boolean>(false);
   const openVerificationModal = () => setIsVerificationModalOpen(true);
   const closeVerificationModal = () => setIsVerificationModalOpen(false);
@@ -700,14 +581,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Phase 3: Admin & Moderation States (populated strictly from server DB for admins)
   const [adminSubRole, setAdminSubRole] = useState<AdminSubRole>('activity');
   const [verificationRequests, setVerificationRequests] = useState<SellerVerificationRequest[]>([]);
-  const [disputes, setDisputes] = useState<DisputeTicket[]>(() => {
-    const saved = localStorage.getItem('shopit_disputes');
-    return saved ? JSON.parse(saved) : INITIAL_DISPUTES;
-  });
-  const [antiBypassFlags, setAntiBypassFlags] = useState<AntiBypassFlag[]>(() => {
-    const saved = localStorage.getItem('shopit_anti_bypass_flags');
-    return saved ? JSON.parse(saved) : INITIAL_ANTI_BYPASS_FLAGS;
-  });
+  const [disputes, setDisputes] = useState<DisputeTicket[]>([]);
+  const [antiBypassFlags, setAntiBypassFlags] = useState<AntiBypassFlag[]>([]);
   const [feeSettings, setFeeSettings] = useState<FeeSettings>(DEFAULT_FEE_SETTINGS);
 
   // Registered users repository (loaded exclusively from server database for admins)
@@ -903,8 +778,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, [activeView, selectedProductId, products]);
 
   useEffect(() => {
-    if (activeView === 'seller_shop' && selectedSellerId && !sellers.some(s => s.id === selectedSellerId)) {
-      fetch(`/api/sellers/${encodeURIComponent(selectedSellerId)}`, { credentials: 'include' })
+    if ((activeView === 'profile' || activeView === 'seller_shop') && activeProfileSlug && !sellers.some(s => s.id === activeProfileSlug)) {
+      fetch(`/api/sellers/${encodeURIComponent(activeProfileSlug)}`, { credentials: 'include' })
         .then(r => r.json())
         .then(d => {
           if (d.status && d.seller) {
@@ -913,7 +788,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         })
         .catch(() => {});
     }
-  }, [activeView, selectedSellerId, sellers]);
+  }, [activeView, activeProfileSlug, sellers]);
 
   // Keep broadcast & emergency killswitches synchronized across all active visitor sessions
   useEffect(() => {
@@ -1004,34 +879,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         if (data.status && Array.isArray(data.notifications)) setDbNotifications(data.notifications);
       })
       .catch(() => {});
-
-    // Fetch custom commissions from PostgreSQL
-    fetch('/api/commissions', { headers, credentials: 'include' })
-      .then(res => res.json())
-      .then(data => {
-        if (data.status && Array.isArray(data.commissions)) setCommissions(data.commissions);
-      })
-      .catch(() => {});
-
-    // One-time browser migration cleanup for non-user legacy keys
-    try {
-      const hasLegacyStranded = Boolean(
-        localStorage.getItem('shopit_products_ready_made') ||
-        localStorage.getItem('shopit_sellers') ||
-        localStorage.getItem('shopit_orders')
-      );
-      if (hasLegacyStranded && !localStorage.getItem('shopit_migrated_to_neon_v1')) {
-        localStorage.setItem('shopit_migrated_to_neon_v1', 'true');
-        localStorage.removeItem('shopit_products_ready_made');
-        localStorage.removeItem('shopit_sellers');
-        localStorage.removeItem('shopit_orders');
-        localStorage.removeItem('shopit_wallets');
-        localStorage.removeItem('shopit_ledger_entries_v5');
-        localStorage.removeItem('shopit_disputes');
-        localStorage.removeItem('shopit_conversations');
-        localStorage.removeItem('shopit_messages');
-      }
-    } catch {}
   }, [currentUser?.id, currentUser?.role, refreshFinancials]);
 
   // Sync cart and wishlist to PostgreSQL only on explicit user changes (not initial hydration)
@@ -1088,27 +935,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   useEffect(() => {
     localStorage.setItem('shopit_low_data', String(lowDataMode));
   }, [lowDataMode]);
-
-  useEffect(() => {
-    localStorage.setItem('shopit_campus_drops', JSON.stringify(campusDrops));
-  }, [campusDrops]);
-
-  useEffect(() => {
-    localStorage.setItem('shopit_style_posts', JSON.stringify(stylePosts));
-  }, [stylePosts]);
-
-  // Phase 6: Ambassador & Leaderboard persistence
-  useEffect(() => {
-    localStorage.setItem('shopit_ambassadors', JSON.stringify(ambassadors));
-  }, [ambassadors]);
-
-  useEffect(() => {
-    localStorage.setItem('shopit_hall_leaderboard', JSON.stringify(hallLeaderboard));
-  }, [hallLeaderboard]);
-
-  useEffect(() => {
-    localStorage.setItem('shopit_referral_rewards', JSON.stringify(referralRewards));
-  }, [referralRewards]);
 
   // Escrow auto-release is executed authoritatively on the server via /api/cron/daily.
 
@@ -1186,7 +1012,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
     const newUser: User = {
       id: userData.id || `user_${Date.now()}`,
-      name: userData.name || 'Shopper',
+      name: userData.name || 'Member',
+      displayName: userData.displayName || (userData.name ? userData.name.trim().split(/\s+/)[0] : 'Member'),
+      profileSlug: userData.profileSlug,
+      avatarUrl: userData.avatarUrl,
+      coverUrl: userData.coverUrl,
+      bio: userData.bio,
+      campus: userData.campus,
+      interests: userData.interests,
+      notificationPrefs: userData.notificationPrefs,
+      privacySettings: userData.privacySettings,
       email: userData.email || 'customer@shopit.ng',
       role: userData.role || 'buyer',
       ...(userData.subRole ? { subRole: userData.subRole } : {}),
@@ -1207,7 +1042,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setRegisteredUsers([]);
       setVerificationRequests([]);
     }
-    notify(`Welcome back, ${newUser.name}!`, 'success');
+    notify(`Welcome back, ${newUser.displayName || newUser.name}!`, 'success');
   };
 
   const logout = () => {
@@ -1230,6 +1065,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setMessages({});
     setActiveConversationId(null);
     setPendingChatTarget(null);
+    setEditingProduct(null);
     localStorage.removeItem('shopit_session_token');
     setActiveView('catalog');
     notify('Logged out successfully', 'info');
@@ -1358,12 +1194,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     bio: string;
     under18: boolean;
     guardianName?: string;
-    guardianPhone?: string;
   }) => {
     const resolvedArea = sellerData.locationArea || sellerData.location?.area || 'Lagos Mainland';
 
     // Authenticated buyer upgrading to seller shop
-    if (!pendingAuthData?.signupVerificationToken) {
+    if (!pendingAuthData?.email) {
       if (currentUser) {
         try {
           const resp = await fetch('/api/sellers/upgrade', {
@@ -1378,7 +1213,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               locationArea: resolvedArea,
               under18: sellerData.under18,
               guardianName: sellerData.guardianName,
-              guardianPhone: sellerData.guardianPhone,
             }),
           });
           const data = await resp.json();
@@ -1405,7 +1239,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       setPreferredSignupRole('seller');
       setAuthTab('signup');
-      notify('Please create your account and verify your email OTP first before launching your shop.', 'error');
+      notify('Please fill out your account details before launching your shop.', 'error');
       return;
     }
 
@@ -1422,7 +1256,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           age: pendingAuthData.age,
           hasGuardianConsent: pendingAuthData.hasGuardianConsent,
           guardianName: sellerData.guardianName || pendingAuthData.guardianName,
-          guardianPhone: sellerData.guardianPhone,
           signupVerificationToken: pendingAuthData.signupVerificationToken,
           shopName: sellerData.shopName,
           bio: sellerData.bio,
@@ -1457,7 +1290,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         under18: sellerData.under18,
         guardianConsent: sellerData.under18,
         guardianName: sellerData.guardianName,
-        guardianPhone: sellerData.guardianPhone,
         badges: [],
         level: 1,
         rating: 5.0,
@@ -1501,7 +1333,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       Product,
       'id' | 'createdAt' | 'rating' | 'reviewCount' | 'reviews' | 'serviceFee' | 'displayPrice' | 'isSoldOut' | 'isNewArrival'
     > &
-      Partial<Pick<Product, 'serviceFee' | 'displayPrice' | 'isSoldOut' | 'isNewArrival'>>
+      Partial<Pick<Product, 'serviceFee' | 'displayPrice' | 'isSoldOut' | 'isNewArrival' | 'isDraft' | 'isPaused'>>
   ) => {
     const isSellerVerified = Boolean(
       currentSeller?.isVerifiedSeller ||
@@ -1541,6 +1373,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       createdAt: new Date().toISOString().split('T')[0],
       isSoldOut: (newProd.stock ?? 1) <= 0,
       isNewArrival: true,
+      isDraft: Boolean(newProd.isDraft),
+      isPaused: Boolean(newProd.isPaused),
     };
 
     try {
@@ -1556,17 +1390,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return;
       }
 
-      const savedProduct: Product = {
-        ...product,
-        id: data.productId || tempId,
-      };
-      setProducts(prev => [savedProduct, ...prev]);
+      if (!product.isDraft && !product.isPaused) {
+        const savedProduct: Product = {
+          ...product,
+          id: data.productId || tempId,
+        };
+        setProducts(prev => [savedProduct, ...prev]);
+      }
 
-      if (currentSeller && !isSellerVerified) {
-        notify('Craft published! Remember to complete your NIN identity verification before requesting bank payouts.', 'info');
+      if (product.isDraft) {
+        notify(`Draft "${product.title}" saved to your profile!`, 'success');
+      } else if (currentSeller && !isSellerVerified) {
+        notify('Craft published! Remember to complete your NIN identity verification before requesting bank withdrawals.', 'info');
       } else {
         notify(`Product "${product.title}" listed successfully in the marketplace!`, 'success');
       }
+      await refreshCurrentUser();
     } catch (err: any) {
       console.warn('[Add Product Network Error]:', err.message);
       notify('Unable to reach server to publish product. Please try again.', 'error');
@@ -1607,6 +1446,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         notify(data.message || 'Failed to update product in database.', 'error');
         return;
       }
+      if (updates.isDraft !== undefined || updates.isPaused !== undefined) {
+        void fetchMarketplaceData();
+      }
       notify('Product updated', 'success');
     } catch (err: any) {
       setProducts(previousProducts);
@@ -1644,6 +1486,64 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!target) return;
     const newStock = target.stock > 0 ? 0 : 5;
     await updateProduct(id, { stock: newStock, isSoldOut: newStock === 0 });
+  };
+
+  const fetchMyListings = useCallback(async (): Promise<Product[]> => {
+    if (!currentUser?.id) return [];
+    try {
+      const res = await fetch('/api/products/mine', { headers: getAuthHeaders(), credentials: 'include' });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.status && Array.isArray(data.products)) {
+        return data.products;
+      }
+      return [];
+    } catch {
+      return [];
+    }
+  }, [currentUser?.id]);
+
+  const toggleProductPin = async (productId: string, isPinned: boolean): Promise<boolean> => {
+    try {
+      const res = await fetch(`/api/products/${encodeURIComponent(productId)}/pin`, {
+        method: 'PATCH',
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        credentials: 'include',
+        body: JSON.stringify({ isPinned }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.status) {
+        notify(data.message || 'Could not update pin state.', 'error');
+        return false;
+      }
+      setProducts(prev => prev.map(p => (p.id === productId ? { ...p, isPinned } : p)));
+      notify(isPinned ? 'Item pinned to top of your profile.' : 'Item unpinned.', 'success');
+      return true;
+    } catch {
+      notify('Unable to update pinned item.', 'error');
+      return false;
+    }
+  };
+
+  const toggleProductPause = async (productId: string, isPaused: boolean): Promise<boolean> => {
+    try {
+      const res = await fetch(`/api/products/${encodeURIComponent(productId)}`, {
+        method: 'PUT',
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        credentials: 'include',
+        body: JSON.stringify({ isPaused }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.status) {
+        notify(data.message || 'Failed to update product visibility.', 'error');
+        return false;
+      }
+      void fetchMarketplaceData();
+      notify(isPaused ? 'Listing paused and hidden from marketplace.' : 'Listing resumed and live!', 'info');
+      return true;
+    } catch {
+      notify('Unable to update listing visibility.', 'error');
+      return false;
+    }
   };
 
   const toggleVacationMode = async (sellerId: string) => {
@@ -1853,10 +1753,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         transactions: sellerLedger,
       }
     : null;
-
-  const currentSecurityProfile: SecurityProfile = currentUser
-    ? securityProfiles[currentUser.id] || securityProfiles['seller_amaka'] || securityProfiles['user_tobi_buyer']
-    : securityProfiles['user_tobi_buyer'];
 
   const toggleWishlist = (productId: string) => {
     wishlistDirtyRef.current = true;
@@ -2068,7 +1964,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const newDispute: DisputeTicket = {
           id: data.disputeId || `DISP-${Date.now()}`,
           orderId,
-          buyerMaskedId: ord.buyerMaskedId,
+          buyerDisplayName: ord.buyerDisplayName || currentUser?.displayName || 'Customer',
+          buyerAvatarUrl: ord.buyerAvatarUrl || currentUser?.avatarUrl,
+          buyerProfileSlug: ord.buyerProfileSlug || currentUser?.profileSlug,
           buyerName: ord.buyerName || 'Customer',
           sellerId: ord.items[0]?.sellerId || '',
           sellerShopName: ord.items[0]?.sellerShopName || 'Seller Shop',
@@ -2857,7 +2755,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           selfiePhotoUrl: data.selfiePhotoUrl,
           under18: data.under18,
           guardianName: data.guardianName,
-          guardianPhone: data.guardianPhone,
           guardianConsent: data.guardianConsentSigned,
         }),
       }).catch(err => console.warn('Verification server submit warning:', err.message));
@@ -2874,7 +2771,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             verifiedLegalName: data.ownerName,
             under18: data.under18,
             guardianName: data.guardianName,
-            guardianPhone: data.guardianPhone,
             guardianConsent: !!data.guardianConsentSigned,
           };
         }
@@ -2998,7 +2894,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (flag.senderRole === 'seller') {
         void toggleWalletFreeze(flag.senderId, true, 'Anti-bypass repeated violation');
       }
-      notify(`Account for sender ${flag.senderMaskedName} frozen for safety review.`, 'error');
+      notify(`Account for sender ${flag.senderDisplayName} frozen for safety review.`, 'error');
     } else {
       notify(`Flag action: ${action} applied.`, 'info');
     }
@@ -3439,32 +3335,201 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  const openSellerShop = (sellerId: string) => {
-    setSelectedSellerId(sellerId);
-    _setActiveView('seller_shop');
+  const openProfile = (slugOrId: string) => {
+    const clean = String(slugOrId || '').trim();
+    if (!clean) return;
+    setActiveProfileSlug(clean);
+    _setActiveView('profile');
     if (typeof window !== 'undefined') {
-      const targetSearch = `?shop=${encodeURIComponent(sellerId)}`;
+      const targetSearch = `?profile=${encodeURIComponent(clean)}`;
       if (window.location.pathname !== '/' || window.location.search !== targetSearch) {
-        window.history.pushState({ view: 'seller_shop', sellerId }, '', `/${targetSearch}`);
+        window.history.pushState({ view: 'profile', profileSlug: clean }, '', `/${targetSearch}`);
       }
     }
-    const sel = sellers.find(s => s.id === sellerId);
-    if (!sel) {
-      fetch(`/api/sellers/${encodeURIComponent(sellerId)}`, { credentials: 'include' })
-        .then(r => r.json())
-        .then(d => {
-          if (d.status && d.seller) {
-            setSellers(prev => (prev.some(s => s.id === d.seller.id) ? prev : [d.seller, ...prev]));
-          }
-        })
-        .catch(() => {});
-    }
-    trackActivity('SELLER_SHOP_VIEWED', {
-      targetType: 'seller',
-      targetId: sellerId,
-      details: sel ? { shopName: sel.shopName, campus: sel.campus } : {},
+    trackActivity('PROFILE_VIEWED', {
+      targetType: 'profile',
+      targetId: clean,
     });
     window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const openAccountSettings = () => {
+    if (!currentUser) {
+      openAuthModal('login');
+      notify('Please sign in to access your Account Settings.', 'info');
+      return;
+    }
+    setActiveView('account_settings');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const updateMyProfile: AppContextType['updateMyProfile'] = async payload => {
+    try {
+      const res = await fetch('/api/profiles/me', {
+        method: 'PATCH',
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        credentials: 'include',
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.status) {
+        notify(data.message || 'Could not update profile.', 'error');
+        return { status: false, message: data.message };
+      }
+      await Promise.all([refreshCurrentUser(), fetchMarketplaceData()]);
+      if (data.profile?.profileSlug && activeView === 'profile') {
+        setActiveProfileSlug(data.profile.profileSlug);
+        if (typeof window !== 'undefined') {
+          window.history.replaceState({ view: 'profile', profileSlug: data.profile.profileSlug }, '', `/?profile=${encodeURIComponent(data.profile.profileSlug)}`);
+        }
+      }
+      notify(data.message || 'Profile saved!', 'success');
+      return { status: true, profile: data.profile };
+    } catch {
+      notify('Network error saving profile.', 'error');
+      return { status: false, message: 'Network error saving profile.' };
+    }
+  };
+
+  const updateMySettings: AppContextType['updateMySettings'] = async payload => {
+    try {
+      const res = await fetch('/api/profiles/me/settings', {
+        method: 'PATCH',
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        credentials: 'include',
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.status) {
+        notify(data.message || 'Could not update account settings.', 'error');
+        return { status: false, message: data.message };
+      }
+      setCurrentUser(prev =>
+        prev
+          ? {
+              ...prev,
+              notificationPrefs: data.notificationPrefs || prev.notificationPrefs,
+              privacySettings: data.privacySettings || prev.privacySettings,
+            }
+          : prev
+      );
+      notify(data.message || 'Settings saved.', 'success');
+      return {
+        status: true,
+        message: data.message,
+        notificationPrefs: data.notificationPrefs,
+        privacySettings: data.privacySettings,
+      };
+    } catch {
+      notify('Network error saving settings.', 'error');
+      return { status: false, message: 'Network error saving settings.' };
+    }
+  };
+
+  const requestEmailChangeOtp = async (newEmail: string, currentPassword: string) => {
+    try {
+      const res = await fetch('/api/auth/change-email/request-otp', {
+        method: 'POST',
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        credentials: 'include',
+        body: JSON.stringify({ newEmail, currentPassword }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.status) {
+        notify(data.message || 'Unable to send confirmation code.', 'error');
+        return { status: false, message: data.message };
+      }
+      notify(data.message || 'Confirmation code sent to your new email.', 'success');
+      return { status: true, message: data.message };
+    } catch {
+      notify('Network error sending confirmation code.', 'error');
+      return { status: false, message: 'Network error' };
+    }
+  };
+
+  const confirmEmailChange = async (newEmail: string, code: string, currentPassword: string) => {
+    try {
+      const res = await fetch('/api/auth/change-email/confirm', {
+        method: 'POST',
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        credentials: 'include',
+        body: JSON.stringify({ newEmail, code, currentPassword }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.status) {
+        notify(data.message || 'Failed to verify email change code.', 'error');
+        return { status: false, message: data.message };
+      }
+      if (data.sessionToken && typeof localStorage !== 'undefined') {
+        localStorage.setItem('shopit_session_token', data.sessionToken);
+      }
+      if (data.email) {
+        setCurrentUser(prev => (prev ? { ...prev, email: data.email } : prev));
+      }
+      await refreshCurrentUser();
+      notify(data.message || 'Email address updated!', 'success');
+      return { status: true, message: data.message };
+    } catch {
+      notify('Network error confirming email change.', 'error');
+      return { status: false, message: 'Network error' };
+    }
+  };
+
+  const exportMyData = async (): Promise<boolean> => {
+    try {
+      const res = await fetch('/api/profiles/me/export', {
+        headers: getAuthHeaders(),
+        credentials: 'include',
+      });
+      if (!res.ok) {
+        notify('Unable to download your data export right now.', 'error');
+        return false;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `shopit-my-data-${new Date().toISOString().split('T')[0]}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      notify('Personal data JSON exported.', 'success');
+      return true;
+    } catch {
+      notify('Error downloading personal data.', 'error');
+      return false;
+    }
+  };
+
+  const deleteMyAccount = async (password: string, confirmation: string) => {
+    try {
+      const res = await fetch('/api/profiles/me', {
+        method: 'DELETE',
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        credentials: 'include',
+        body: JSON.stringify({ password, confirmation }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.status) {
+        notify(data.message || 'Could not delete account.', 'error');
+        return { status: false, message: data.message };
+      }
+      localStorage.removeItem('shopit_session_token');
+      setCurrentUser(null);
+      setOrders([]);
+      setCart([]);
+      setWishlist([]);
+      setConversations([]);
+      setMessages({});
+      setActiveProfileSlug(null);
+      setActiveView('catalog');
+      notify(data.message || 'Your account has been deleted.', 'info');
+      return { status: true, message: data.message };
+    } catch {
+      notify('Network error deleting account.', 'error');
+      return { status: false, message: 'Network error deleting account.' };
+    }
   };
 
   const resetFilters = () => {
@@ -3590,69 +3655,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  // ==========================================
-  // PHASE 5: ARTISAN COMMISSIONS & SOCIAL DROPS
-  // ==========================================
-
-  const submitCommissionRequest = (
-    requestData: Omit<CustomCommissionRequest, 'id' | 'createdAt' | 'status' | 'buyerMaskedId'>
-  ) => {
-    const id = `comm_${Date.now()}`;
-    const newComm: CustomCommissionRequest = {
-      ...requestData,
-      id,
-      buyerMaskedId: currentUser?.name ? `Buyer #${currentUser.id.slice(-4)}` : 'Buyer #7821',
-      status: 'pending_quote',
-      createdAt: 'Just now',
-    };
-
-    setCommissions(prev => [newComm, ...prev]);
-    trackActivity('COMMISSION_SUBMITTED', {
-      targetType: 'seller',
-      targetId: requestData.artisanId,
-      details: { title: requestData.title, shopName: requestData.artisanShopName },
-    });
-    notify(`Custom commission request submitted to ${requestData.artisanShopName}!`, 'success');
+  const openQuickListModal = (productToEdit?: Product) => {
+    setEditingProduct(productToEdit || null);
+    setIsQuickListModalOpen(true);
   };
-
-  const updateCommissionStatus = (
-    commissionId: string,
-    status: CustomCommissionRequest['status'],
-    wipPhoto?: string
-  ) => {
-    setCommissions(prev =>
-      prev.map(c => {
-        if (c.id === commissionId) {
-          return {
-            ...c,
-            status,
-            ...(wipPhoto ? { artisanWorkInProgressPhoto: wipPhoto } : {}),
-          };
-        }
-        return c;
-      })
-    );
-    notify(`Commission #${commissionId.slice(-4)} status updated: ${status.replace('_', ' ')}`, 'info');
+  const closeQuickListModal = () => {
+    setIsQuickListModalOpen(false);
+    setEditingProduct(null);
   };
-
-  const toggleLikeStylePost = (postId: string) => {
-    setStylePosts(prev =>
-      prev.map(p => {
-        if (p.id === postId) {
-          const hasLiked = !!p.userHasLiked;
-          return {
-            ...p,
-            userHasLiked: !hasLiked,
-            likesCount: hasLiked ? p.likesCount - 1 : p.likesCount + 1,
-          };
-        }
-        return p;
-      })
-    );
-  };
-
-  const openQuickListModal = () => setIsQuickListModalOpen(true);
-  const closeQuickListModal = () => setIsQuickListModalOpen(false);
 
   return (
     <AppContext.Provider
@@ -3679,6 +3689,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updateProduct,
         deleteProduct,
         toggleProductStock,
+        fetchMyListings,
+        toggleProductPin,
+        toggleProductPause,
+        updateMyProfile,
+        updateMySettings,
+        requestEmailChangeOtp,
+        confirmEmailChange,
+        exportMyData,
+        deleteMyAccount,
         sellers,
         getSellerById,
         currentSeller,
@@ -3707,9 +3726,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setActiveView,
         isCatalogLoading,
         selectedProductId,
-        selectedSellerId,
+        activeProfileSlug,
         openProduct,
-        openSellerShop,
+        openProfile,
+        openAccountSettings,
         subscribeRestockAlert,
         checkRestockAlert,
         wishlist,
@@ -3767,23 +3787,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         addAdminAuditLog,
         // Phase 4: Campus Safe Logistics & Handshake OTP
         safePickupSpots,
-        campusRunners,
-        runnerTrips,
         verifyHandshakeOtp,
-        // Phase 5: Student Artisan Growth & Social Commerce
-        commissions,
-        campusDrops,
-        stylePosts,
-        artisanTiers,
-        submitCommissionRequest,
-        updateCommissionStatus,
-        toggleLikeStylePost,
-        // Phase 6: Campus Ambassador & Quick-List
-        ambassadors,
-        hallLeaderboard,
-        referralRewards,
-        activeAmbassadorCode,
+        // Quick-List
         isQuickListModalOpen,
+        editingProduct,
         openQuickListModal,
         closeQuickListModal,
         // Phase 3: Problem Modal
@@ -3802,7 +3809,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         sendPayoutAccountOtp,
         resendSignupOtp,
         toggleWalletFreeze,
-        securityProfile: currentSecurityProfile,
         paymentsEnabled,
         payoutsEnabled,
         isCheckoutModalOpen,

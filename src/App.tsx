@@ -27,6 +27,7 @@ import { Loading } from './components/Loading';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { NotFoundView } from './components/NotFoundView';
 import { ResetPasswordPage } from './components/ResetPasswordPage';
+import { AccountSettingsView } from './components/AccountSettingsView';
 import { Store, ShieldCheck, MapPin, Star, ArrowRight, PackageOpen, ShoppingBag, ShieldAlert, ArrowLeft, Clock } from 'lucide-react';
 
 
@@ -44,14 +45,14 @@ const MarketplaceContent: React.FC = () => {
     activeView,
     setActiveView,
     selectedProductId,
-    selectedSellerId,
+    activeProfileSlug,
     isCatalogLoading,
     products,
     filteredProducts,
     sellers,
     safePickupSpots,
     setSelectedCampus,
-    openSellerShop,
+    openProfile,
     resetFilters,
     openQuickListModal,
     openAuthModal,
@@ -61,7 +62,6 @@ const MarketplaceContent: React.FC = () => {
   } = useApp();
 
   const selectedProduct = products.find(p => p.id === selectedProductId);
-  const selectedSeller = sellers.find(s => s.id === selectedSellerId);
 
   // Full-page initial loader with smooth fade-out
   if (isInitialLoading) {
@@ -173,7 +173,7 @@ const MarketplaceContent: React.FC = () => {
                     {currentUser?.role === 'seller' ? (
                       <>
                         <button
-                          onClick={openQuickListModal}
+                          onClick={() => openQuickListModal()}
                           className="px-5 py-3 bg-[#FF6B00] hover:bg-[#FF7A1A] text-[#111111] border-2 border-[#111111] dark:border-stone-800 text-xs sm:text-sm font-black rounded-xl transition-all flex items-center gap-2 shadow-[0_3px_0_#111111] dark:shadow-none active:translate-y-0.5"
                         >
                           <span className="w-5 h-5 rounded-full bg-[#9FE870] text-[#111111] flex items-center justify-center text-xs font-black">
@@ -263,7 +263,7 @@ const MarketplaceContent: React.FC = () => {
                   {sellers.map((seller, idx) => (
                     <div
                       key={seller.id}
-                      onClick={() => openSellerShop(seller.id)}
+                      onClick={() => openProfile(seller.profileSlug || seller.id)}
                       style={{ animationDelay: `${Math.min(idx * 50, 300)}ms` }}
                       className="card-lift card-stagger bg-white dark:bg-[#15161C] p-4 rounded-2xl border border-[#E4E4E7] dark:border-[#27272A] hover:border-[#FF6B00] dark:hover:border-[#FF6B00] transition-all cursor-pointer flex flex-col justify-between shadow-2xs hover:shadow-xs"
                     >
@@ -339,22 +339,26 @@ const MarketplaceContent: React.FC = () => {
           )
         )}
 
-        {activeView === 'seller_shop' && (
-          selectedSellerId && selectedSeller ? (
+        {(activeView === 'profile' || activeView === 'seller_shop') && (
+          activeProfileSlug ? (
             <div className="animate-fade-in-up">
               <SellerShopView
-                sellerId={selectedSellerId}
+                slugOrId={activeProfileSlug}
                 onBack={() => setActiveView('catalog')}
               />
             </div>
-          ) : isCatalogLoading && selectedSellerId ? (
-            <Loading fullPage text="Loading artisan shop..." />
           ) : (
             <NotFoundView
-              title="Artisan Shop Not Found"
-              message="We could not find this seller profile. The student shop may have closed or changed its address."
+              title="Profile Not Found"
+              message="We could not find this member profile or shop."
             />
           )
+        )}
+
+        {activeView === 'account_settings' && (
+          <div className="animate-fade-in-up">
+            <AccountSettingsView />
+          </div>
         )}
 
         {activeView === 'campus_logistics' && (

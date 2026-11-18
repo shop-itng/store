@@ -12,7 +12,7 @@ import {
 } from 'lucide-react';
 
 export const Footer: React.FC = () => {
-  const { setSelectedState, setSelectedCategory, setActiveView, openAuthModal, currentUser } = useApp();
+  const { setSelectedState, setSelectedCategory, setActiveView, openAuthModal, openProfile, openAccountSettings, currentUser } = useApp();
   const [showAllStates, setShowAllStates] = useState(false);
 
   // Group Nigerian states by zones
@@ -132,6 +132,28 @@ export const Footer: React.FC = () => {
                   className="hover:text-[#FF6B00] dark:hover:text-[#FF6B00] font-medium"
                 >
                   Open Youth Shop
+                </button>
+              </li>
+              <li>
+                <button
+                  onClick={() => {
+                    if (currentUser) {
+                      openProfile(currentUser.profileSlug || currentUser.id);
+                    } else {
+                      openAuthModal('login');
+                    }
+                  }}
+                  className="hover:text-[#FF6B00] dark:hover:text-[#FF6B00] font-medium"
+                >
+                  My Profile
+                </button>
+              </li>
+              <li>
+                <button
+                  onClick={() => openAccountSettings()}
+                  className="hover:text-[#FF6B00] dark:hover:text-[#FF6B00] font-medium"
+                >
+                  Account Settings
                 </button>
               </li>
               <li>

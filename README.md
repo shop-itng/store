@@ -18,6 +18,7 @@ In the Vercel project deployment screen, open **Environment Variables** and add 
 | :--- | :--- | :--- |
 | `DATABASE_URL` | **Required in Production**: Pooled PostgreSQL connection string (Neon / Postgres) | `postgresql://user:pass@ep-xyz-pooler.region.aws.neon.tech/neondb?sslmode=verify-full` |
 | `APP_SECRET` | Master 64-hex-character secret for HKDF key derivation (OTP hashing, NIN hash, AES-256-GCM KYC docs) | Generate with `openssl rand -hex 32` |
+| `CRON_SECRET` | Bearer secret protecting `/api/cron/escrow` and `/api/cron/daily` | Generate with `openssl rand -hex 32` |
 | `ADMIN_EMAIL` | Email address for initial superadmin provisioning | `admin@yourdomain.com` |
 | `ADMIN_INITIAL_PASSWORD` | Initial superadmin password (must be changed on first login) | Strong random password |
 | `FLW_PUBLIC_KEY` | Flutterwave public key | `FLWPUBK_TEST-...` (from Flutterwave Dashboard) |

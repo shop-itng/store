@@ -16,6 +16,7 @@ import {
   CORE_SCHEMA_TABLES,
   getDatabaseUrl,
   getDatabaseUrlSource,
+  getPool,
   pingPostgres,
   query,
   runMigration,
@@ -69,17 +70,27 @@ async function main() {
     }
   }
 
-  // Verify integer kobo schema columns
+  // Verify integer kobo schema columns (and absence of duplicate NUMERIC columns)
   console.log('\n--- Integer Kobo Schema Verification ---');
   const koboChecks = [
+    { table: 'shopit_products', col: 'seller_price_kobo' },
+    { table: 'shopit_products', col: 'service_fee_kobo' },
+    { table: 'shopit_products', col: 'display_price_kobo' },
+    { table: 'shopit_products', col: 'delivery_pickup_fee_kobo' },
+    { table: 'shopit_products', col: 'delivery_local_fee_kobo' },
+    { table: 'shopit_orders', col: 'subtotal_kobo' },
+    { table: 'shopit_orders', col: 'service_fee_kobo' },
+    { table: 'shopit_orders', col: 'delivery_fee_kobo' },
+    { table: 'shopit_orders', col: 'discount_total_kobo' },
+    { table: 'shopit_orders', col: 'grand_total_kobo' },
+    { table: 'shopit_payments', col: 'amount_kobo' },
     { table: 'shopit_wallets', col: 'pending_balance_kobo' },
     { table: 'shopit_wallets', col: 'available_balance_kobo' },
     { table: 'shopit_wallets', col: 'total_withdrawn_kobo' },
     { table: 'shopit_ledger_entries', col: 'amount_kobo' },
     { table: 'shopit_ledger_entries', col: 'fee_kobo' },
     { table: 'shopit_ledger_entries', col: 'balance_after_kobo' },
-    { table: 'shopit_orders', col: 'subtotal_kobo' },
-    { table: 'shopit_orders', col: 'grand_total_kobo' },
+    { table: 'shopit_disputes', col: 'amount_held_in_escrow_kobo' },
     { table: 'shopit_commissions', col: 'budget_kobo' },
   ];
 
@@ -90,6 +101,34 @@ async function main() {
     } catch (err: any) {
       hasFailures = true;
       console.error(`  ✗ ${check.table}.${check.col} : ${err.message}`);
+    }
+  }
+
+  const forbiddenLegacyNumericCols = [
+    { table: 'shopit_products', col: 'seller_price' },
+    { table: 'shopit_products', col: 'display_price' },
+    { table: 'shopit_orders', col: 'subtotal' },
+    { table: 'shopit_orders', col: 'grand_total' },
+    { table: 'shopit_payments', col: 'amount_naira' },
+    { table: 'shopit_wallets', col: 'pending_balance' },
+    { table: 'shopit_wallets', col: 'available_balance' },
+    { table: 'shopit_ledger_entries', col: 'amount' },
+    { table: 'shopit_ledger_entries', col: 'balance_after' },
+    { table: 'shopit_disputes', col: 'amount_held_in_escrow' },
+    { table: 'shopit_commissions', col: 'budget_naira' },
+  ];
+  const pool = await getPool();
+  for (const legacy of forbiddenLegacyNumericCols) {
+    let stillExists = false;
+    try {
+      await pool.query(`SELECT ${legacy.col} FROM ${legacy.table} LIMIT 1`);
+      stillExists = true;
+    } catch {
+      stillExists = false;
+    }
+    if (stillExists) {
+      hasFailures = true;
+      console.error(`  ✗ Legacy duplicate column still present: ${legacy.table}.${legacy.col}`);
     }
   }
 

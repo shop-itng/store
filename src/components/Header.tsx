@@ -14,6 +14,7 @@ import {
   X,
   Sun,
   Moon,
+  Settings,
 } from 'lucide-react';
 
 export const Header: React.FC = () => {
@@ -26,6 +27,8 @@ export const Header: React.FC = () => {
     wishlist,
     conversations,
     openQuickListModal,
+    openProfile,
+    openAccountSettings,
     userLocation,
     setUserLocation,
     notify,
@@ -225,33 +228,66 @@ export const Header: React.FC = () => {
             )}
           </button>
 
-          {/* User Button */}
+          {/* User Profile Pill, Settings, & Role Button */}
           {currentUser ? (
-            currentUser.role === 'admin' ? (
+            <div className="flex items-center gap-1.5">
               <button
-                onClick={() => setActiveView('admin')}
-                className="px-2.5 py-1.5 sm:px-3.5 sm:py-2 text-[11px] sm:text-xs font-black text-[#9FE870] bg-[#111111] border-2 border-[#FF6B00] hover:bg-[#18181B] rounded-xl transition-colors shadow-xs flex items-center gap-1.5"
+                type="button"
+                onClick={() => openProfile(currentUser.profileSlug || currentUser.id)}
+                title="View My Profile"
+                className="flex items-center gap-1.5 px-2 py-1 sm:px-2.5 sm:py-1.5 rounded-xl border border-[#E4E4E7] dark:border-[#27272A] bg-white dark:bg-[#15161C] hover:border-[#FF6B00] transition-colors"
               >
-                <Shield className="w-3.5 h-3.5 text-[#FF6B00]" />
-                <span className="hidden xs:inline">Moderator</span>
-                <span className="xs:hidden">Admin</span>
+                <span className="w-6 h-6 rounded-full overflow-hidden border border-[#FF6B00] bg-[#FFF4EC] dark:bg-[#1E2028] text-[#FF6B00] text-[10px] font-black flex items-center justify-center shrink-0">
+                  {currentUser.avatarUrl ? (
+                    <img
+                      src={currentUser.avatarUrl}
+                      alt={currentUser.displayName || currentUser.name}
+                      className="w-full h-full object-cover"
+                    />
+                  ) : (
+                    <span>{(currentUser.displayName || currentUser.name || 'M')[0]?.toUpperCase()}</span>
+                  )}
+                </span>
+                <span className="hidden md:inline text-xs font-bold text-[#111111] dark:text-white max-w-[90px] truncate">
+                  {currentUser.displayName || currentUser.name?.split(/\s+/)[0] || 'Profile'}
+                </span>
               </button>
-            ) : currentUser.role === 'seller' ? (
+
               <button
-                onClick={() => setActiveView('seller_dashboard')}
-                className="px-2.5 py-1.5 sm:px-3.5 sm:py-2 text-[11px] sm:text-xs font-black text-[#111111] bg-[#9FE870] border-2 border-[#111111] dark:border-stone-800 rounded-xl hover:bg-[#AEF083] transition-colors flex items-center gap-1.5 shadow-[0_2px_0_#111111] dark:shadow-none"
+                type="button"
+                onClick={() => openAccountSettings()}
+                aria-label="Account Settings"
+                title="Account Settings"
+                className="p-1.5 sm:p-2 text-[#111111] dark:text-[#A1A1AA] hover:text-[#FF6B00] rounded-xl hover:bg-[#FFF4EC] dark:hover:bg-[#1E2028] border border-[#E4E4E7] dark:border-[#27272A] bg-white dark:bg-[#15161C] transition-colors"
               >
-                <Store className="w-3.5 h-3.5 text-[#FF6B00]" />
-                <span className="hidden sm:inline">My Shop</span>
+                <Settings className="w-4 h-4" />
               </button>
-            ) : (
-              <button
-                onClick={() => openAuthModal('seller_register')}
-                className="px-2.5 py-1.5 sm:px-3.5 sm:py-2 text-[11px] sm:text-xs font-black text-[#111111] bg-[#9FE870] hover:bg-[#AEF083] border-2 border-[#111111] dark:border-stone-800 shadow-[0_2px_0_#111111] dark:shadow-none rounded-xl transition-all hidden sm:block"
-              >
-                Open Shop
-              </button>
-            )
+
+              {currentUser.role === 'admin' ? (
+                <button
+                  onClick={() => setActiveView('admin')}
+                  className="px-2.5 py-1.5 sm:px-3 sm:py-2 text-[11px] sm:text-xs font-black text-[#9FE870] bg-[#111111] border-2 border-[#FF6B00] hover:bg-[#18181B] rounded-xl transition-colors shadow-xs flex items-center gap-1"
+                >
+                  <Shield className="w-3.5 h-3.5 text-[#FF6B00]" />
+                  <span className="hidden xs:inline">Mod</span>
+                </button>
+              ) : currentUser.role === 'seller' ? (
+                <button
+                  onClick={() => setActiveView('seller_dashboard')}
+                  className="px-2.5 py-1.5 sm:px-3 sm:py-2 text-[11px] sm:text-xs font-black text-[#111111] bg-[#9FE870] border-2 border-[#111111] dark:border-stone-800 rounded-xl hover:bg-[#AEF083] transition-colors flex items-center gap-1 shadow-[0_2px_0_#111111] dark:shadow-none"
+                >
+                  <Store className="w-3.5 h-3.5 text-[#FF6B00]" />
+                  <span className="hidden sm:inline">Dashboard</span>
+                </button>
+              ) : (
+                <button
+                  onClick={() => openAuthModal('seller_register')}
+                  className="px-2.5 py-1.5 sm:px-3 sm:py-2 text-[11px] sm:text-xs font-black text-[#111111] bg-[#9FE870] hover:bg-[#AEF083] border-2 border-[#111111] dark:border-stone-800 shadow-[0_2px_0_#111111] dark:shadow-none rounded-xl transition-all hidden sm:block"
+                >
+                  Open Shop
+                </button>
+              )}
+            </div>
           ) : (
             <button
               onClick={() => openAuthModal('login')}

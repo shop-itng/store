@@ -102,6 +102,7 @@ export async function generateEmailOtp(
   metadata?: Record<string, any>
 ): Promise<{
   success: boolean;
+  emailDelivered?: boolean;
   error?: string;
   waitSeconds?: number;
 }> {
@@ -129,6 +130,7 @@ export async function generateEmailOtp(
     if (!res.ok || data.status === false) {
       return {
         success: false,
+        emailDelivered: false,
         error: data.message || 'Failed to dispatch verification code.',
         waitSeconds: data.waitSeconds,
       };
@@ -136,10 +138,12 @@ export async function generateEmailOtp(
 
     return {
       success: true,
+      emailDelivered: data.emailDelivered !== false,
     };
   } catch (err: any) {
     return {
       success: false,
+      emailDelivered: false,
       error: err.message || 'Network error communicating with email server.',
     };
   }

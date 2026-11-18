@@ -16,30 +16,36 @@ export interface UserSession {
   expiresAt: number;
 }
 
-const KV_URL = (process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || '').trim();
-const KV_TOKEN = (process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || '').trim();
+function getKvUrl(): string {
+  return (process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || '').trim();
+}
+
+function getKvToken(): string {
+  return (process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || '').trim();
+}
 
 async function runKvCommand(command: string, ...args: any[]): Promise<any> {
-  if (!KV_URL || !KV_TOKEN) return null;
+  const kvUrl = getKvUrl();
+  const kvToken = getKvToken();
+  if (!kvUrl || !kvToken) return null;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 1500);
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 4000);
     const commandPayload = [
       command.toUpperCase(),
       ...args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))),
     ];
-    const url = KV_URL.replace(/\/$/, '');
+    const url = kvUrl.replace(/\/$/, '');
 
     const res = await fetch(url, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${KV_TOKEN}`,
+        Authorization: `Bearer ${kvToken}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(commandPayload),
       signal: controller.signal,
     });
-    clearTimeout(timeout);
 
     if (!res.ok) {
       return null;
@@ -48,6 +54,8 @@ async function runKvCommand(command: string, ...args: any[]): Promise<any> {
     return json.result;
   } catch {
     return null;
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
@@ -117,7 +125,7 @@ export async function createSession(data: {
     [token, data.userId, JSON.stringify(session), expiresAt]
   );
 
-  if (KV_URL && KV_TOKEN) {
+  if (getKvUrl() && getKvToken()) {
     await runKvCommand('setex', `session:${token}`, SESSION_TTL_SECONDS, JSON.stringify(session));
   }
 
@@ -138,7 +146,7 @@ export async function getSession(token: string): Promise<UserSession | null> {
 
   let session: UserSession | null = null;
 
-  if (KV_URL && KV_TOKEN) {
+  if (getKvUrl() && getKvToken()) {
     try {
       const raw = await runKvCommand('get', `session:${cleanToken}`);
       if (raw) {
@@ -226,7 +234,7 @@ export async function destroySession(token: string): Promise<void> {
     await dbQuery('DELETE FROM shopit_sessions WHERE token = $1', [cleanToken]);
   } catch {}
 
-  if (KV_URL && KV_TOKEN) {
+  if (getKvUrl() && getKvToken()) {
     await runKvCommand('del', `session:${cleanToken}`);
   }
 }
@@ -243,7 +251,7 @@ export async function revokeUserSessions(userId: string): Promise<void> {
     );
     const sessRows = await dbQuery('SELECT token FROM shopit_sessions WHERE user_id = $1', [userId]);
     await dbQuery('DELETE FROM shopit_sessions WHERE user_id = $1', [userId]);
-    if (KV_URL && KV_TOKEN && sessRows.rows.length > 0) {
+    if (getKvUrl() && getKvToken() && sessRows.rows.length > 0) {
       for (const r of sessRows.rows) {
         await runKvCommand('del', `session:${r.token}`);
       }
@@ -296,7 +304,7 @@ export async function recordLoginFailure(email: string): Promise<{
 
   let count = 1;
 
-  if (KV_URL && KV_TOKEN) {
+  if (getKvUrl() && getKvToken()) {
     const res = await runKvCommand('incr', rlKey);
     if (res !== null) {
       count = Number(res) || 1;
@@ -361,7 +369,7 @@ export async function isAccountLocked(email: string): Promise<{
   const rlKey = `auth_fails:${normEmail}`;
   const now = Date.now();
 
-  if (KV_URL && KV_TOKEN) {
+  if (getKvUrl() && getKvToken()) {
     const lockedUntilStr = await runKvCommand('get', `auth_locked:${normEmail}`);
     if (lockedUntilStr) {
       const lockedUntil = Number(lockedUntilStr);
@@ -410,7 +418,7 @@ export async function clearLoginFailures(email: string): Promise<void> {
     );
   } catch {}
 
-  if (KV_URL && KV_TOKEN) {
+  if (getKvUrl() && getKvToken()) {
     await runKvCommand('del', rlKey);
     await runKvCommand('del', `auth_locked:${normEmail}`);
   }

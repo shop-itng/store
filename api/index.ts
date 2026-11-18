@@ -55,6 +55,7 @@ import {
   requirePaymentsEnabled,
   requirePayoutsEnabled,
   requireOwnershipOrAdmin,
+  requireCronSecret,
   optionalAuth,
   extractToken,
   type AuthenticatedRequest,
@@ -77,7 +78,19 @@ import {
 } from './lib/payments.js';
 import { validateAppSecret, deriveSubKey } from './lib/secrets.js';
 import { getKycProvider } from './lib/kycProvider.js';
+import {
+  DEFAULT_NOTIFICATION_PREFS,
+  DEFAULT_PRIVACY_SETTINGS,
+  UNDER_18_PRIVACY_SETTINGS,
+  containsForbiddenContactInfo,
+  extractFirstName,
+  generateUniqueProfileSlug,
+  rejectUnknownFields,
+  sanitizeNotificationPrefs,
+  sanitizePrivacySettings,
+} from './lib/validation.js';
 import marketplaceRouter, { processEscrowAutoRelease } from './routes/marketplace.js';
+import profilesRouter from './routes/profiles.js';
 
 // Fail-closed startup guard: refuse to boot unless APP_SECRET is valid (64+ hex chars)
 validateAppSecret();
@@ -263,10 +276,12 @@ const VALID_EMAIL_TEMPLATES = new Set<EmailTemplateKey>([
   'seller_verified',
   'verification_not_approved',
   'welcome',
+  'email_change',
 ]);
 
 const router = express.Router();
 router.use(marketplaceRouter);
+router.use(profilesRouter);
 
 const APP_BUILT_AT = new Date().toISOString();
 
@@ -328,12 +343,6 @@ router.get('/platform/config', async (_req, res) => {
 
 router.post(['/auth/register', '/auth/signup'], async (req, res) => {
   try {
-    const clientIp = req.ip || 'unknown';
-    const rl = await checkAndRecordRateLimit(`register:${clientIp}`, 10, 15 * 60 * 1000);
-    if (!rl.allowed) {
-      return res.status(429).json({ status: false, message: 'Too many signup requests. Please wait before trying again.' });
-    }
-
     const {
       name,
       email,
@@ -360,6 +369,22 @@ router.post(['/auth/register', '/auth/signup'], async (req, res) => {
     if (cleanName.length < 2 || cleanName.length > 120) {
       return res.status(400).json({ status: false, message: 'Name must be between 2 and 120 characters.' });
     }
+    const nameContactCheck = containsForbiddenContactInfo(cleanName);
+    if (nameContactCheck.blocked) {
+      return res.status(400).json({ status: false, message: `Name: ${nameContactCheck.reason}` });
+    }
+    if (shopName) {
+      const shopContactCheck = containsForbiddenContactInfo(String(shopName));
+      if (shopContactCheck.blocked) {
+        return res.status(400).json({ status: false, message: `Shop name: ${shopContactCheck.reason}` });
+      }
+    }
+    if (bio) {
+      const bioContactCheck = containsForbiddenContactInfo(String(bio));
+      if (bioContactCheck.blocked) {
+        return res.status(400).json({ status: false, message: `Bio: ${bioContactCheck.reason}` });
+      }
+    }
 
     if (cleanEmail.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
       return res.status(400).json({ status: false, message: 'Please provide a valid email address.' });
@@ -385,30 +410,24 @@ router.post(['/auth/register', '/auth/signup'], async (req, res) => {
       });
     }
 
-    // Consume single-use server-issued signup OTP verification proof token
-    const isOtpVerified = await consumeSignupVerificationToken(cleanEmail, String(signupVerificationToken || ''));
-    if (!isOtpVerified) {
-      return res.status(403).json({
-        status: false,
-        error: 'EMAIL_VERIFICATION_REQUIRED',
-        message: 'Please verify your email with the 6-digit OTP code before creating an account.',
-      });
-    }
-
-    const userRole = role === 'seller' ? 'seller' : 'buyer';
-    if (userRole === 'seller') {
-      const emergency = await getPlatformSetting('emergency_controls', DEFAULT_EMERGENCY_CONTROLS);
-      if (emergency.pauseSellerSignups) {
-        return res.status(503).json({
-          status: false,
-          error: 'SELLER_SIGNUPS_PAUSED',
-          message: 'New seller registrations are temporarily paused by administration. You can still register as a buyer.',
-        });
+    // Consume single-use server-issued signup OTP proof token if present; never block registration if unverified or Redis/email failed
+    let isVerifiedEmail = false;
+    if (signupVerificationToken) {
+      try {
+        isVerifiedEmail = await consumeSignupVerificationToken(cleanEmail, String(signupVerificationToken));
+      } catch {
+        isVerifiedEmail = false;
       }
     }
 
+    const userRole = role === 'seller' ? 'seller' : 'buyer';
     const userId = `user_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
     const passwordHash = hashPassword(cleanPassword);
+    const defaultDisplayName = extractFirstName(cleanName);
+    const resolvedCampus = campus ? String(campus).trim() : (userRole === 'seller' ? 'Lagos Mainland' : '');
+    const resolvedArea = location?.area ? String(location.area).trim() : (userRole === 'seller' ? 'Yaba' : '');
+    const resolvedBio = bio ? String(bio).trim().slice(0, 200) : '';
+    const initialPrivacy = parsedAge < 18 ? UNDER_18_PRIVACY_SETTINGS : DEFAULT_PRIVACY_SETTINGS;
 
     const txResult = await withTransaction(async client => {
       const existing = await client.query('SELECT id FROM shopit_users WHERE LOWER(email) = LOWER($1)', [cleanEmail]);
@@ -416,17 +435,33 @@ router.post(['/auth/register', '/auth/signup'], async (req, res) => {
         return { conflict: true as const };
       }
 
+      const profileSlug = await generateUniqueProfileSlug(
+        (sql: string, p?: any[]) => client.query(sql, p),
+        defaultDisplayName
+      );
+
       const userInsert = await client.query(
         `INSERT INTO shopit_users (
-          id, email, name, password_hash, role, is_verified_email, age, has_guardian_consent, guardian_name, created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, true, $6, $7, $8, NOW(), NOW())
-        RETURNING id, email, name, role, is_verified_email, age, has_guardian_consent, guardian_name, created_at`,
+          id, email, name, display_name, profile_slug, bio, campus, location_area,
+          interests, notification_prefs, privacy_settings,
+          password_hash, role, is_verified_email, age, has_guardian_consent, guardian_name,
+          last_seen_at, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, '[]'::jsonb, $9::jsonb, $10::jsonb, $11, $12, $13, $14, $15, $16, NOW(), NOW(), NOW())
+        RETURNING id, email, name, display_name, profile_slug, avatar_url, cover_url, bio, campus, location_area, interests, notification_prefs, privacy_settings, role, is_verified_email, age, has_guardian_consent, guardian_name, created_at`,
         [
           userId,
           cleanEmail,
           cleanName,
+          defaultDisplayName,
+          profileSlug,
+          resolvedBio,
+          resolvedCampus || null,
+          resolvedArea || null,
+          JSON.stringify(DEFAULT_NOTIFICATION_PREFS),
+          JSON.stringify(initialPrivacy),
           passwordHash,
           userRole,
+          isVerifiedEmail,
           parsedAge,
           parsedAge < 18 ? Boolean(hasGuardianConsent) : true,
           guardianName ? String(guardianName).trim() : null,
@@ -435,7 +470,7 @@ router.post(['/auth/register', '/auth/signup'], async (req, res) => {
 
       let sellerProfile: any = null;
       if (userRole === 'seller') {
-        const cleanShop = (shopName || `${cleanName}'s Shop`).trim();
+        const cleanShop = (shopName || `${defaultDisplayName}'s Shop`).trim();
         const sellerInsert = await client.query(
           `INSERT INTO shopit_sellers (
             id, user_id, shop_name, owner_name, email, bio, campus, location_state, location_city, location_area,
@@ -446,7 +481,7 @@ router.post(['/auth/register', '/auth/signup'], async (req, res) => {
             userId,
             userId,
             cleanShop,
-            cleanName,
+            defaultDisplayName,
             cleanEmail,
             bio ? String(bio).trim() : '',
             campus ? String(campus).trim() : 'Lagos Mainland',
@@ -461,10 +496,60 @@ router.post(['/auth/register', '/auth/signup'], async (req, res) => {
         sellerProfile = sellerInsert.rows[0];
 
         await client.query(
-          `INSERT INTO shopit_wallets (seller_id, pending_balance, available_balance, total_withdrawn, is_frozen, pending_balance_kobo, available_balance_kobo, total_withdrawn_kobo, created_at, updated_at)
-           VALUES ($1, 0, 0, 0, false, 0, 0, 0, NOW(), NOW())
+          `INSERT INTO shopit_wallets (seller_id, pending_balance_kobo, available_balance_kobo, total_withdrawn_kobo, is_frozen, created_at, updated_at)
+           VALUES ($1, 0, 0, 0, false, NOW(), NOW())
            ON CONFLICT (seller_id) DO NOTHING`,
           [userId]
+        );
+      }
+
+      // Atomic Admin Alert & Notification inside the exact same transaction as user creation
+      const roleLabel = userRole === 'seller' ? 'Seller' : 'Buyer';
+      const txShopName = sellerProfile?.shop_name || (shopName ? String(shopName).trim() : null);
+      const txCampus = sellerProfile?.campus || (campus ? String(campus).trim() : null);
+      const txArea = sellerProfile?.location_area || location?.area || null;
+      const alertTitle = `New ${roleLabel} Registered: ${cleanName}`;
+      const alertMsg =
+        userRole === 'seller'
+          ? `${cleanName} (${cleanEmail}) registered Seller Shop "${txShopName || cleanName}" at ${txCampus || 'Campus'}.`
+          : `${cleanName} (${cleanEmail}) joined Shop It as a Buyer (Age ${parsedAge}).`;
+
+      await client.query(
+        `INSERT INTO shopit_admin_alerts (
+          alert_key, id, alert_type, user_id, user_email, user_name, user_role,
+          title, message, is_read, metadata, created_at
+        ) VALUES ($1, $2, 'new_user', $3, $4, $5, $6, $7, $8, false, $9::jsonb, NOW())
+        ON CONFLICT (alert_key) DO NOTHING`,
+        [
+          `new_user_${userId}`,
+          `alert_user_${userId}`,
+          userId,
+          cleanEmail,
+          cleanName,
+          userRole,
+          alertTitle,
+          alertMsg,
+          JSON.stringify({
+            shopName: txShopName,
+            campus: txCampus,
+            locationArea: txArea,
+            age: parsedAge,
+            isVerifiedEmail,
+          }),
+        ]
+      );
+
+      const adminUsersRes = await client.query("SELECT id FROM shopit_users WHERE role = 'admin'");
+      for (const adm of adminUsersRes.rows) {
+        await client.query(
+          `INSERT INTO shopit_notifications (id, user_id, title, message, type, is_read, link, created_at)
+           VALUES ($1, $2, $3, $4, 'info', false, '/admin', NOW())`,
+          [
+            `notif_new_user_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
+            adm.id,
+            alertTitle,
+            alertMsg,
+          ]
         );
       }
 
@@ -495,7 +580,6 @@ router.post(['/auth/register', '/auth/signup'], async (req, res) => {
       path: '/',
     });
 
-    // Notify Admin Panel & Audit Log of Every New User Registration
     const signupShopName = txResult.sellerProfile?.shop_name || (shopName ? String(shopName).trim() : undefined);
     const signupCampus = txResult.sellerProfile?.campus || (campus ? String(campus).trim() : undefined);
     const signupArea = txResult.sellerProfile?.location_area || location?.area || undefined;
@@ -515,33 +599,14 @@ router.post(['/auth/register', '/auth/signup'], async (req, res) => {
         shopName: signupShopName || null,
         campus: signupCampus || null,
         locationArea: signupArea || null,
+        isVerifiedEmail,
       },
       ip: req.ip,
       userAgent: req.get('user-agent'),
     });
 
-    try {
-      const adminUsersRes = await dbQuery("SELECT id FROM shopit_users WHERE role = 'admin'");
-      const roleLabel = userRole === 'seller' ? 'Seller' : 'Buyer';
-      const notifMsg =
-        userRole === 'seller'
-          ? `${cleanName} (${cleanEmail}) registered Seller Shop "${signupShopName || cleanName}" at ${signupCampus || 'Campus'}.`
-          : `${cleanName} (${cleanEmail}) joined Shop It as a Buyer (Age ${parsedAge}).`;
-      for (const adm of adminUsersRes.rows) {
-        await dbQuery(
-          `INSERT INTO shopit_notifications (id, user_id, title, message, type, is_read, link, created_at)
-           VALUES ($1, $2, $3, $4, 'info', false, '/admin', NOW())`,
-          [
-            `notif_new_user_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
-            adm.id,
-            `New ${roleLabel} Registered: ${cleanName}`,
-            notifMsg,
-          ]
-        ).catch(() => {});
-      }
-    } catch {}
-
-    await dispatchAdminAlert(
+    // Non-blocking email alert to admin (already persisted atomically in shopit_admin_alerts)
+    dispatchAdminAlert(
       `new_user_${userId}`,
       `New ${userRole === 'seller' ? 'Seller' : 'Buyer'} Signed Up: ${cleanName}`,
       `Name: <strong>${escapeHtml(cleanName)}</strong><br/>
@@ -559,6 +624,16 @@ router.post(['/auth/register', '/auth/signup'], async (req, res) => {
         id: txResult.savedUser.id,
         email: txResult.savedUser.email,
         name: txResult.savedUser.name,
+        displayName: txResult.savedUser.display_name,
+        profileSlug: txResult.savedUser.profile_slug,
+        avatarUrl: txResult.savedUser.avatar_url || undefined,
+        coverUrl: txResult.savedUser.cover_url || undefined,
+        bio: txResult.savedUser.bio || '',
+        campus: txResult.savedUser.campus || undefined,
+        locationArea: txResult.savedUser.location_area || undefined,
+        interests: Array.isArray(txResult.savedUser.interests) ? txResult.savedUser.interests : [],
+        notificationPrefs: txResult.savedUser.notification_prefs || DEFAULT_NOTIFICATION_PREFS,
+        privacySettings: txResult.savedUser.privacy_settings || initialPrivacy,
         role: txResult.savedUser.role,
         isVerifiedEmail: Boolean(txResult.savedUser.is_verified_email),
         age: txResult.savedUser.age,
@@ -662,22 +737,6 @@ router.post('/auth/login', async (req, res) => {
       });
     }
 
-    if (userRow.is_verified_email === false) {
-      await logAuditEvent({
-        action: 'USER_LOGIN_FAILED',
-        actor: { id: userRow.id, email: userRow.email, role: userRow.role },
-        target: { type: 'auth', id: userRow.id },
-        details: { reason: 'email_not_verified' },
-        ip: req.ip,
-        userAgent: req.get('user-agent'),
-      });
-      return res.status(403).json({
-        status: false,
-        error: 'EMAIL_NOT_VERIFIED',
-        message: 'Your email address has not been verified yet. Please verify your email code first.',
-      });
-    }
-
     if (userRow.is_banned) {
       await logAuditEvent({
         action: 'USER_LOGIN_FAILED',
@@ -695,7 +754,7 @@ router.post('/auth/login', async (req, res) => {
     }
 
     await clearLoginFailures(cleanEmail);
-    await dbQuery('UPDATE shopit_users SET last_login_at = NOW(), updated_at = NOW() WHERE id = $1', [userRow.id]);
+    await dbQuery('UPDATE shopit_users SET last_login_at = NOW(), last_seen_at = NOW(), updated_at = NOW() WHERE id = $1', [userRow.id]);
 
     const { token } = await createSession({
       userId: userRow.id,
@@ -726,10 +785,25 @@ router.post('/auth/login', async (req, res) => {
       userAgent: req.get('user-agent'),
     });
 
+    const isMinor = (userRow.age !== null && userRow.age !== undefined && Number(userRow.age) < 18);
     const sanitizedUser: any = {
       id: userRow.id,
       email: userRow.email,
       name: userRow.name,
+      displayName: userRow.display_name || extractFirstName(userRow.name || 'Member'),
+      profileSlug: userRow.profile_slug || userRow.id,
+      avatarUrl: userRow.avatar_url || undefined,
+      coverUrl: userRow.cover_url || undefined,
+      bio: userRow.bio || '',
+      campus: userRow.campus || undefined,
+      locationArea: userRow.location_area || undefined,
+      interests: Array.isArray(userRow.interests) ? userRow.interests : [],
+      notificationPrefs: sanitizeNotificationPrefs(userRow.notification_prefs, DEFAULT_NOTIFICATION_PREFS),
+      privacySettings: sanitizePrivacySettings(
+        userRow.privacy_settings,
+        isMinor ? UNDER_18_PRIVACY_SETTINGS : DEFAULT_PRIVACY_SETTINGS,
+        isMinor
+      ),
       role: userRow.role,
       ...(userRow.role === 'admin' && userRow.sub_role ? { subRole: userRow.sub_role } : {}),
       isVerifiedEmail: Boolean(userRow.is_verified_email),
@@ -744,7 +818,7 @@ router.post('/auth/login', async (req, res) => {
     if (userRow.role === 'seller' || userRow.seller_id) {
       sanitizedUser.sellerProfile = {
         id: userRow.seller_id || userRow.id,
-        shopName: userRow.shop_name || `${userRow.name}'s Shop`,
+        shopName: userRow.shop_name || `${sanitizedUser.displayName}'s Shop`,
         verificationStatus: userRow.verification_status || 'not_started',
         isVerifiedSeller: Boolean(userRow.is_verified_seller),
         bio: userRow.bio || '',
@@ -912,14 +986,187 @@ router.post('/auth/reset-password', async (req, res) => {
   }
 });
 
+// Authenticated Email Change (Step 1: verify password + send OTP to new email; Step 2: consume OTP + revoke sessions)
+router.post('/auth/change-email/request-otp', requireAuth, async (req: AuthenticatedRequest, res) => {
+  try {
+    const check = rejectUnknownFields(req.body, ['newEmail', 'currentPassword']);
+    if (!check.ok) {
+      return res.status(400).json({ status: false, message: check.message });
+    }
+    const { newEmail, currentPassword } = check.obj;
+    const cleanNewEmail = String(newEmail || '').trim().toLowerCase();
+    if (!cleanNewEmail || cleanNewEmail.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanNewEmail)) {
+      return res.status(400).json({ status: false, message: 'Please provide a valid email address.' });
+    }
+    if (!currentPassword || typeof currentPassword !== 'string') {
+      return res.status(400).json({ status: false, message: 'Your current password is required to change your email.' });
+    }
+
+    const userId = req.user!.userId;
+    const uRes = await dbQuery('SELECT id, email, password_hash FROM shopit_users WHERE id = $1', [userId]);
+    if (uRes.rows.length === 0) {
+      return res.status(404).json({ status: false, message: 'User account not found.' });
+    }
+    const uRow = uRes.rows[0];
+    if (String(uRow.email).trim().toLowerCase() === cleanNewEmail) {
+      return res.status(400).json({ status: false, message: 'Please enter a different email address from your current one.' });
+    }
+    if (!verifyPassword(currentPassword.trim(), uRow.password_hash)) {
+      return res.status(401).json({ status: false, message: 'Current password is incorrect.' });
+    }
+
+    const conflictRes = await dbQuery('SELECT id FROM shopit_users WHERE LOWER(email) = LOWER($1) AND id != $2 LIMIT 1', [
+      cleanNewEmail,
+      userId,
+    ]);
+    if (conflictRes.rows.length > 0) {
+      return res.status(409).json({ status: false, message: 'That email address is already registered to another account.' });
+    }
+
+    const rl = await checkAndRecordRateLimit(`email_change_req:${userId}`, 5, 15 * 60 * 1000);
+    if (!rl.allowed) {
+      return res.status(429).json({ status: false, message: 'Too many email change requests. Please wait a few minutes.' });
+    }
+
+    const code = String(crypto.randomInt(100000, 1000000));
+    const codeHash = hashOtp(code);
+    await saveHashedOtp(cleanNewEmail, 'email_change', codeHash, { userId, oldEmail: uRow.email });
+
+    const rendered = renderTransactionalEmail('email_change', { code, email: cleanNewEmail });
+    const emailSent = await sendBrevoDirect(cleanNewEmail, rendered.subject, rendered.text, rendered.html);
+    if (IS_PROD && !emailSent) {
+      await deleteOtpRecord(cleanNewEmail, 'email_change').catch(() => {});
+      return res.status(503).json({ status: false, message: 'Email service temporarily unavailable. Please try again.' });
+    }
+
+    await logAuditEvent({
+      action: 'EMAIL_CHANGE_OTP_REQUESTED',
+      actor: { id: userId, email: uRow.email, role: req.user!.role },
+      target: { type: 'user', id: userId },
+      details: { requestedNewEmailDomain: cleanNewEmail.split('@')[1] || '' },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
+
+    return res.json({ status: true, message: `A 6-digit confirmation code was sent to ${cleanNewEmail}.` });
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: 'Unable to send email confirmation code.' });
+  }
+});
+
+router.post('/auth/change-email/confirm', requireAuth, async (req: AuthenticatedRequest, res) => {
+  try {
+    const check = rejectUnknownFields(req.body, ['newEmail', 'code', 'currentPassword']);
+    if (!check.ok) {
+      return res.status(400).json({ status: false, message: check.message });
+    }
+    const { newEmail, code, currentPassword } = check.obj;
+    const cleanNewEmail = String(newEmail || '').trim().toLowerCase();
+    const cleanCode = String(code || '').trim().replace(/\D/g, '');
+
+    if (!cleanNewEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanNewEmail) || cleanCode.length !== 6) {
+      return res.status(400).json({ status: false, message: 'Valid new email and 6-digit verification code are required.' });
+    }
+    if (!currentPassword || typeof currentPassword !== 'string') {
+      return res.status(400).json({ status: false, message: 'Current password is required.' });
+    }
+
+    const userId = req.user!.userId;
+    const uRes = await dbQuery('SELECT id, email, name, role, sub_role, password_hash FROM shopit_users WHERE id = $1', [userId]);
+    if (uRes.rows.length === 0) {
+      return res.status(404).json({ status: false, message: 'User not found.' });
+    }
+    const uRow = uRes.rows[0];
+    if (!verifyPassword(currentPassword.trim(), uRow.password_hash)) {
+      return res.status(401).json({ status: false, message: 'Current password is incorrect.' });
+    }
+
+    const otpRes = await verifyAndConsumeOtp(cleanNewEmail, 'email_change', cleanCode);
+    if (!otpRes.success) {
+      return res.status(400).json({
+        status: false,
+        message: otpRes.error || 'Invalid or expired verification code.',
+        attemptsRemaining: otpRes.attemptsRemaining,
+      });
+    }
+    if (otpRes.record?.metadata?.userId && otpRes.record.metadata.userId !== userId) {
+      return res.status(403).json({ status: false, message: 'Verification code does not belong to your account.' });
+    }
+
+    const txRes = await withTransaction(async client => {
+      const conflict = await client.query('SELECT id FROM shopit_users WHERE LOWER(email) = LOWER($1) AND id != $2 LIMIT 1', [
+        cleanNewEmail,
+        userId,
+      ]);
+      if (conflict.rows.length > 0) {
+        return { conflict: true as const };
+      }
+      await client.query('UPDATE shopit_users SET email = $1, is_verified_email = true, updated_at = NOW() WHERE id = $2', [
+        cleanNewEmail,
+        userId,
+      ]);
+      await client.query('UPDATE shopit_sellers SET email = $1, updated_at = NOW() WHERE user_id = $2 OR id = $2', [
+        cleanNewEmail,
+        userId,
+      ]);
+      return { conflict: false as const };
+    });
+
+    if (txRes.conflict) {
+      return res.status(409).json({ status: false, message: 'That email address is already in use.' });
+    }
+
+    await revokeUserSessions(userId);
+    const { token } = await createSession({
+      userId,
+      email: cleanNewEmail,
+      name: uRow.name,
+      role: uRow.role,
+      subRole: uRow.role === 'admin' ? uRow.sub_role : undefined,
+      sellerId: req.user!.sellerId,
+      isVerifiedSeller: req.user!.isVerifiedSeller,
+    });
+
+    res.cookie(SESSION_COOKIE_NAME, token, {
+      httpOnly: true,
+      secure: IS_PROD,
+      sameSite: 'lax',
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+      path: '/',
+    });
+
+    await logAuditEvent({
+      action: 'EMAIL_CHANGED',
+      actor: { id: userId, email: cleanNewEmail, role: uRow.role },
+      target: { type: 'user', id: userId },
+      details: { previousEmailDomain: String(uRow.email).split('@')[1] || '', newEmailDomain: cleanNewEmail.split('@')[1] || '' },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
+
+    return res.json({
+      status: true,
+      email: cleanNewEmail,
+      sessionToken: token,
+      message: 'Your email address has been updated and older sessions signed out.',
+    });
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: 'Failed to confirm email change.' });
+  }
+});
+
 // Strict session-only profile hydration (no ?email or ?userId unauthenticated spoofing)
 router.get('/auth/me', requireAuth, async (req: AuthenticatedRequest, res) => {
   try {
     const sessionUser = req.user!;
+    await dbQuery('UPDATE shopit_users SET last_seen_at = NOW() WHERE id = $1', [sessionUser.userId]).catch(() => {});
     const result = await dbQuery(
-      `SELECT u.id, u.email, u.name, u.role, u.sub_role, u.is_verified_email, u.must_change_password, u.is_banned, u.ban_reason,
+      `SELECT u.id, u.email, u.name, u.display_name, u.profile_slug, u.avatar_url, u.cover_url, u.bio,
+              u.campus, u.location_area, u.interests, u.notification_prefs, u.privacy_settings, u.last_seen_at,
+              u.role, u.sub_role, u.is_verified_email, u.must_change_password, u.is_banned, u.ban_reason,
               u.age, u.has_guardian_consent, u.guardian_name, u.created_at, u.last_login_at,
-              s.id as seller_id, s.shop_name, s.bio, s.campus, s.is_verified_seller as seller_is_verified,
+              s.id as seller_id, s.shop_name, s.bio as s_bio, s.campus as s_campus, s.location_area as s_area,
+              s.logo_url as s_logo_url, s.banner_url as s_banner_url, s.is_verified_seller as seller_is_verified,
               s.verification_status as seller_verification_status,
               s.verified_legal_name, s.verified_nin_last4, s.verified_at
        FROM shopit_users u
@@ -939,11 +1186,28 @@ router.get('/auth/me', requireAuth, async (req: AuthenticatedRequest, res) => {
       row.seller_verification_status === 'approved'
     );
     const currentStatus = isVerified ? 'verified' : (row.seller_verification_status || 'not_started');
+    const isMinor = row.age !== null && row.age !== undefined && Number(row.age) < 18;
+    const displayName = row.display_name || extractFirstName(row.name || 'Member');
 
     const sanitizedUser: any = {
       id: row.id,
       email: row.email,
       name: row.name,
+      displayName,
+      profileSlug: row.profile_slug || row.id,
+      avatarUrl: row.avatar_url || row.s_logo_url || undefined,
+      coverUrl: row.cover_url || row.s_banner_url || undefined,
+      bio: row.bio || row.s_bio || '',
+      campus: row.campus || row.s_campus || undefined,
+      locationArea: row.location_area || row.s_area || undefined,
+      interests: Array.isArray(row.interests) ? row.interests : [],
+      notificationPrefs: sanitizeNotificationPrefs(row.notification_prefs, DEFAULT_NOTIFICATION_PREFS),
+      privacySettings: sanitizePrivacySettings(
+        row.privacy_settings,
+        isMinor ? UNDER_18_PRIVACY_SETTINGS : DEFAULT_PRIVACY_SETTINGS,
+        isMinor
+      ),
+      lastSeenAt: row.last_seen_at || row.last_login_at || row.created_at,
       role: row.role,
       subRole: row.role === 'admin' ? row.sub_role || undefined : undefined,
       isVerifiedEmail: Boolean(row.is_verified_email),
@@ -962,11 +1226,15 @@ router.get('/auth/me', requireAuth, async (req: AuthenticatedRequest, res) => {
     if (row.role === 'seller' || row.seller_id) {
       sanitizedUser.sellerProfile = {
         id: row.seller_id || row.id,
-        shopName: row.shop_name || `${row.name}'s Shop`,
+        shopName: row.shop_name || `${displayName}'s Shop`,
+        ownerName: displayName,
         verificationStatus: currentStatus,
         isVerifiedSeller: isVerified,
-        bio: row.bio || '',
-        campus: row.campus || 'Lagos Mainland',
+        bio: row.s_bio || row.bio || '',
+        campus: row.s_campus || row.campus || 'Lagos Mainland',
+        locationArea: row.s_area || row.location_area || 'Yaba',
+        logoUrl: row.s_logo_url || row.avatar_url || undefined,
+        bannerUrl: row.s_banner_url || row.cover_url || undefined,
         verifiedLegalName: row.verified_legal_name,
         verifiedNinLast4: row.verified_nin_last4,
         verifiedAt: row.verified_at,
@@ -1015,7 +1283,7 @@ router.get('/admin/users', requireModerator, async (req: AuthenticatedRequest, r
     let paramIndex = 1;
 
     if (q) {
-      conditions.push(`(LOWER(u.name) LIKE $${paramIndex} OR LOWER(u.email) LIKE $${paramIndex})`);
+      conditions.push(`(LOWER(u.name) LIKE $${paramIndex} OR LOWER(COALESCE(u.display_name, '')) LIKE $${paramIndex} OR LOWER(u.email) LIKE $${paramIndex} OR LOWER(COALESCE(u.profile_slug, '')) LIKE $${paramIndex})`);
       params.push(`%${q}%`);
       paramIndex++;
     }
@@ -1044,9 +1312,11 @@ router.get('/admin/users', requireModerator, async (req: AuthenticatedRequest, r
     const total = parseInt(countRes.rows[0].total, 10);
 
     const dataSql = `
-      SELECT u.id, u.email, u.name, u.role, u.sub_role, u.is_verified_email, u.age, u.has_guardian_consent,
+      SELECT u.id, u.email, u.name, u.display_name, u.profile_slug, u.avatar_url, u.bio, u.interests,
+             u.campus as u_campus, u.location_area as u_area, u.deleted_at,
+             u.role, u.sub_role, u.is_verified_email, u.age, u.has_guardian_consent,
              u.guardian_name, u.is_banned, u.ban_reason, u.last_login_at, u.created_at,
-             s.id as seller_id, s.shop_name, s.campus, s.location_area, s.bio,
+             s.id as seller_id, s.shop_name, s.campus, s.location_area, s.bio as s_bio,
              s.verification_status, s.is_verified_seller
       FROM shopit_users u
       LEFT JOIN shopit_sellers s ON (u.id = s.user_id OR u.id = s.id)
@@ -1068,6 +1338,9 @@ router.get('/admin/users', requireModerator, async (req: AuthenticatedRequest, r
         id: row.id,
         email: row.email,
         name: row.name,
+        displayName: row.display_name || extractFirstName(row.name || 'Member'),
+        profileSlug: row.profile_slug || row.id,
+        avatarUrl: row.avatar_url || undefined,
         role: row.role,
         ...(row.role === 'admin' && row.sub_role ? { subRole: row.sub_role } : {}),
         isVerifiedEmail: Boolean(row.is_verified_email),
@@ -1076,13 +1349,15 @@ router.get('/admin/users', requireModerator, async (req: AuthenticatedRequest, r
         guardianName: row.guardian_name,
         isBanned: Boolean(row.is_banned),
         banReason: row.ban_reason,
+        deletedAt: row.deleted_at || undefined,
         lastLoginAt: row.last_login_at,
         createdAt: row.created_at,
         isNew: row.created_at ? new Date(row.created_at).getTime() >= cutoffMs : false,
         shopName: row.shop_name,
-        campus: row.campus,
-        locationArea: row.location_area,
-        bio: row.bio,
+        campus: row.campus || row.u_campus,
+        locationArea: row.location_area || row.u_area,
+        bio: row.bio || row.s_bio,
+        interests: Array.isArray(row.interests) ? row.interests : [],
         verificationStatus: row.verification_status || (row.role === 'seller' ? 'not_started' : 'not_applicable'),
         isVerifiedSeller: Boolean(row.is_verified_seller),
       }));
@@ -1100,6 +1375,114 @@ router.get('/admin/users', requireModerator, async (req: AuthenticatedRequest, r
   } catch (err: any) {
     console.error('[Admin Users Error]:', err.message);
     return res.status(500).json({ status: false, message: 'Database error reading users.' });
+  }
+});
+
+// Auto-refreshing "New Users" feed backed by transactional shopit_admin_alerts + shopit_users
+router.get('/admin/new-users', requireModerator, async (req: AuthenticatedRequest, res) => {
+  try {
+    const rawPage = req.query.page !== undefined ? String(req.query.page).trim() : '1';
+    const rawLimit = req.query.limit !== undefined ? String(req.query.limit).trim() : '20';
+    const page = Math.max(1, parseInt(rawPage, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(rawLimit, 10) || 20));
+    const offset = (page - 1) * limit;
+    const unreadOnly = String(req.query.unreadOnly || '').toLowerCase() === 'true';
+
+    const whereExtra = unreadOnly ? 'AND COALESCE(a.is_read, false) = false' : '';
+
+    const [countRes, unreadRes, rowsRes] = await Promise.all([
+      dbQuery(
+        `SELECT COUNT(*) AS total
+         FROM shopit_users u
+         LEFT JOIN shopit_admin_alerts a ON a.user_id = u.id AND (a.alert_type = 'new_user' OR a.alert_key LIKE 'new_user_%')
+         WHERE u.deleted_at IS NULL ${whereExtra}`
+      ),
+      dbQuery(
+        `SELECT COUNT(*) AS unread
+         FROM shopit_admin_alerts
+         WHERE (alert_type = 'new_user' OR alert_key LIKE 'new_user_%') AND COALESCE(is_read, false) = false`
+      ),
+      dbQuery(
+        `SELECT u.id AS user_id, u.email, u.name, u.display_name, u.profile_slug, u.role,
+                u.age, u.has_guardian_consent, u.guardian_name, u.is_verified_email, u.created_at AS user_created_at,
+                s.shop_name, s.campus, s.location_area, s.verification_status, s.is_verified_seller,
+                a.id AS alert_id, a.alert_key, a.title, a.message, COALESCE(a.is_read, false) AS is_read, a.created_at AS alert_created_at
+         FROM shopit_users u
+         LEFT JOIN shopit_sellers s ON (u.id = s.user_id OR u.id = s.id)
+         LEFT JOIN shopit_admin_alerts a ON a.user_id = u.id AND (a.alert_type = 'new_user' OR a.alert_key LIKE 'new_user_%')
+         WHERE u.deleted_at IS NULL ${whereExtra}
+         ORDER BY u.created_at DESC
+         LIMIT $1 OFFSET $2`,
+        [limit, offset]
+      ),
+    ]);
+
+    const seen = new Set<string>();
+    const items = rowsRes.rows
+      .filter((row: any) => {
+        if (seen.has(row.user_id)) return false;
+        seen.add(row.user_id);
+        return true;
+      })
+      .map((row: any) => ({
+        alertId: row.alert_id || row.alert_key || `new_user_${row.user_id}`,
+        alertKey: row.alert_key || `new_user_${row.user_id}`,
+        userId: row.user_id,
+        email: row.email,
+        name: row.name,
+        displayName: row.display_name || extractFirstName(row.name || 'Member'),
+        profileSlug: row.profile_slug || row.user_id,
+        role: row.role,
+        age: row.age,
+        hasGuardianConsent: Boolean(row.has_guardian_consent),
+        guardianName: row.guardian_name,
+        isVerifiedEmail: Boolean(row.is_verified_email),
+        shopName: row.shop_name || undefined,
+        campus: row.campus || undefined,
+        locationArea: row.location_area || undefined,
+        verificationStatus: row.verification_status || (row.role === 'seller' ? 'not_started' : 'not_applicable'),
+        isVerifiedSeller: Boolean(row.is_verified_seller),
+        title: row.title || `New ${row.role === 'seller' ? 'Seller' : row.role === 'admin' ? 'Admin' : 'Buyer'} Registered: ${row.name}`,
+        message: row.message || `${row.name} (${row.email}) registered as ${row.role}.`,
+        isRead: Boolean(row.is_read),
+        createdAt: row.user_created_at || row.alert_created_at,
+      }));
+
+    const total = parseInt(String(countRes.rows[0]?.total || '0'), 10);
+    const unreadCount = parseInt(String(unreadRes.rows[0]?.unread || '0'), 10);
+
+    return res.json({
+      status: true,
+      items,
+      total,
+      unreadCount,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit) || 1,
+    });
+  } catch (err: any) {
+    console.error('[Admin New Users Feed Error]:', err.message);
+    return res.status(500).json({ status: false, message: 'Database error loading new users feed.' });
+  }
+});
+
+router.patch('/admin/alerts/:id/read', requireModerator, async (req: AuthenticatedRequest, res) => {
+  try {
+    const { id } = req.params;
+    if (id === 'all') {
+      await dbQuery(
+        `UPDATE shopit_admin_alerts SET is_read = true WHERE (alert_type = 'new_user' OR alert_key LIKE 'new_user_%') AND COALESCE(is_read, false) = false`
+      );
+      return res.json({ status: true, message: 'All new user alerts marked as read.' });
+    }
+
+    await dbQuery(
+      `UPDATE shopit_admin_alerts SET is_read = true WHERE id = $1 OR alert_key = $1 OR user_id = $1`,
+      [id]
+    );
+    return res.json({ status: true, message: 'Alert marked as read.' });
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: 'Failed to update alert read state.' });
   }
 });
 
@@ -1799,28 +2182,114 @@ router.post('/activity/track', optionalAuth, async (req: AuthenticatedRequest, r
 
 router.get('/admin/export-data', requireAdmin, async (req: AuthenticatedRequest, res) => {
   try {
-    const [payRes, repRes, verifRes, ordRes] = await Promise.all([
-      dbQuery('SELECT reference, order_id, amount_kobo, amount_naira, currency, channel, status, webhook_received, created_at FROM shopit_payments ORDER BY created_at DESC LIMIT 500'),
-      dbQuery('SELECT id, target_type, target_id, target_title, reason, status, created_at FROM shopit_reports ORDER BY created_at DESC LIMIT 500'),
-      dbQuery('SELECT id, seller_id, shop_name, owner_name, id_type, id_number_masked, under_18, status, submitted_at, reviewed_at FROM shopit_verifications ORDER BY submitted_at DESC LIMIT 500'),
-      dbQuery('SELECT id, buyer_id, subtotal_kobo, service_fee_kobo, delivery_fee_kobo, grand_total_kobo, status, payment_reference, created_at FROM shopit_orders ORDER BY created_at DESC LIMIT 500'),
+    const [
+      usersRes,
+      sellersRes,
+      productsRes,
+      ordRes,
+      payRes,
+      walletsRes,
+      ledgerRes,
+      disputesRes,
+      repRes,
+      verifRes,
+      alertsRes,
+    ] = await Promise.all([
+      dbQuery(
+        `SELECT id, email, name, display_name, profile_slug, bio, campus, location_area,
+                role, sub_role, is_verified_email, age, has_guardian_consent, guardian_name,
+                is_banned, ban_reason, deleted_at, last_login_at, created_at, updated_at
+         FROM shopit_users ORDER BY created_at DESC LIMIT 2000`
+      ),
+      dbQuery(
+        `SELECT id, user_id, shop_name, owner_name, email, bio, campus,
+                location_state, location_city, location_area,
+                is_verified_seller, verification_status, verified_nin_last4, verified_at,
+                under_18, guardian_consent, guardian_name, rating, sales_count, views_count,
+                vacation_mode, created_at, updated_at
+         FROM shopit_sellers ORDER BY created_at DESC LIMIT 2000`
+      ),
+      dbQuery(
+        `SELECT id, seller_id, seller_shop_name, seller_campus, title, description, category,
+                seller_price_kobo, service_fee_kobo, display_price_kobo, stock, images,
+                delivery_pickup_fee_kobo, delivery_local_fee_kobo, delivery_buyer_arranges,
+                location_state, location_city, location_area, is_sold_out, is_paused, is_draft,
+                created_at, updated_at
+         FROM shopit_products ORDER BY created_at DESC LIMIT 2000`
+      ),
+      dbQuery(
+        `SELECT id, buyer_id, buyer_name, buyer_email, buyer_masked_id, items,
+                subtotal_kobo, service_fee_kobo, delivery_fee_kobo, discount_total_kobo,
+                coupon_code, grand_total_kobo, payment_method, payment_reference,
+                status, campus, delivery_area, pickup_point, admin_hold,
+                paid_at, shipped_at, delivered_at, completed_at, created_at, updated_at
+         FROM shopit_orders ORDER BY created_at DESC LIMIT 2000`
+      ),
+      dbQuery(
+        `SELECT reference, order_id, amount_kobo, currency, channel, status,
+                webhook_received, customer_email, created_at, updated_at
+         FROM shopit_payments ORDER BY created_at DESC LIMIT 2000`
+      ),
+      dbQuery(
+        `SELECT seller_id, pending_balance_kobo, available_balance_kobo, total_withdrawn_kobo,
+                is_frozen, freeze_reason, created_at, updated_at
+         FROM shopit_wallets ORDER BY updated_at DESC LIMIT 2000`
+      ),
+      dbQuery(
+        `SELECT id, wallet_id, order_id, type, amount_kobo, fee_kobo, balance_after_kobo,
+                balance_type, status, description, reference, idempotency_key, created_at
+         FROM shopit_ledger_entries ORDER BY created_at DESC LIMIT 5000`
+      ),
+      dbQuery(
+        `SELECT id, order_id, buyer_id, seller_id, reason, description, status, amount_held_in_escrow_kobo,
+                resolution_notes, created_at, updated_at
+         FROM shopit_disputes ORDER BY created_at DESC LIMIT 2000`
+      ),
+      dbQuery(
+        `SELECT id, target_type, target_id, target_title, reason, details, status, action_logs, created_at
+         FROM shopit_reports ORDER BY created_at DESC LIMIT 2000`
+      ),
+      dbQuery(
+        `SELECT id, seller_id, user_id, shop_name, owner_name, id_type, id_number_masked,
+                full_nin_last4, under_18, status, submitted_at, reviewed_at
+         FROM shopit_verifications ORDER BY submitted_at DESC LIMIT 2000`
+      ),
+      dbQuery(
+        `SELECT alert_key, id, alert_type, user_id, user_email, user_name, user_role,
+                title, message, is_read, metadata, created_at
+         FROM shopit_admin_alerts ORDER BY created_at DESC LIMIT 2000`
+      ),
     ]);
 
     const exportPayload = {
-      version: '2.0',
+      version: '3.0',
       exportedAt: new Date().toISOString(),
       exportedBy: req.user!.email,
       platform: 'Shop It Nigeria (TEEDS)',
       summary: {
+        totalUsers: usersRes.rows.length,
+        totalSellers: sellersRes.rows.length,
+        totalProducts: productsRes.rows.length,
+        totalOrders: ordRes.rows.length,
         totalPayments: payRes.rows.length,
+        totalWallets: walletsRes.rows.length,
+        totalLedgerEntries: ledgerRes.rows.length,
+        totalDisputes: disputesRes.rows.length,
         totalReports: repRes.rows.length,
         totalVerifications: verifRes.rows.length,
-        totalOrders: ordRes.rows.length,
+        totalAdminAlerts: alertsRes.rows.length,
       },
+      users: usersRes.rows,
+      sellers: sellersRes.rows,
+      products: productsRes.rows,
+      orders: ordRes.rows,
       payments: payRes.rows,
+      wallets: walletsRes.rows,
+      ledger: ledgerRes.rows,
+      disputes: disputesRes.rows,
       reports: repRes.rows,
       verifications: verifRes.rows,
-      orders: ordRes.rows,
+      adminAlerts: alertsRes.rows,
     };
 
     await logAuditEvent({
@@ -2031,7 +2500,7 @@ router.post('/payments/initialize', requirePaymentsEnabled, requireAuth, async (
 
         const pRes = await client.query(
           `SELECT id, seller_id, seller_shop_name, seller_campus, title, images,
-                  seller_price, stock, is_sold_out, delivery_pickup_fee, delivery_local_fee
+                  seller_price_kobo, stock, is_sold_out, delivery_pickup_fee_kobo, delivery_local_fee_kobo
            FROM shopit_products
            WHERE id = $1
            FOR UPDATE`,
@@ -2058,7 +2527,7 @@ router.post('/payments/initialize', requirePaymentsEnabled, requireAuth, async (
           [nextStock, nextStock <= 0, p.id]
         );
 
-        const sellerPriceKobo = nairaToKobo(p.seller_price);
+        const sellerPriceKobo = Math.max(0, Math.round(Number(p.seller_price_kobo || 0)));
         if (sellerPriceKobo <= 0) {
           throw Object.assign(new Error(`Invalid server price on "${p.title}".`), { statusCode: 400 });
         }
@@ -2067,13 +2536,13 @@ router.post('/payments/initialize', requirePaymentsEnabled, requireAuth, async (
         subtotalKobo += sellerPriceKobo * qty;
         serviceFeeKobo += itemServiceFeeKobo * qty;
 
-        const rawDeliveryNaira =
+        const rawDeliveryKobo =
           deliveryMethod === 'pickup'
-            ? Number(p.delivery_pickup_fee || 200)
-            : Number(p.delivery_local_fee || 500);
+            ? Number(p.delivery_pickup_fee_kobo || 20000)
+            : Number(p.delivery_local_fee_kobo || 50000);
         const itemDeliveryKobo = Math.max(
           0,
-          nairaToKobo(rawDeliveryNaira > 0 ? rawDeliveryNaira : deliveryMethod === 'pickup' ? 200 : 500)
+          Math.round(rawDeliveryKobo > 0 ? rawDeliveryKobo : deliveryMethod === 'pickup' ? 20000 : 50000)
         );
 
         const sKey = String(p.seller_id);
@@ -2129,41 +2598,37 @@ router.post('/payments/initialize', requirePaymentsEnabled, requireAuth, async (
       const orderId = `ORD-${Date.now()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
       const reference = `SHOPIT_${Date.now()}_${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
       const handshakeOtp = String(crypto.randomInt(1000, 10000));
-      const maskedBuyerId = `Buyer #${user.userId.slice(-4).toUpperCase()}`;
+      const buyerDisplayRes = await client.query('SELECT display_name, name FROM shopit_users WHERE id = $1 LIMIT 1', [user.userId]);
+      const buyerDisplayLabel =
+        buyerDisplayRes.rows[0]?.display_name ||
+        extractFirstName(buyerDisplayRes.rows[0]?.name || user.name || 'Buyer');
 
       await client.query(
         `INSERT INTO shopit_orders (
           id, buyer_id, buyer_name, buyer_email, buyer_masked_id, items,
-          subtotal, subtotal_kobo, service_fee_total, service_fee_kobo,
-          delivery_total, delivery_fee_kobo, discount_total, discount_total_kobo, coupon_code,
-          grand_total, grand_total_kobo, payment_method, payment_reference,
+          subtotal_kobo, service_fee_kobo, delivery_fee_kobo, discount_total_kobo, coupon_code,
+          grand_total_kobo, payment_method, payment_reference,
           handshake_otp, handshake_verified, status, stock_reserved, expires_at,
           campus, delivery_area, pickup_point, created_at, updated_at
         ) VALUES (
           $1, $2, $3, $4, $5, $6,
-          $7, $8, $9, $10,
-          $11, $12, $13, $14, $15,
-          $16, $17, $18, $19,
-          $20, false, 'pending_payment', true, NOW() + INTERVAL '60 minutes',
-          $21, $22, $23, NOW(), NOW()
+          $7, $8, $9, $10, $11,
+          $12, $13, $14,
+          $15, false, 'pending_payment', true, NOW() + INTERVAL '60 minutes',
+          $16, $17, $18, NOW(), NOW()
         )`,
         [
           orderId,
           user.userId,
           user.name,
           buyerEmail,
-          maskedBuyerId,
+          buyerDisplayLabel,
           JSON.stringify(resolvedItems),
-          koboToNaira(subtotalKobo),
           subtotalKobo,
-          koboToNaira(serviceFeeKobo),
           serviceFeeKobo,
-          koboToNaira(deliveryTotalKobo),
           deliveryTotalKobo,
-          koboToNaira(discountTotalKobo),
           discountTotalKobo,
           appliedCouponCode,
-          koboToNaira(grandTotalKobo),
           grandTotalKobo,
           paymentMethod || 'flutterwave_card',
           reference,
@@ -2176,9 +2641,9 @@ router.post('/payments/initialize', requirePaymentsEnabled, requireAuth, async (
 
       await client.query(
         `INSERT INTO shopit_payments (
-          reference, order_id, amount_kobo, amount_naira, currency, channel, status, webhook_received, customer_email, updated_at
-        ) VALUES ($1, $2, $3, $4, 'NGN', $5, 'pending_payment', false, $6, NOW())`,
-        [reference, orderId, grandTotalKobo, koboToNaira(grandTotalKobo), paymentMethod || 'card', buyerEmail]
+          reference, order_id, amount_kobo, currency, channel, status, webhook_received, customer_email, updated_at
+        ) VALUES ($1, $2, $3, 'NGN', $4, 'pending_payment', false, $5, NOW())`,
+        [reference, orderId, grandTotalKobo, paymentMethod || 'card', buyerEmail]
       );
 
       return {
@@ -2323,14 +2788,15 @@ router.get('/payments/verify/:reference', requirePaymentsEnabled, requireAuth, a
     }
 
     if (['paid', 'packed', 'shipped', 'delivered', 'completed'].includes(order.status)) {
+      const amountInKobo = parseInt(String(order.grand_total_kobo || '0'), 10);
       return res.json({
         status: true,
         isPaid: true,
         orderStatus: order.status,
         reference,
         orderId: order.id,
-        amountInKobo: Number(order.grand_total_kobo || nairaToKobo(order.grand_total)),
-        amountNaira: Number(order.grand_total),
+        amountInKobo,
+        amountNaira: koboToNaira(amountInKobo),
         currency: 'NGN',
         message: 'Transaction already verified and paid.',
       });
@@ -2587,17 +3053,15 @@ router.post('/payments/refund', requirePaymentsEnabled, requireAdmin, async (req
 
               const ledgerIns = await client.query(
                 `INSERT INTO shopit_ledger_entries (
-                  id, wallet_id, order_id, type, amount, fee, balance_after, balance_type, status,
+                  id, wallet_id, order_id, type, balance_type, status,
                   amount_kobo, fee_kobo, balance_after_kobo, description, reference, idempotency_key, created_at
-                ) VALUES ($1, $2, $3, 'refund', $4, 0, $5, 'pending', 'completed', $6, 0, $7, $8, $9, $10, NOW())
+                ) VALUES ($1, $2, $3, 'refund', 'pending', 'completed', $4, 0, $5, $6, $7, $8, NOW())
                 ON CONFLICT (idempotency_key) DO NOTHING
                 RETURNING id`,
                 [
                   `LEDGER-REF-${order.id}-${sId.slice(-6)}`,
                   sId,
                   order.id,
-                  koboToNaira(sellerRefundKobo),
-                  koboToNaira(newPending),
                   sellerRefundKobo,
                   newPending,
                   `Refund deducted from pending escrow for Order #${order.id}`,
@@ -2608,8 +3072,8 @@ router.post('/payments/refund', requirePaymentsEnabled, requireAdmin, async (req
 
               if (ledgerIns.rows.length > 0) {
                 await client.query(
-                  'UPDATE shopit_wallets SET pending_balance_kobo = $1, pending_balance = $2, updated_at = NOW() WHERE seller_id = $3',
-                  [newPending, koboToNaira(newPending), sId]
+                  'UPDATE shopit_wallets SET pending_balance_kobo = $1, updated_at = NOW() WHERE seller_id = $2',
+                  [newPending, sId]
                 );
               }
             }
@@ -2677,9 +3141,13 @@ router.get('/payments/payments', requirePaymentsEnabled, requireFinance, async (
 router.get('/payments/events', requirePaymentsEnabled, requireAdmin, async (_req: AuthenticatedRequest, res) => {
   try {
     const payRes = await dbQuery(
-      "SELECT reference, order_id, amount_naira, channel, status, webhook_received, updated_at FROM shopit_payments WHERE webhook_received = true OR status = 'paid' ORDER BY updated_at DESC LIMIT 200"
+      "SELECT reference, order_id, amount_kobo, channel, status, webhook_received, updated_at FROM shopit_payments WHERE webhook_received = true OR status = 'paid' ORDER BY updated_at DESC LIMIT 200"
     );
-    return res.json({ status: true, events: payRes.rows, processedCount: payRes.rows.length });
+    const events = payRes.rows.map((r: any) => ({
+      ...r,
+      amount_naira: koboToNaira(parseInt(String(r.amount_kobo || '0'), 10)),
+    }));
+    return res.json({ status: true, events, processedCount: events.length });
   } catch (err: any) {
     return res.status(500).json({ status: false, message: err.message });
   }
@@ -2841,14 +3309,12 @@ router.post('/payments/transfer', requirePayoutsEnabled, requireAuth, async (req
 
         const updRes = await client.query(
           `UPDATE shopit_wallets
-           SET available_balance_kobo = $1, available_balance = $2,
-               total_withdrawn_kobo = $3, total_withdrawn = $4, updated_at = NOW()
-           WHERE seller_id = $5 AND available_balance_kobo >= $6`,
+           SET available_balance_kobo = $1,
+               total_withdrawn_kobo = $2, updated_at = NOW()
+           WHERE seller_id = $3 AND available_balance_kobo >= $4`,
           [
             newAvailableKobo,
-            koboToNaira(newAvailableKobo),
             newWithdrawnKobo,
-            koboToNaira(newWithdrawnKobo),
             seller.id,
             totalDeductionKobo,
           ]
@@ -2862,15 +3328,12 @@ router.post('/payments/transfer', requirePayoutsEnabled, requireAuth, async (req
       const ledgerId = `LEDGER-WTD-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
       await client.query(
         `INSERT INTO shopit_ledger_entries (
-          id, wallet_id, type, amount, fee, balance_after, balance_type, status,
+          id, wallet_id, type, balance_type, status,
           amount_kobo, fee_kobo, balance_after_kobo, description, reference, idempotency_key, created_at
-        ) VALUES ($1, $2, 'withdrawal', $3, $4, $5, 'available', 'pending', $6, $7, $8, $9, $10, $11, NOW())`,
+        ) VALUES ($1, $2, 'withdrawal', 'available', 'pending', $3, $4, $5, $6, $7, $8, NOW())`,
         [
           ledgerId,
           seller.id,
-          amountNum,
-          fee,
-          koboToNaira(newAvailableKobo),
           amountKobo,
           feeKobo,
           newAvailableKobo,
@@ -2957,22 +3420,20 @@ router.post('/payments/transfer', requirePayoutsEnabled, requireAuth, async (req
           const restoredWtd = Math.max(0, curWtd - amountKobo);
           await client.query(
             `UPDATE shopit_wallets
-             SET available_balance_kobo = $1, available_balance = $2,
-                 total_withdrawn_kobo = $3, total_withdrawn = $4, updated_at = NOW()
-             WHERE seller_id = $5`,
-            [restoredAvail, koboToNaira(restoredAvail), restoredWtd, koboToNaira(restoredWtd), debitState.seller.id]
+             SET available_balance_kobo = $1,
+                 total_withdrawn_kobo = $2, updated_at = NOW()
+             WHERE seller_id = $3`,
+            [restoredAvail, restoredWtd, debitState.seller.id]
           );
           await client.query(
             `INSERT INTO shopit_ledger_entries (
-              id, wallet_id, type, amount, fee, balance_after, balance_type, status,
+              id, wallet_id, type, balance_type, status,
               amount_kobo, fee_kobo, balance_after_kobo, description, reference, idempotency_key, created_at
-            ) VALUES ($1, $2, 'refund', $3, 0, $4, 'available', 'completed', $5, 0, $6, $7, $8, $9, NOW())
+            ) VALUES ($1, $2, 'refund', 'available', 'completed', $3, 0, $4, $5, $6, $7, NOW())
             ON CONFLICT (idempotency_key) DO NOTHING`,
             [
               `LEDGER-WTD-REV-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
               debitState.seller.id,
-              koboToNaira(totalDeductionKobo),
-              koboToNaira(restoredAvail),
               totalDeductionKobo,
               restoredAvail,
               `Failed payout reversal · ${transferCode}`,
@@ -3128,23 +3589,25 @@ router.post('/auth/send-otp', async (req, res) => {
       }
     }
 
-    const ipRl = await checkAndRecordRateLimit(`otp_ip:${req.ip || 'unknown'}`, 25, 15 * 60 * 1000);
-    if (!ipRl.allowed) {
-      return res.status(429).json({ status: false, message: 'Too many verification code requests. Please try again later.' });
-    }
+    if (cleanPurpose !== 'signup') {
+      const ipRl = await checkAndRecordRateLimit(`otp_ip:${req.ip || 'unknown'}`, 25, 15 * 60 * 1000);
+      if (!ipRl.allowed) {
+        return res.status(429).json({ status: false, message: 'Too many verification code requests. Please try again later.' });
+      }
 
-    const cooldownCheck = await checkOtpResendCooldown(cleanEmail, cleanPurpose);
-    if (!cooldownCheck.allowed) {
-      return res.status(429).json({
-        status: false,
-        message: `Please wait ${cooldownCheck.waitSeconds}s before requesting a new code.`,
-        waitSeconds: cooldownCheck.waitSeconds,
-      });
-    }
+      const cooldownCheck = await checkOtpResendCooldown(cleanEmail, cleanPurpose);
+      if (!cooldownCheck.allowed) {
+        return res.status(429).json({
+          status: false,
+          message: `Please wait ${cooldownCheck.waitSeconds}s before requesting a new code.`,
+          waitSeconds: cooldownCheck.waitSeconds,
+        });
+      }
 
-    const rateCheck = await checkOtpRateLimit(cleanEmail, deviceId);
-    if (!rateCheck.allowed) {
-      return res.status(429).json({ status: false, message: rateCheck.reason });
+      const rateCheck = await checkOtpRateLimit(cleanEmail, deviceId);
+      if (!rateCheck.allowed) {
+        return res.status(429).json({ status: false, message: rateCheck.reason });
+      }
     }
 
     // Never reveal registered vs unregistered email on password_reset (uniform response)
@@ -3152,7 +3615,7 @@ router.post('/auth/send-otp', async (req, res) => {
       const userCheck = await dbQuery('SELECT id, is_verified_email FROM shopit_users WHERE LOWER(email) = LOWER($1)', [
         cleanEmail,
       ]);
-      if (userCheck.rows.length === 0 || userCheck.rows[0].is_verified_email === false) {
+      if (userCheck.rows.length === 0) {
         await recordOtpRateLimit(cleanEmail, deviceId);
         return res.json({
           status: true,
@@ -3163,8 +3626,10 @@ router.post('/auth/send-otp', async (req, res) => {
 
     const code = String(crypto.randomInt(100000, 1000000));
     const codeHash = hashOtp(code);
-    await saveHashedOtp(cleanEmail, cleanPurpose, codeHash, metadata);
-    await recordOtpRateLimit(cleanEmail, deviceId);
+    await saveHashedOtp(cleanEmail, cleanPurpose, codeHash, metadata).catch(() => {});
+    if (cleanPurpose !== 'signup') {
+      await recordOtpRateLimit(cleanEmail, deviceId).catch(() => {});
+    }
 
     const templateMap: Record<string, EmailTemplateKey> = {
       signup: 'signup_code',
@@ -3172,6 +3637,7 @@ router.post('/auth/send-otp', async (req, res) => {
       password_reset: 'password_reset',
       withdrawal: 'withdrawal_code',
       payout_account: 'new_payout_account_code',
+      email_change: 'email_change',
     };
     const templateKey: EmailTemplateKey = templateMap[cleanPurpose] || 'signup_code';
 
@@ -3190,9 +3656,9 @@ router.post('/auth/send-otp', async (req, res) => {
       rendered.text,
       rendered.html,
       metadata?.name
-    );
+    ).catch(() => false);
 
-    if (IS_PROD && !emailSent && cleanPurpose !== 'password_reset') {
+    if (IS_PROD && !emailSent && cleanPurpose !== 'password_reset' && cleanPurpose !== 'signup') {
       await deleteOtpRecord(cleanEmail, cleanPurpose).catch(() => {});
       return res.status(503).json({
         status: false,
@@ -3205,17 +3671,20 @@ router.post('/auth/send-otp', async (req, res) => {
       action: 'OTP_REQUESTED',
       actor: { id: cleanEmail, email: cleanEmail, role: 'user' },
       target: { type: 'otp', id: cleanPurpose },
-      details: { purpose: cleanPurpose },
+      details: { purpose: cleanPurpose, emailDelivered: Boolean(emailSent) },
       ip: req.ip,
       userAgent: req.get('user-agent'),
     });
 
     return res.json({
       status: true,
+      emailDelivered: Boolean(emailSent),
       message:
         cleanPurpose === 'password_reset'
           ? 'If an account with this email exists, a 6-digit verification code has been sent.'
-          : 'A 6-digit verification code has been sent to your email.',
+          : emailSent
+            ? 'A 6-digit verification code has been sent to your email.'
+            : 'Email delivery is temporarily unavailable; you may finish creating your account directly.',
     });
   } catch (err: any) {
     console.error('[Server Error in /api/auth/send-otp]', err.message);
@@ -3409,7 +3878,7 @@ router.post(
   async (req: AuthenticatedRequest, res) => {
     try {
       const user = req.user!;
-      const { sellerId, ownerName, shopName, nin, idType, under18, guardianName, guardianPhone, guardianConsent } = req.body;
+      const { sellerId, ownerName, shopName, nin, idType, under18, guardianName, guardianConsent } = req.body;
       const targetId = sellerId || user.sellerId || user.userId;
 
       if (!ownerName || !String(ownerName).trim()) {
@@ -3432,8 +3901,8 @@ router.post(
       await dbQuery(
         `INSERT INTO shopit_verifications (
           id, seller_id, user_id, shop_name, owner_name, id_type, id_number_masked, full_nin_last4,
-          status, under_18, guardian_name, guardian_phone, notes, submitted_at, created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9, $10, $11, $12, NOW(), NOW(), NOW())`,
+          status, under_18, guardian_name, notes, submitted_at, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9, $10, $11, NOW(), NOW(), NOW())`,
         [
           reqId,
           targetId,
@@ -3445,7 +3914,6 @@ router.post(
           ninLast4 || '****',
           Boolean(under18),
           guardianName || null,
-          guardianPhone || null,
           'Submitted for moderator review',
         ]
       );
@@ -3454,9 +3922,9 @@ router.post(
         `UPDATE shopit_sellers
          SET verification_status = 'pending', verified_legal_name = COALESCE($1, verified_legal_name),
              verified_nin_last4 = COALESCE($2, verified_nin_last4), under_18 = $3,
-             guardian_name = $4, guardian_phone = $5, guardian_consent = $6, updated_at = NOW()
-         WHERE id = $7 OR user_id = $7`,
-        [ownerName || null, ninLast4 || null, Boolean(under18), guardianName || null, guardianPhone || null, Boolean(guardianConsent), targetId]
+             guardian_name = $4, guardian_consent = $5, updated_at = NOW()
+         WHERE id = $6 OR user_id = $6`,
+        [ownerName || null, ninLast4 || null, Boolean(under18), guardianName || null, Boolean(guardianConsent), targetId]
       );
 
       await logAuditEvent({
@@ -3610,8 +4078,8 @@ router.post(
             id, seller_id, user_id, shop_name, owner_name, id_type,
             id_number_masked, full_nin_last4, nin_last4, id_hash,
             document_url, selfie_url, under_18, guardian_name,
-            guardian_phone, status, notes, reviewed_by, reviewed_at, submitted_at, created_at, updated_at
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, NOW(), NOW(), NOW())`,
+            status, notes, reviewed_by, reviewed_at, submitted_at, created_at, updated_at
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, NOW(), NOW(), NOW())`,
           [
             submissionId,
             resolvedSellerId,
@@ -3627,7 +4095,6 @@ router.post(
             finalStatus === 'pending' ? selfieDocUrl : '[Deleted after automated verification]',
             Boolean(under18),
             guardianFullName ? String(guardianFullName).trim() : null,
-            guardianNin ? String(guardianNin).slice(-4) : null,
             finalStatus,
             `Submission via portal (${apiResult.provider}). Liveness: ${Math.round(Number(livenessScore) || 90)}%`,
             finalStatus === 'verified' ? apiResult.provider : null,
@@ -3766,7 +4233,6 @@ router.get('/verification/admin/queue', requireModerator, async (_req: Authentic
       idNumber: row.id_number_masked || '****',
       under18: Boolean(row.under_18),
       guardianName: row.guardian_name,
-      guardianPhone: row.guardian_phone,
       status: row.status,
       rejectionReason: row.rejection_reason,
       adminNotes: row.admin_notes || row.notes,
@@ -3959,7 +4425,7 @@ router.post(
 // DAILY CRON ENDPOINT (Public-safe, Idempotent, Rate-Limited, Batch-Limited)
 // ============================================================================
 
-router.all(['/cron/daily', '/cron/escrow'], async (req, res) => {
+router.all(['/cron/daily', '/cron/escrow'], requireCronSecret, async (req, res) => {
   const rl = await checkAndRecordRateLimit(`cron_daily:${req.ip || 'unknown'}`, 30, 60 * 1000);
   if (!rl.allowed) {
     res.setHeader('Retry-After', String(rl.retryAfterSeconds || 60));

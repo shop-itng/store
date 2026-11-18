@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { ShareButtons } from './ShareButtons';
 import { ReportModal, ReportTarget } from './ReportModal';
+import { UserIdentityBadge } from './UserIdentityBadge';
 
 interface ProductDetailViewProps {
   product: Product;
@@ -35,7 +36,7 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({ product, o
   const {
     currentUser,
     getSellerById,
-    openSellerShop,
+    openProfile,
     wishlist,
     toggleWishlist,
     addToCart,
@@ -345,19 +346,15 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({ product, o
           {/* Seller Trust Bar */}
           <div className="flex items-start justify-between pb-4 border-b border-slate-100 dark:border-[#27272A]">
             <div>
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => openSellerShop(product.sellerId)}
-                  className="text-sm font-bold text-slate-900 dark:text-white hover:underline flex items-center gap-1"
-                >
-                  <span>{product.sellerShopName}</span>
-                </button>
-                {((seller?.isVerifiedSeller && (seller?.verificationStatus === 'verified' || seller?.verificationStatus === 'approved')) || product.sellerBadges?.includes('verified')) && (
-                  <span className="text-[11px] font-black text-[#111111] bg-[#9FE870] px-2 py-0.5 rounded-md flex items-center gap-1 shadow-2xs">
-                    <ShieldCheck className="w-3.5 h-3.5 text-[#111111]" />
-                    <span>NIMC Verified</span>
-                  </span>
-                )}
+              <div className="flex items-center gap-2 flex-wrap">
+                <UserIdentityBadge
+                  userId={product.sellerId}
+                  profileSlug={product.sellerProfileSlug || seller?.profileSlug}
+                  displayName={product.sellerShopName || product.sellerDisplayName}
+                  avatarUrl={product.sellerAvatarUrl || seller?.logoUrl}
+                  isVerified={Boolean((seller?.isVerifiedSeller && (seller?.verificationStatus === 'verified' || seller?.verificationStatus === 'approved')) || product.sellerBadges?.includes('verified'))}
+                  size="sm"
+                />
               </div>
               <div className="flex items-center gap-2 text-xs text-[#71717A] dark:text-[#A1A1AA] mt-1.5">
                 <span className="inline-flex items-center gap-1 font-bold text-[#111111] bg-[#9FE870] px-2.5 py-0.5 rounded-md text-[11px]">
@@ -370,10 +367,10 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({ product, o
             </div>
 
             <button
-              onClick={() => openSellerShop(product.sellerId)}
+              onClick={() => openProfile(product.sellerProfileSlug || seller?.profileSlug || product.sellerId)}
               className="text-xs font-bold text-[#FF6B00] hover:underline whitespace-nowrap shrink-0"
             >
-              View Shop
+              View Profile
             </button>
           </div>
 
@@ -703,10 +700,14 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({ product, o
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {product.reviews.map(rev => (
               <div key={rev.id} className="p-4 bg-white dark:bg-stone-900 rounded-xl border border-slate-200/90 dark:border-stone-800 space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-semibold text-slate-700 dark:text-slate-200">
-                    {rev.buyerMaskedId}
-                  </span>
+                <div className="flex items-center justify-between gap-2">
+                  <UserIdentityBadge
+                    userId={rev.reviewerId}
+                    profileSlug={rev.reviewerProfileSlug}
+                    displayName={rev.reviewerName}
+                    avatarUrl={rev.reviewerAvatarUrl}
+                    size="sm"
+                  />
                   <div className="flex items-center gap-2">
                     <span className="text-[11px] text-slate-500">{rev.date}</span>
                     <button
@@ -715,7 +716,7 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({ product, o
                         setReportTarget({
                           targetType: 'review',
                           targetId: rev.id,
-                          targetTitle: `Review by ${rev.buyerMaskedId} on ${product.title}`,
+                          targetTitle: `Review by ${rev.reviewerName} on ${product.title}`,
                         })
                       }
                       title="Report Review"

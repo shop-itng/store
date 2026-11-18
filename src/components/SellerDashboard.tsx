@@ -29,6 +29,7 @@ import {
 import { SellerWalletView } from './SellerWalletView';
 import { SellerVerificationModal } from './SellerVerificationModal';
 import { SellerOnboardingChecklist } from './SellerOnboardingChecklist';
+import { UserIdentityBadge } from './UserIdentityBadge';
 
 export const SellerDashboard: React.FC = () => {
   const {
@@ -716,7 +717,7 @@ export const SellerDashboard: React.FC = () => {
             <ShieldCheck className="w-4 h-4 text-blue-600 shrink-0" />
             <span>
               <strong>Anti-Bypass Privacy Active: </strong>
-              You see only the buyer's <strong>Masked ID</strong>, delivery area, and custom choices.
+              You see only the buyer&apos;s <strong>Display Name</strong>, delivery area, and custom choices.
               Before dispatching, upload a quick photo of the packed order to verify fulfillment.
             </span>
           </div>
@@ -733,10 +734,16 @@ export const SellerDashboard: React.FC = () => {
                     className="bg-white rounded-2xl border border-slate-200 p-5 space-y-4 shadow-xs"
                   >
                     <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-100 text-xs">
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
                         <strong className="text-slate-900 font-mono">{order.id}</strong>
                         <span className="text-slate-400">·</span>
-                        <span className="font-semibold text-slate-700">{order.buyerMaskedId}</span>
+                        <UserIdentityBadge
+                          userId={order.buyerId}
+                          profileSlug={order.buyerProfileSlug}
+                          displayName={order.buyerDisplayName || 'Buyer'}
+                          avatarUrl={order.buyerAvatarUrl}
+                          size="xs"
+                        />
                         <span className="text-slate-400">·</span>
                         <span className="text-slate-500">{order.deliveryArea}</span>
                       </div>

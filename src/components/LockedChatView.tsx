@@ -15,6 +15,7 @@ import {
 import { checkNumbersInText, PRESET_PRICES, PRESET_QUANTITIES } from '../utils/antiBypass';
 import { ChatMessage } from '../types';
 import { ReportModal, ReportTarget } from './ReportModal';
+import { UserIdentityBadge } from './UserIdentityBadge';
 
 export const LockedChatView: React.FC = () => {
   const {
@@ -61,12 +62,34 @@ export const LockedChatView: React.FC = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [activeMessages]);
 
-  const getCounterpartLabel = (conv: typeof activeConv) => {
-    if (!conv) return 'Artisan';
+  const getCounterpartInfo = (conv: typeof activeConv) => {
+    if (!conv) {
+      return {
+        userId: undefined,
+        profileSlug: undefined,
+        displayName: 'Member',
+        avatarUrl: undefined,
+      };
+    }
     const sellerIds = [currentUser?.id, currentUser?.sellerProfile?.id].filter(Boolean);
     const isSellerInThread = sellerIds.includes(conv.sellerId) && currentUser?.role === 'seller';
-    return isSellerInThread ? conv.buyerMaskedId || 'Buyer' : conv.sellerShopName || 'Artisan';
+    if (isSellerInThread) {
+      return {
+        userId: conv.buyerId,
+        profileSlug: conv.buyerProfileSlug,
+        displayName: conv.buyerDisplayName || 'Buyer',
+        avatarUrl: conv.buyerAvatarUrl,
+      };
+    }
+    return {
+      userId: conv.sellerId,
+      profileSlug: conv.sellerProfileSlug,
+      displayName: conv.sellerShopName || conv.sellerDisplayName || 'Maker',
+      avatarUrl: conv.sellerAvatarUrl,
+    };
   };
+
+  const getCounterpartLabel = (conv: typeof activeConv) => getCounterpartInfo(conv).displayName;
 
   // Real-time live scanning while typing to prevent typing digits or number words
   const handleInputChange = (text: string) => {
@@ -263,12 +286,14 @@ export const LockedChatView: React.FC = () => {
               {/* Chat Header */}
               <div className="p-3.5 border-b border-[#E4E4E7] dark:border-[#27272A] flex items-center justify-between bg-white dark:bg-[#15161C]">
                 <div className="min-w-0">
-                  <h3 className="text-xs sm:text-sm font-black text-[#111111] dark:text-white truncate">
-                    {getCounterpartLabel(activeConv)}
-                  </h3>
-                  <p className="text-[11px] text-[#71717A] dark:text-[#A1A1AA] truncate max-w-sm">
-                    Re: {activeConv.productTitle}
-                  </p>
+                  <UserIdentityBadge
+                    userId={getCounterpartInfo(activeConv).userId}
+                    profileSlug={getCounterpartInfo(activeConv).profileSlug}
+                    displayName={getCounterpartInfo(activeConv).displayName}
+                    avatarUrl={getCounterpartInfo(activeConv).avatarUrl}
+                    subtitle={`Re: ${activeConv.productTitle || 'Order Inquiry'}`}
+                    size="sm"
+                  />
                 </div>
 
                 <div className="flex items-center gap-2 shrink-0">
@@ -419,8 +444,8 @@ export const LockedChatView: React.FC = () => {
                       key={msg.id}
                       className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}
                     >
-                      <span className="text-[10px] text-[#A1A1AA] mb-0.5 px-1 font-medium">
-                        {msg.senderMaskedName} · {msg.timestamp}
+                      <span className="text-[10px] text-[#71717A] dark:text-[#A1A1AA] mb-0.5 px-1 font-medium">
+                        {msg.senderDisplayName} · {msg.timestamp}
                       </span>
 
                       <div

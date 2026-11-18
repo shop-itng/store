@@ -44,7 +44,6 @@ export const SellerVerificationModal: React.FC<SellerVerificationModalProps> = (
   const [isUnder18, setIsUnder18] = useState(false);
   const [guardianFullName, setGuardianFullName] = useState(currentSeller?.guardianName || '');
   const [guardianNin, setGuardianNin] = useState('');
-  const [guardianPhone, setGuardianPhone] = useState(currentSeller?.guardianPhone || '');
   const [guardianIdPhoto, setGuardianIdPhoto] = useState<string>('');
   const [guardianConsentSigned, setGuardianConsentSigned] = useState(false);
 
@@ -326,7 +325,6 @@ export const SellerVerificationModal: React.FC<SellerVerificationModalProps> = (
           livenessScore,
           under18: isUnder18,
           guardianName: isUnder18 ? guardianFullName.trim() : undefined,
-          guardianPhone: isUnder18 ? guardianPhone : undefined,
           guardianNinLast4: isUnder18 ? guardianNin.slice(-4) : undefined,
           guardianIdCardPhotoUrl: isUnder18 ? guardianIdPhoto : undefined,
           guardianConsentSigned: isUnder18 ? guardianConsentSigned : undefined,
@@ -729,35 +727,19 @@ export const SellerVerificationModal: React.FC<SellerVerificationModalProps> = (
               />
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div>
-                <label className="block font-bold text-[#111111] dark:text-white mb-1">
-                  Guardian Phone Number *
-                </label>
-                <input
-                  type="tel"
-                  required
-                  value={guardianPhone}
-                  onChange={e => setGuardianPhone(e.target.value)}
-                  placeholder="e.g. 08012345678"
-                  className="w-full h-11 px-3 rounded-xl border border-[#E4E4E7] dark:border-[#27272A] bg-white dark:bg-[#1E2028] text-xs font-semibold text-[#111111] dark:text-white focus:outline-none focus:border-[#FF6B00]"
-                />
-              </div>
-
-              <div>
-                <label className="block font-bold text-[#111111] dark:text-white mb-1">
-                  Guardian 11-Digit NIN *
-                </label>
-                <input
-                  type="text"
-                  maxLength={11}
-                  required
-                  value={guardianNin}
-                  onChange={e => setGuardianNin(e.target.value.replace(/\D/g, '').slice(0, 11))}
-                  placeholder="11 digits"
-                  className="w-full h-11 px-3 rounded-xl border border-[#E4E4E7] dark:border-[#27272A] bg-white dark:bg-[#1E2028] text-xs font-mono font-semibold text-[#111111] dark:text-white focus:outline-none focus:border-[#FF6B00]"
-                />
-              </div>
+            <div>
+              <label className="block font-bold text-[#111111] dark:text-white mb-1">
+                Guardian 11-Digit NIN *
+              </label>
+              <input
+                type="text"
+                maxLength={11}
+                required
+                value={guardianNin}
+                onChange={e => setGuardianNin(e.target.value.replace(/\D/g, '').slice(0, 11))}
+                placeholder="11 digits"
+                className="w-full h-11 px-3 rounded-xl border border-[#E4E4E7] dark:border-[#27272A] bg-white dark:bg-[#1E2028] text-xs font-mono font-semibold text-[#111111] dark:text-white focus:outline-none focus:border-[#FF6B00]"
+              />
             </div>
 
             {/* Guardian ID Upload */}

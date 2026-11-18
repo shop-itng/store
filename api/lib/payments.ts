@@ -403,7 +403,7 @@ export async function commitPaidOrderTransaction(params: {
       return { found: true, committed: false, alreadyPaid: true, order } as SettleOrderResult;
     }
 
-    const expectedKobo = Number(order.grand_total_kobo) || nairaToKobo(order.grand_total);
+    const expectedKobo = Number(order.grand_total_kobo || 0);
     if (Number(params.confirmedAmountKobo) < expectedKobo) {
       return {
         found: true,
@@ -442,18 +442,17 @@ export async function commitPaidOrderTransaction(params: {
 
       await client.query(
         `INSERT INTO shopit_payments (
-          reference, order_id, amount_kobo, amount_naira, currency, channel, status, webhook_received, customer_email, data, updated_at
-        ) VALUES ($1, $2, $3, $4, 'NGN', $5, 'late_after_expiry', $6, $7, $8, NOW())
+          reference, order_id, amount_kobo, currency, channel, status, webhook_received, customer_email, data, updated_at
+        ) VALUES ($1, $2, $3, 'NGN', $4, 'late_after_expiry', $5, $6, $7, NOW())
         ON CONFLICT (reference) DO UPDATE SET
           status = 'late_after_expiry',
-          webhook_received = COALESCE(shopit_payments.webhook_received, false) OR $6,
-          data = $8,
+          webhook_received = COALESCE(shopit_payments.webhook_received, false) OR $5,
+          data = $7,
           updated_at = NOW()`,
         [
           params.reference,
           order.id,
           params.confirmedAmountKobo,
-          koboToNaira(params.confirmedAmountKobo),
           params.channel || 'online',
           params.webhookReceived,
           params.customerEmail || order.buyer_email || '',
@@ -540,19 +539,18 @@ export async function commitPaidOrderTransaction(params: {
     // 4. Persist/update shopit_payments inside the same transaction
     await client.query(
       `INSERT INTO shopit_payments (
-        reference, order_id, amount_kobo, amount_naira, currency, channel, status, webhook_received, customer_email, data, updated_at
-      ) VALUES ($1, $2, $3, $4, 'NGN', $5, 'paid', $6, $7, $8, NOW())
+        reference, order_id, amount_kobo, currency, channel, status, webhook_received, customer_email, data, updated_at
+      ) VALUES ($1, $2, $3, 'NGN', $4, 'paid', $5, $6, $7, NOW())
       ON CONFLICT (reference) DO UPDATE SET
         status = 'paid',
-        webhook_received = COALESCE(shopit_payments.webhook_received, false) OR $6,
-        channel = COALESCE($5, shopit_payments.channel),
-        data = $8,
+        webhook_received = COALESCE(shopit_payments.webhook_received, false) OR $5,
+        channel = COALESCE($4, shopit_payments.channel),
+        data = $7,
         updated_at = NOW()`,
       [
         params.reference,
         order.id,
         expectedKobo,
-        koboToNaira(expectedKobo),
         params.channel || 'online',
         params.webhookReceived,
         params.customerEmail || order.buyer_email || '',
@@ -564,9 +562,9 @@ export async function commitPaidOrderTransaction(params: {
     for (const [sId, sellerEarningsKobo] of Object.entries(sellerTotalsKobo)) {
       await client.query(
         `INSERT INTO shopit_wallets (
-          seller_id, pending_balance, available_balance, total_withdrawn, is_frozen,
+          seller_id, is_frozen,
           pending_balance_kobo, available_balance_kobo, total_withdrawn_kobo, created_at, updated_at
-        ) VALUES ($1, 0, 0, 0, false, 0, 0, 0, NOW(), NOW())
+        ) VALUES ($1, false, 0, 0, 0, NOW(), NOW())
         ON CONFLICT (seller_id) DO NOTHING`,
         [sId]
       );
@@ -581,11 +579,11 @@ export async function commitPaidOrderTransaction(params: {
       const idempotencyKey = `sale_pending:${order.id}:${sId}`;
       const ledgerIns = await client.query(
         `INSERT INTO shopit_ledger_entries (
-          id, wallet_id, order_id, type, amount, fee, balance_after, balance_type, status,
+          id, wallet_id, order_id, type, balance_type, status,
           amount_kobo, fee_kobo, balance_after_kobo, description, reference, idempotency_key, created_at
         ) VALUES (
-          $1, $2, $3, 'sale_pending', $4, 0, $5, 'pending', 'held',
-          $6, 0, $7, $8, $9, $10, NOW()
+          $1, $2, $3, 'sale_pending', 'pending', 'held',
+          $4, 0, $5, $6, $7, $8, NOW()
         )
         ON CONFLICT (idempotency_key) DO NOTHING
         RETURNING id`,
@@ -593,8 +591,6 @@ export async function commitPaidOrderTransaction(params: {
           `LEDGER-PEND-${order.id}-${sId.slice(-6)}`,
           sId,
           order.id,
-          koboToNaira(sellerEarningsKobo),
-          koboToNaira(newPendingKobo),
           sellerEarningsKobo,
           newPendingKobo,
           `Escrow holding for Order #${order.id}`,
@@ -607,10 +603,9 @@ export async function commitPaidOrderTransaction(params: {
         await client.query(
           `UPDATE shopit_wallets
            SET pending_balance_kobo = $1,
-               pending_balance = $2,
                updated_at = NOW()
-           WHERE seller_id = $3`,
-          [newPendingKobo, koboToNaira(newPendingKobo), sId]
+           WHERE seller_id = $2`,
+          [newPendingKobo, sId]
         );
       }
     }
@@ -651,7 +646,7 @@ export async function commitPaidOrderTransaction(params: {
         const buyerMail = renderTransactionalEmail('order_placed_buyer', {
           name: order.buyer_name || 'Customer',
           order_id: order.id,
-          total: Number(order.grand_total || koboToNaira(order.grand_total_kobo)),
+          total: koboToNaira(order.grand_total_kobo || 0),
         });
         emailTasks.push(sendBrevoDirect(buyerEmail, buyerMail.subject, buyerMail.text, buyerMail.html, order.buyer_name));
       }
@@ -839,10 +834,7 @@ export async function processUnshippedOrders(batchLimit = 50): Promise<{
         continue;
       }
 
-      const refundNaira =
-        Number(candidate.grand_total_kobo) > 0
-          ? koboToNaira(candidate.grand_total_kobo)
-          : parseFloat(candidate.grand_total || '0');
+      const refundNaira = koboToNaira(candidate.grand_total_kobo || 0);
 
       // Call Flutterwave v3 refund endpoint BEFORE mutating escrow balances
       const controller = new AbortController();
@@ -914,17 +906,15 @@ export async function processUnshippedOrders(batchLimit = 50): Promise<{
             const idempKey = `unshipped_refund:${ord.id}:${sId}`;
             const ins = await client.query(
               `INSERT INTO shopit_ledger_entries (
-                id, wallet_id, order_id, type, amount, fee, balance_after, balance_type, status,
+                id, wallet_id, order_id, type, balance_type, status,
                 amount_kobo, fee_kobo, balance_after_kobo, description, reference, idempotency_key, created_at
-              ) VALUES ($1, $2, $3, 'refund', $4, 0, $5, 'pending', 'completed', $6, 0, $7, $8, $9, $10, NOW())
+              ) VALUES ($1, $2, $3, 'refund', 'pending', 'completed', $4, 0, $5, $6, $7, $8, NOW())
               ON CONFLICT (idempotency_key) DO NOTHING
               RETURNING id`,
               [
                 `LEDGER-UNSHP-${ord.id}-${sId.slice(-6)}`,
                 sId,
                 ord.id,
-                koboToNaira(sellerEarningsKobo),
-                koboToNaira(newPending),
                 sellerEarningsKobo,
                 newPending,
                 `Auto-refund for never-shipped Order #${ord.id} (Day 5)`,
@@ -935,9 +925,9 @@ export async function processUnshippedOrders(batchLimit = 50): Promise<{
             if (ins.rows.length > 0) {
               await client.query(
                 `UPDATE shopit_wallets
-                 SET pending_balance_kobo = $1, pending_balance = $2, updated_at = NOW()
-                 WHERE seller_id = $3`,
-                [newPending, koboToNaira(newPending), sId]
+                 SET pending_balance_kobo = $1, updated_at = NOW()
+                 WHERE seller_id = $2`,
+                [newPending, sId]
               );
             }
           }
@@ -1018,19 +1008,14 @@ export async function runDailyReconciliationCheck(): Promise<{
     discrepancyCount += negRes.rows.length;
 
     const walletsRes = await dbQuery(
-      `SELECT seller_id, pending_balance_kobo, pending_balance, available_balance_kobo, available_balance
+      `SELECT seller_id, pending_balance_kobo, available_balance_kobo
        FROM shopit_wallets
        LIMIT 500`
     );
 
-    const fieldKobo = (koboVal: any, nairaVal: any) =>
-      koboVal !== null && koboVal !== undefined && Number(koboVal) !== 0
-        ? Number(koboVal)
-        : Math.round(Number(nairaVal || 0) * 100);
-
     for (const w of walletsRes.rows) {
       const ledRes = await dbQuery(
-        `SELECT type, balance_type, amount_kobo, amount, fee_kobo, fee
+        `SELECT type, balance_type, amount_kobo, fee_kobo
          FROM shopit_ledger_entries
          WHERE wallet_id = $1`,
         [w.seller_id]
@@ -1039,8 +1024,8 @@ export async function runDailyReconciliationCheck(): Promise<{
       let derivedPending = 0;
       let derivedAvailable = 0;
       for (const l of ledRes.rows) {
-        const amt = fieldKobo(l.amount_kobo, l.amount);
-        const fee = fieldKobo(l.fee_kobo, l.fee);
+        const amt = Number(l.amount_kobo || 0);
+        const fee = Number(l.fee_kobo || 0);
         if (l.type === 'sale_pending') {
           derivedPending += amt;
         } else if (l.type === 'escrow_release') {
@@ -1054,8 +1039,8 @@ export async function runDailyReconciliationCheck(): Promise<{
         }
       }
 
-      const wPending = fieldKobo(w.pending_balance_kobo, w.pending_balance);
-      const wAvail = fieldKobo(w.available_balance_kobo, w.available_balance);
+      const wPending = Number(w.pending_balance_kobo || 0);
+      const wAvail = Number(w.available_balance_kobo || 0);
       if (wPending !== derivedPending || wAvail !== derivedAvailable) {
         discrepancyCount++;
       }
