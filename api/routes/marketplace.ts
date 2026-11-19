@@ -28,6 +28,8 @@ import {
   containsForbiddenContactInfo,
   extractFirstName,
   sanitizePrivacySettings,
+  sanitizeNotificationPrefs,
+  DEFAULT_NOTIFICATION_PREFS,
   DEFAULT_PRIVACY_SETTINGS,
   UNDER_18_PRIVACY_SETTINGS,
   rejectUnknownFields,
@@ -109,20 +111,27 @@ async function notifyFollowersOfNewProduct(params: {
     const cleanIds = Array.from(new Set(params.sellerIds.filter(Boolean)));
     if (cleanIds.length === 0) return;
     const { placeholders, params: sParams } = buildInClause(cleanIds);
-    const folRes = await dbQuery(
-      `SELECT DISTINCT f.follower_id
-       FROM shopit_follows f
-       JOIN shopit_users u ON u.id = f.follower_id
-       WHERE f.following_id IN (${placeholders})
-         AND f.status = 'accepted'
-         AND u.deleted_at IS NULL
-         AND u.is_banned IS NOT TRUE`,
-      sParams
-    );
+    const [folRes, muteRes] = await Promise.all([
+      dbQuery(
+        `SELECT DISTINCT f.follower_id, u.email, u.display_name, u.name, u.notification_prefs
+         FROM shopit_follows f
+         JOIN shopit_users u ON u.id = f.follower_id
+         WHERE f.following_id IN (${placeholders})
+           AND f.status = 'accepted'
+           AND u.deleted_at IS NULL
+           AND u.is_banned IS NOT TRUE`,
+        sParams
+      ),
+      dbQuery(
+        `SELECT muter_id FROM shopit_mutes WHERE muted_id IN (${placeholders})`,
+        sParams
+      ),
+    ]);
+    const mutedFollowerSet = new Set(muteRes.rows.map((m: any) => String(m.muter_id)));
     const sellerIdSet = new Set(cleanIds);
     for (const r of folRes.rows) {
       const followerId = String(r.follower_id);
-      if (!followerId || sellerIdSet.has(followerId)) continue;
+      if (!followerId || sellerIdSet.has(followerId) || mutedFollowerSet.has(followerId)) continue;
       await dbQuery(
         `INSERT INTO shopit_notifications (id, user_id, title, message, type, is_read, link, created_at)
          VALUES ($1, $2, $3, $4, 'info', false, $5, NOW())`,
@@ -134,6 +143,23 @@ async function notifyFollowersOfNewProduct(params: {
           `/?product=${encodeURIComponent(params.productId)}`,
         ]
       );
+      try {
+        const rawPrefs =
+          typeof r.notification_prefs === 'string'
+            ? JSON.parse(r.notification_prefs)
+            : r.notification_prefs;
+        const prefs = sanitizeNotificationPrefs(rawPrefs || DEFAULT_NOTIFICATION_PREFS);
+        if (prefs.emailFollowers && r.email && !String(r.email).endsWith('.local')) {
+          const fname = r.display_name || extractFirstName(r.name || 'Friend');
+          sendBrevoDirect(
+            r.email,
+            `New craft from ${params.shopName}`,
+            `Hi ${fname},\n\n"${params.productTitle}" was just listed by ${params.shopName} on Shop It.`,
+            `<p>Hi ${fname},</p><p><strong>${params.shopName}</strong> just listed <strong>${params.productTitle}</strong> on Shop It.</p>`,
+            fname
+          ).catch(() => {});
+        }
+      } catch {}
     }
   } catch (err: any) {
     console.warn('[Follower New Product Notification Note]:', err?.message || err);
@@ -2981,20 +3007,50 @@ router.post('/chat/conversations/:id/messages', requireAuth, async (req: Authent
       [lastMessagePreview.slice(0, 200), nextViolations, id]
     );
 
-    // Notify recipient in shopit_notifications
+    // Notify recipient in shopit_notifications (skip if recipient muted sender)
     try {
       const recipientUserId = role === 'buyer' ? sellerUserId : conv.buyer_id;
       if (recipientUserId && recipientUserId !== user.userId) {
-        await dbQuery(
-          `INSERT INTO shopit_notifications (id, user_id, title, message, type, is_read, link, created_at)
-           VALUES ($1, $2, $3, $4, 'info', false, '/chat', NOW())`,
-          [
-            `notif_chat_${Date.now()}_${crypto.randomBytes(2).toString('hex')}`,
-            recipientUserId,
-            `New Message from ${senderDisplayName}`,
-            isBypass ? 'A blocked safety notice was logged in your conversation.' : lastMessagePreview.slice(0, 140),
-          ]
+        const muteCheck = await dbQuery(
+          'SELECT 1 FROM shopit_mutes WHERE muter_id = $1 AND muted_id = $2 LIMIT 1',
+          [recipientUserId, user.userId]
         );
+        if (muteCheck.rows.length === 0) {
+          const notifTitle = `New Message from ${senderDisplayName}`;
+          const notifBody = isBypass
+            ? 'A blocked safety notice was logged in your conversation.'
+            : lastMessagePreview.slice(0, 140);
+          await dbQuery(
+            `INSERT INTO shopit_notifications (id, user_id, title, message, type, is_read, link, created_at)
+             VALUES ($1, $2, $3, $4, 'info', false, '/chat', NOW())`,
+            [
+              `notif_chat_${Date.now()}_${crypto.randomBytes(2).toString('hex')}`,
+              recipientUserId,
+              notifTitle,
+              notifBody,
+            ]
+          );
+          const recRes = await dbQuery(
+            'SELECT email, display_name, name, notification_prefs FROM shopit_users WHERE id = $1 LIMIT 1',
+            [recipientUserId]
+          );
+          const recRow = recRes.rows[0];
+          const rawPrefs =
+            typeof recRow?.notification_prefs === 'string'
+              ? JSON.parse(recRow.notification_prefs)
+              : recRow?.notification_prefs;
+          const prefs = sanitizeNotificationPrefs(rawPrefs || DEFAULT_NOTIFICATION_PREFS);
+          if (prefs.emailMessages && recRow?.email && !String(recRow.email).endsWith('.local')) {
+            const recName = recRow.display_name || extractFirstName(recRow.name || 'Friend');
+            sendBrevoDirect(
+              recRow.email,
+              notifTitle,
+              `Hi ${recName},\n\n${senderDisplayName} sent you a message on Shop It: "${notifBody}"`,
+              `<p>Hi ${recName},</p><p><strong>${senderDisplayName}</strong> sent you a message on Shop It:</p><blockquote>${notifBody}</blockquote>`,
+              recName
+            ).catch(() => {});
+          }
+        }
       }
     } catch {}
 

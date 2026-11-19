@@ -145,7 +145,7 @@ export const Footer: React.FC = () => {
                   }}
                   className="hover:text-[#FF6B00] dark:hover:text-[#FF6B00] font-medium"
                 >
-                  My Profile
+                  {currentUser ? 'My Profile' : 'Log in to view your profile'}
                 </button>
               </li>
               <li>

@@ -1380,6 +1380,197 @@ router.get('/admin/users', requireModerator, async (req: AuthenticatedRequest, r
   }
 });
 
+// Moderator action: remove inappropriate avatar/cover/bio or reset display name
+router.patch('/admin/users/:id/moderate-profile', requireModerator, async (req: AuthenticatedRequest, res) => {
+  try {
+    const check = rejectUnknownFields(req.body, ['action', 'reason']);
+    if (!check.ok) {
+      return res.status(400).json({ status: false, message: check.message });
+    }
+    const action = String(check.obj.action || '').trim();
+    const reason = String(check.obj.reason || 'Policy compliance review').trim().slice(0, 240);
+    if (!['remove_avatar', 'remove_cover', 'clear_bio', 'reset_display_name'].includes(action)) {
+      return res.status(400).json({
+        status: false,
+        message: 'action must be one of remove_avatar, remove_cover, clear_bio, or reset_display_name.',
+      });
+    }
+
+    const targetId = String(req.params.id || '').trim();
+    const uRes = await dbQuery(
+      'SELECT id, name, display_name, deleted_at FROM shopit_users WHERE id = $1 LIMIT 1',
+      [targetId]
+    );
+    if (uRes.rows.length === 0 || uRes.rows[0].deleted_at) {
+      return res.status(404).json({ status: false, message: 'User not found.' });
+    }
+
+    const uRow = uRes.rows[0];
+    let updatedDisplayName: string | undefined;
+
+    await withTransaction(async client => {
+      if (action === 'remove_avatar') {
+        await client.query('UPDATE shopit_users SET avatar_url = NULL, updated_at = NOW() WHERE id = $1', [targetId]);
+        await client.query('UPDATE shopit_sellers SET logo_url = NULL, updated_at = NOW() WHERE user_id = $1 OR id = $1', [targetId]);
+      } else if (action === 'remove_cover') {
+        await client.query('UPDATE shopit_users SET cover_url = NULL, updated_at = NOW() WHERE id = $1', [targetId]);
+        await client.query('UPDATE shopit_sellers SET banner_url = NULL, updated_at = NOW() WHERE user_id = $1 OR id = $1', [targetId]);
+      } else if (action === 'clear_bio') {
+        await client.query('UPDATE shopit_users SET bio = NULL, updated_at = NOW() WHERE id = $1', [targetId]);
+        await client.query("UPDATE shopit_sellers SET bio = '', updated_at = NOW() WHERE user_id = $1 OR id = $1", [targetId]);
+      } else if (action === 'reset_display_name') {
+        updatedDisplayName = extractFirstName(uRow.name || 'Member');
+        await client.query('UPDATE shopit_users SET display_name = $1, updated_at = NOW() WHERE id = $2', [
+          updatedDisplayName,
+          targetId,
+        ]);
+      }
+
+      await client.query(
+        `INSERT INTO shopit_notifications (id, user_id, title, message, type, is_read, link, created_at)
+         VALUES ($1, $2, 'Profile Moderated', $3, 'warning', false, '/profile', NOW())`,
+        [
+          `notif_modprof_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
+          targetId,
+          `A moderator updated your profile (${action.replace('_', ' ')}): ${reason}`,
+        ]
+      );
+    });
+
+    await logAuditEvent({
+      action: 'ADMIN_PROFILE_MODERATED',
+      actor: { id: req.user!.userId, email: req.user!.email, role: req.user!.role },
+      target: { type: 'user', id: targetId },
+      details: { action, reason },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
+
+    return res.json({
+      status: true,
+      action,
+      updatedDisplayName,
+      message: `Profile moderation action (${action}) applied.`,
+    });
+  } catch (err: any) {
+    console.error('[Moderate Profile Error]:', err.message);
+    return res.status(500).json({ status: false, message: 'Failed to moderate user profile.' });
+  }
+});
+
+// Moderator view: ONLY conversations explicitly reported via safety reports
+router.get('/admin/reported-chats', requireModerator, async (req: AuthenticatedRequest, res) => {
+  try {
+    const reportsRes = await dbQuery(
+      `SELECT id, target_id, target_title, reason, details, status, created_at
+       FROM shopit_reports
+       WHERE target_type = 'chat'
+       ORDER BY created_at DESC
+       LIMIT 100`
+    );
+
+    const reportedChats: any[] = [];
+    for (const rep of reportsRes.rows) {
+      const convRes = await dbQuery(
+        `SELECT id, buyer_id, buyer_masked_id, seller_id, seller_shop_name, product_id, product_title,
+                is_chat_locked, bypass_violations_count, last_message_at
+         FROM shopit_chat_conversations
+         WHERE id = $1
+         LIMIT 1`,
+        [rep.target_id]
+      );
+      const conv = convRes.rows[0] || null;
+      const msgRes = await dbQuery(
+        `SELECT id, sender_id, sender_role, sender_masked_name, content, attachment, is_blocked_bypass, created_at
+         FROM shopit_chat_messages
+         WHERE conversation_id = $1
+         ORDER BY created_at DESC
+         LIMIT 30`,
+        [rep.target_id]
+      );
+
+      const userIds = Array.from(
+        new Set(
+          [conv?.buyer_id, ...msgRes.rows.map((m: any) => m.sender_id)].filter(Boolean).map(String)
+        )
+      );
+      const nameMap = new Map<string, string>();
+      if (userIds.length > 0) {
+        const placeholders = userIds.map((_, idx) => `$${idx + 1}`).join(', ');
+        const uRes = await dbQuery(
+          `SELECT id, name, display_name FROM shopit_users WHERE id IN (${placeholders})`,
+          userIds
+        );
+        for (const u of uRes.rows) {
+          const first = String(u.name || '').trim().split(/\s+/)[0] || '';
+          const resolved = String(u.display_name || first || '').trim();
+          if (resolved) nameMap.set(String(u.id), resolved);
+        }
+      }
+
+      reportedChats.push({
+        reportId: rep.id,
+        reportStatus: rep.status,
+        reason: rep.reason,
+        details: rep.details || '',
+        reportedAt: rep.created_at,
+        conversationId: rep.target_id,
+        conversation: conv
+          ? {
+              id: conv.id,
+              buyerName: (conv.buyer_id && nameMap.get(String(conv.buyer_id))) || conv.buyer_masked_id || 'Buyer',
+              sellerShopName: conv.seller_shop_name || 'Seller',
+              productTitle: conv.product_title || '',
+              isChatLocked: Boolean(conv.is_chat_locked),
+              violationsCount: Number(conv.bypass_violations_count || 0),
+              lastMessageAt: conv.last_message_at,
+            }
+          : null,
+        messages: msgRes.rows
+          .slice()
+          .reverse()
+          .map((m: any) => {
+            const parsedAtt =
+              typeof m.attachment === 'string'
+                ? (() => {
+                    try {
+                      return JSON.parse(m.attachment);
+                    } catch {
+                      return undefined;
+                    }
+                  })()
+                : m.attachment || undefined;
+            const resolvedSender =
+              (m.sender_id && nameMap.get(String(m.sender_id))) || m.sender_masked_name || m.sender_role;
+            return {
+              id: m.id,
+              senderRole: m.sender_role,
+              senderDisplayName: resolvedSender,
+              content: m.content || '',
+              attachment: parsedAtt,
+              isBlockedBypass: Boolean(m.is_blocked_bypass),
+              createdAt: m.created_at,
+            };
+          }),
+      });
+    }
+
+    await logAuditEvent({
+      action: 'ADMIN_VIEWED_REPORTED_CHATS',
+      actor: { id: req.user!.userId, email: req.user!.email, role: req.user!.role },
+      target: { type: 'chat_reports', id: 'list' },
+      details: { count: reportedChats.length },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
+
+    return res.json({ status: true, reportedChats });
+  } catch (err: any) {
+    console.error('[Reported Chats Error]:', err.message);
+    return res.status(500).json({ status: false, message: 'Failed to load reported chats.' });
+  }
+});
+
 // Auto-refreshing "New Users" feed backed by transactional shopit_admin_alerts + shopit_users
 router.get('/admin/new-users', requireModerator, async (req: AuthenticatedRequest, res) => {
   try {
@@ -3774,6 +3965,71 @@ router.post('/reports', optionalAuth, async (req: AuthenticatedRequest, res) => 
     const reportId = `REP_${Date.now()}_${crypto.randomInt(1000, 10000)}`;
     const resolvedEmail = req.user?.email || reporterEmail || undefined;
 
+    let finalDetails = String(details || '').trim();
+    if (String(targetType) === 'chat' && req.user) {
+      try {
+        const convRes = await dbQuery(
+          'SELECT id, buyer_id, seller_id FROM shopit_chat_conversations WHERE id = $1 LIMIT 1',
+          [String(targetId).trim()]
+        );
+        const conv = convRes.rows[0];
+        const isParticipant =
+          conv &&
+          (conv.buyer_id === req.user.userId ||
+            conv.seller_id === req.user.userId ||
+            (req.user.sellerId && conv.seller_id === req.user.sellerId) ||
+            req.user.role === 'admin' ||
+            String(req.user.role) === 'moderator');
+        if (isParticipant) {
+          const msgRes = await dbQuery(
+            `SELECT sender_id, sender_masked_name, sender_role, content, attachment, created_at
+             FROM shopit_chat_messages
+             WHERE conversation_id = $1
+             ORDER BY created_at DESC
+             LIMIT 10`,
+            [conv.id]
+          );
+          if (msgRes.rows.length > 0) {
+            const senderIds = Array.from(new Set(msgRes.rows.map((m: any) => m.sender_id).filter(Boolean).map(String)));
+            const senderNameMap = new Map<string, string>();
+            if (senderIds.length > 0) {
+              const placeholders = senderIds.map((_, idx) => `$${idx + 1}`).join(', ');
+              const uRes = await dbQuery(
+                `SELECT id, name, display_name FROM shopit_users WHERE id IN (${placeholders})`,
+                senderIds
+              );
+              for (const u of uRes.rows) {
+                const first = String(u.name || '').trim().split(/\s+/)[0] || '';
+                const resolved = String(u.display_name || first || '').trim();
+                if (resolved) senderNameMap.set(String(u.id), resolved);
+              }
+            }
+            const excerpt = msgRes.rows
+              .slice()
+              .reverse()
+              .map((m: any) => {
+                const who =
+                  (m.sender_id && senderNameMap.get(String(m.sender_id))) || m.sender_masked_name || m.sender_role || 'User';
+                const att =
+                  typeof m.attachment === 'string'
+                    ? (() => {
+                        try {
+                          return JSON.parse(m.attachment);
+                        } catch {
+                          return null;
+                        }
+                      })()
+                    : m.attachment;
+                const attNote = att?.filename ? ` [Attachment: ${att.filename} (${att.fileId || ''})]` : '';
+                return `[${who}]: ${String(m.content || '').slice(0, 140)}${attNote}`;
+              })
+              .join(' | ');
+            finalDetails = `${finalDetails ? `${finalDetails}\n\n` : ''}Recent Chat Context: ${excerpt}`;
+          }
+        }
+      } catch {}
+    }
+
     const newReport: ReportRecord = {
       id: reportId,
       targetType: targetType as any,
@@ -3781,7 +4037,7 @@ router.post('/reports', optionalAuth, async (req: AuthenticatedRequest, res) => 
       targetTitle: String(targetTitle || 'Marketplace Item / User').slice(0, 200),
       reporterEmail: resolvedEmail ? String(resolvedEmail).slice(0, 200) : undefined,
       reason: String(reason).slice(0, 200),
-      details: String(details || '').slice(0, 2000),
+      details: finalDetails.slice(0, 2000),
       status: 'open',
       actionLogs: [
         {

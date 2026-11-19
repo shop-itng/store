@@ -39,6 +39,9 @@ import {
   Ban,
   X,
   Check,
+  Bell,
+  BellOff,
+  Search,
 } from 'lucide-react';
 import { FollowRequestItem, FollowListUser } from '../types';
 
@@ -47,7 +50,7 @@ interface SellerShopViewProps {
   onBack: () => void;
 }
 
-type ProfileTab = 'products' | 'about' | 'reviews' | 'drafts' | 'saved' | 'orders';
+type ProfileTab = 'products' | 'about' | 'reviews' | 'followers' | 'following' | 'drafts' | 'saved' | 'orders';
 
 export const SellerShopView: React.FC<SellerShopViewProps> = ({ slugOrId, onBack }) => {
   const {
@@ -71,6 +74,8 @@ export const SellerShopView: React.FC<SellerShopViewProps> = ({ slugOrId, onBack
     respondToFollowRequest,
     fetchFollowList,
     blockUser,
+    muteUser,
+    unmuteUser,
   } = useApp();
 
   const [profile, setProfile] = useState<PublicProfileData | null>(null);
@@ -87,12 +92,18 @@ export const SellerShopView: React.FC<SellerShopViewProps> = ({ slugOrId, onBack
 
   // Social interaction states
   const [followBusy, setFollowBusy] = useState(false);
+  const [muteBusy, setMuteBusy] = useState(false);
   const [followListModal, setFollowListModal] = useState<{
     mode: 'followers' | 'following';
     loading: boolean;
     users: FollowListUser[];
     error: string | null;
   } | null>(null);
+  const [followTabSearch, setFollowTabSearch] = useState('');
+  const [followTabLoading, setFollowTabLoading] = useState(false);
+  const [followTabUsers, setFollowTabUsers] = useState<FollowListUser[]>([]);
+  const [followTabError, setFollowTabError] = useState<string | null>(null);
+  const [busyFollowRowId, setBusyFollowRowId] = useState<string | null>(null);
   const [requestsModalOpen, setRequestsModalOpen] = useState(false);
   const [requestsLoading, setRequestsLoading] = useState(false);
   const [followRequests, setFollowRequests] = useState<FollowRequestItem[]>([]);
@@ -264,16 +275,91 @@ export const SellerShopView: React.FC<SellerShopViewProps> = ({ slugOrId, onBack
     setFollowBusy(false);
   };
 
+  const loadInlineFollowTab = useCallback(
+    async (mode: 'followers' | 'following', q: string) => {
+      if (!profile) return;
+      setFollowTabLoading(true);
+      setFollowTabError(null);
+      const res = await fetchFollowList(profile.profileSlug || profile.id, mode, q);
+      setFollowTabLoading(false);
+      if (!res.status) {
+        setFollowTabUsers([]);
+        setFollowTabError(res.message || `Could not load ${mode}.`);
+      } else {
+        setFollowTabUsers(res.users);
+      }
+    },
+    [profile, fetchFollowList]
+  );
+
+  useEffect(() => {
+    if (activeTab === 'followers' || activeTab === 'following') {
+      const timer = setTimeout(() => {
+        void loadInlineFollowTab(activeTab, followTabSearch);
+      }, 200);
+      return () => clearTimeout(timer);
+    }
+  }, [activeTab, followTabSearch, loadInlineFollowTab]);
+
   const handleOpenFollowList = async (mode: 'followers' | 'following') => {
     if (!profile) return;
-    setFollowListModal({ mode, loading: true, users: [], error: null });
-    const res = await fetchFollowList(profile.profileSlug || profile.id, mode);
-    setFollowListModal({
-      mode,
-      loading: false,
-      users: res.users,
-      error: res.status ? null : res.message || `Could not load ${mode}.`,
-    });
+    setFollowTabSearch('');
+    setActiveTab(mode);
+  };
+
+  const handleMuteToggle = async () => {
+    if (!profile || muteBusy) return;
+    if (!currentUser) {
+      openAuthModal('login');
+      return;
+    }
+    setMuteBusy(true);
+    if (profile.isMuted) {
+      const res = await unmuteUser(profile.id);
+      if (res.status) {
+        setProfile(prev => (prev ? { ...prev, isMuted: false } : prev));
+      }
+    } else {
+      const res = await muteUser(profile.id);
+      if (res.status) {
+        setProfile(prev => (prev ? { ...prev, isMuted: true } : prev));
+      }
+    }
+    setMuteBusy(false);
+  };
+
+  const handleRowFollowToggle = async (target: FollowListUser) => {
+    if (!currentUser) {
+      openAuthModal('login');
+      return;
+    }
+    if (busyFollowRowId || target.id === currentUser.id) return;
+    setBusyFollowRowId(target.id);
+    if (target.viewerFollowStatus === 'accepted' || target.viewerFollowStatus === 'pending') {
+      const res = await unfollowUser(target.id);
+      if (res.status) {
+        setFollowTabUsers(prev =>
+          prev.map(u => (u.id === target.id ? { ...u, viewerFollowStatus: 'none', isMutual: false } : u))
+        );
+      }
+    } else {
+      const res = await followUser(target.id);
+      if (res.status) {
+        const nextStatus = res.followStatus || 'accepted';
+        setFollowTabUsers(prev =>
+          prev.map(u =>
+            u.id === target.id
+              ? {
+                  ...u,
+                  viewerFollowStatus: nextStatus,
+                  isMutual: activeTab === 'followers' && isOwner && nextStatus === 'accepted' ? true : u.isMutual,
+                }
+              : u
+          )
+        );
+      }
+    }
+    setBusyFollowRowId(null);
   };
 
   const handleOpenFollowRequests = async () => {
@@ -443,6 +529,12 @@ export const SellerShopView: React.FC<SellerShopViewProps> = ({ slugOrId, onBack
                   <h1 className="text-xl sm:text-2xl font-black text-[#111111] dark:text-white">
                     {primaryTitle}
                   </h1>
+                  {profile.isMutualFollow && (
+                    <span className="text-[11px] font-black text-[#111111] bg-[#9FE870] px-2 py-0.5 rounded-lg border border-[#111111] inline-flex items-center gap-1">
+                      <Users className="w-3 h-3" />
+                      <span>Friends</span>
+                    </span>
+                  )}
                   {profile.badges?.map(badge => (
                     <span
                       key={badge.id}
@@ -587,6 +679,23 @@ export const SellerShopView: React.FC<SellerShopViewProps> = ({ slugOrId, onBack
                     >
                       <MessageSquare className="w-4 h-4 text-[#FF6B00]" />
                       <span>Message Seller</span>
+                    </button>
+                  )}
+
+                  {currentUser && (
+                    <button
+                      type="button"
+                      disabled={muteBusy}
+                      onClick={() => void handleMuteToggle()}
+                      title={profile.isMuted ? 'Unmute notifications from this user' : 'Mute notifications from this user'}
+                      className={`px-3 py-2.5 rounded-xl border text-xs font-bold flex items-center gap-1.5 transition-colors ${
+                        profile.isMuted
+                          ? 'bg-amber-50 dark:bg-amber-950/30 border-amber-300 dark:border-amber-800 text-amber-800 dark:text-amber-200'
+                          : 'bg-[#FAFAFA] dark:bg-[#1E2028] border-[#E4E4E7] dark:border-[#27272A] text-[#52525B] dark:text-[#A1A1AA] hover:border-[#FF6B00]'
+                      }`}
+                    >
+                      {profile.isMuted ? <BellOff className="w-3.5 h-3.5" /> : <Bell className="w-3.5 h-3.5" />}
+                      <span>{profile.isMuted ? 'Muted' : 'Mute'}</span>
                     </button>
                   )}
                 </>
@@ -789,6 +898,12 @@ export const SellerShopView: React.FC<SellerShopViewProps> = ({ slugOrId, onBack
                 { id: 'products', label: `Listings (${activeProducts.length})` },
                 { id: 'about', label: 'About' },
                 { id: 'reviews', label: `Reviews (${profile.reviews?.length || 0})` },
+                ...(isOwner || profile.showFollowersList !== false
+                  ? [{ id: 'followers', label: `Followers (${profile.followersCount ?? 0})` }]
+                  : []),
+                ...(isOwner || profile.showFollowingList !== false
+                  ? [{ id: 'following', label: `Following (${profile.followingCount ?? 0})` }]
+                  : []),
                 ...(isOwner
                   ? [
                       { id: 'drafts', label: `Drafts & Paused (${draftOrPausedProducts.length})` },
@@ -801,7 +916,10 @@ export const SellerShopView: React.FC<SellerShopViewProps> = ({ slugOrId, onBack
               <button
                 key={tab.id}
                 type="button"
-                onClick={() => setActiveTab(tab.id)}
+                onClick={() => {
+                  setFollowTabSearch('');
+                  setActiveTab(tab.id);
+                }}
                 className={`px-4 py-2 rounded-t-xl text-xs font-black whitespace-nowrap border-b-2 transition-colors ${
                   activeTab === tab.id
                     ? 'border-[#FF6B00] text-[#FF6B00] bg-white dark:bg-[#15161C]'
@@ -932,6 +1050,93 @@ export const SellerShopView: React.FC<SellerShopViewProps> = ({ slugOrId, onBack
               ) : (
                 <div className="p-10 text-center bg-white dark:bg-[#15161C] rounded-2xl border border-[#E4E4E7] dark:border-[#27272A] text-xs text-[#71717A] dark:text-[#A1A1AA]">
                   No buyer reviews yet.
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Tab 3b / 3c: Followers & Following inline tabs with search & Follow Back */}
+          {(activeTab === 'followers' || activeTab === 'following') && (
+            <div className="bg-white dark:bg-[#15161C] rounded-2xl border border-[#E4E4E7] dark:border-[#27272A] p-4 sm:p-5 space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <h3 className="text-sm font-black text-[#111111] dark:text-white capitalize">
+                  {activeTab} ({activeTab === 'followers' ? profile.followersCount ?? 0 : profile.followingCount ?? 0})
+                </h3>
+                <div className="relative w-full sm:w-64">
+                  <Search className="w-3.5 h-3.5 text-[#71717A] absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={followTabSearch}
+                    onChange={e => setFollowTabSearch(e.target.value)}
+                    placeholder={`Search ${activeTab}...`}
+                    className="w-full pl-8 pr-3 py-1.5 rounded-xl border border-[#E4E4E7] dark:border-[#27272A] bg-[#FAFAFA] dark:bg-[#1E2028] text-xs text-[#111111] dark:text-white focus:outline-none focus:border-[#FF6B00]"
+                  />
+                </div>
+              </div>
+
+              {followTabLoading ? (
+                <div className="py-10 text-center">
+                  <Loader2 className="w-6 h-6 text-[#FF6B00] animate-spin mx-auto" />
+                </div>
+              ) : followTabError ? (
+                <p className="py-8 text-center text-xs text-rose-600 font-semibold">{followTabError}</p>
+              ) : followTabUsers.length === 0 ? (
+                <div className="py-10 text-center text-xs text-[#71717A] dark:text-[#A1A1AA]">
+                  {followTabSearch.trim()
+                    ? `No ${activeTab} matched "${followTabSearch.trim()}".`
+                    : `No ${activeTab} yet.`}
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {followTabUsers.map(u => {
+                    const isSelfRow = Boolean(currentUser && currentUser.id === u.id);
+                    return (
+                      <div
+                        key={u.id}
+                        className="p-3 rounded-xl border border-[#E4E4E7] dark:border-[#27272A] bg-[#FAFAFA] dark:bg-[#1E2028] flex items-center justify-between gap-3"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <UserIdentityBadge
+                            userId={u.id}
+                            profileSlug={u.profileSlug}
+                            displayName={u.displayName}
+                            avatarUrl={u.avatarUrl}
+                            subtitle={[u.shopName, u.campus].filter(Boolean).join(' · ') || 'Member'}
+                            size="sm"
+                          />
+                        </div>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          {u.isMutual && (
+                            <span className="px-2 py-0.5 rounded-md bg-[#9FE870] text-[#111111] text-[10px] font-black border border-[#111111]">
+                              Friends
+                            </span>
+                          )}
+                          {!isSelfRow && (
+                            <button
+                              type="button"
+                              disabled={busyFollowRowId === u.id}
+                              onClick={() => void handleRowFollowToggle(u)}
+                              className={`px-2.5 py-1 rounded-lg text-[11px] font-black border transition-colors ${
+                                u.viewerFollowStatus === 'accepted'
+                                  ? 'bg-white dark:bg-[#15161C] text-[#111111] dark:text-white border-[#E4E4E7] dark:border-[#27272A]'
+                                  : u.viewerFollowStatus === 'pending'
+                                  ? 'bg-[#FFF4EC] text-[#C2410C] border-[#FF6B00]'
+                                  : 'bg-[#FF6B00] text-[#111111] border-[#111111]'
+                              }`}
+                            >
+                              {u.viewerFollowStatus === 'accepted'
+                                ? 'Following'
+                                : u.viewerFollowStatus === 'pending'
+                                ? 'Requested'
+                                : activeTab === 'followers' && isOwner
+                                ? 'Follow Back'
+                                : 'Follow'}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>

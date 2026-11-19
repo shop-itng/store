@@ -157,6 +157,67 @@ export const AdminPanel: React.FC = () => {
     isCurrentlyFrozen: false,
     reason: '',
   });
+  const [moderatingUserId, setModeratingUserId] = useState<string | null>(null);
+  const [reportedChatsModal, setReportedChatsModal] = useState<{
+    isOpen: boolean;
+    loading: boolean;
+    items: any[];
+    focusConvId?: string;
+  }>({
+    isOpen: false,
+    loading: false,
+    items: [],
+  });
+
+  const handleModerateProfile = async (
+    userId: string,
+    action: 'remove_avatar' | 'remove_cover' | 'clear_bio' | 'reset_display_name',
+    label: string
+  ) => {
+    setModeratingUserId(userId);
+    try {
+      const token = typeof localStorage !== 'undefined' ? localStorage.getItem('shopit_session_token') : null;
+      const res = await fetch(`/api/admin/users/${encodeURIComponent(userId)}/moderate-profile`, {
+        method: 'PATCH',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}`, 'x-session-token': token } : {}),
+        },
+        body: JSON.stringify({ action, reason: `Moderator ${label}` }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.status) {
+        notify(data.message || 'Failed to apply profile moderation.', 'error');
+      } else {
+        notify(data.message || `Applied ${label}.`, 'success');
+      }
+    } catch {
+      notify('Network error applying profile moderation.', 'error');
+    } finally {
+      setModeratingUserId(null);
+    }
+  };
+
+  const handleOpenReportedChats = async (focusConvId?: string) => {
+    setReportedChatsModal({ isOpen: true, loading: true, items: [], focusConvId });
+    try {
+      const token = typeof localStorage !== 'undefined' ? localStorage.getItem('shopit_session_token') : null;
+      const res = await fetch('/api/admin/reported-chats', {
+        credentials: 'include',
+        headers: token ? { Authorization: `Bearer ${token}`, 'x-session-token': token } : {},
+      });
+      const data = await res.json().catch(() => ({}));
+      setReportedChatsModal({
+        isOpen: true,
+        loading: false,
+        items: res.ok && data.status && Array.isArray(data.reportedChats) ? data.reportedChats : [],
+        focusConvId,
+      });
+    } catch {
+      setReportedChatsModal({ isOpen: true, loading: false, items: [], focusConvId });
+    }
+  };
 
   // Moderator Account Governance & Override states
   const [searchUserQuery, setSearchUserQuery] = useState('');
@@ -2115,6 +2176,40 @@ export const AdminPanel: React.FC = () => {
                                 <span>Reset</span>
                               </button>
 
+                              <button
+                                type="button"
+                                disabled={moderatingUserId === user.id}
+                                onClick={() =>
+                                  void handleModerateProfile(user.id, 'reset_display_name', 'Reset Display Name')
+                                }
+                                className="px-2 py-1 rounded-lg border border-stone-300 text-stone-700 hover:bg-stone-100 text-[11px] font-bold transition-colors cursor-pointer disabled:opacity-50"
+                                title="Reset public display name to signup first name"
+                              >
+                                Reset Name
+                              </button>
+                              <button
+                                type="button"
+                                disabled={moderatingUserId === user.id}
+                                onClick={() =>
+                                  void handleModerateProfile(user.id, 'clear_bio', 'Clear Inappropriate Bio')
+                                }
+                                className="px-2 py-1 rounded-lg border border-stone-300 text-stone-700 hover:bg-stone-100 text-[11px] font-bold transition-colors cursor-pointer disabled:opacity-50"
+                                title="Clear public bio"
+                              >
+                                Clear Bio
+                              </button>
+                              <button
+                                type="button"
+                                disabled={moderatingUserId === user.id}
+                                onClick={() =>
+                                  void handleModerateProfile(user.id, 'remove_avatar', 'Remove Profile Photo')
+                                }
+                                className="px-2 py-1 rounded-lg border border-stone-300 text-stone-700 hover:bg-stone-100 text-[11px] font-bold transition-colors cursor-pointer disabled:opacity-50"
+                                title="Remove avatar image"
+                              >
+                                Remove Photo
+                              </button>
+
                               {!isMasterAdmin && (
                                 <>
                                   <button
@@ -3924,6 +4019,16 @@ export const AdminPanel: React.FC = () => {
                         />
 
                         <div className="flex items-center gap-2 shrink-0">
+                          {report.targetType === 'chat' && (
+                            <button
+                              type="button"
+                              onClick={() => void handleOpenReportedChats(report.targetId)}
+                              className="px-3 py-2 rounded-xl bg-[#111111] text-[#9FE870] font-bold text-xs flex items-center gap-1"
+                            >
+                              <Eye className="w-3.5 h-3.5" />
+                              <span>Inspect Chat</span>
+                            </button>
+                          )}
                           {report.status !== 'reviewing' && (
                             <button
                               type="button"
@@ -4571,6 +4676,89 @@ export const AdminPanel: React.FC = () => {
                 <XCircle className="w-4 h-4" />
                 <span>Confirm Rejection</span>
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Moderator Reported Chat Inspection Modal (Reported Chats Only) */}
+      {reportedChatsModal.isOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-xs animate-backdrop">
+          <div className="bg-white rounded-2xl max-w-2xl w-full max-h-[85vh] flex flex-col border border-stone-200 shadow-2xl overflow-hidden animate-modal-enter">
+            <div className="px-5 py-4 border-b border-stone-200 flex items-center justify-between bg-stone-50">
+              <div>
+                <h3 className="text-sm font-black text-stone-900">Reported Chat Transcript</h3>
+                <p className="text-[11px] text-stone-500">
+                  Restricted strictly to conversations flagged in safety reports.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setReportedChatsModal(prev => ({ ...prev, isOpen: false }))}
+                className="p-1.5 rounded-lg text-stone-400 hover:text-stone-700"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 overflow-y-auto space-y-4 text-xs">
+              {reportedChatsModal.loading ? (
+                <div className="py-10 text-center text-stone-500 font-bold">Loading reported transcript...</div>
+              ) : (
+                (() => {
+                  const list = reportedChatsModal.focusConvId
+                    ? reportedChatsModal.items.filter(
+                        i => i.conversationId === reportedChatsModal.focusConvId
+                      )
+                    : reportedChatsModal.items;
+                  if (list.length === 0) {
+                    return (
+                      <div className="py-10 text-center text-stone-500">
+                        No reported chat transcript found for this report.
+                      </div>
+                    );
+                  }
+                  return list.map(entry => (
+                    <div key={entry.reportId} className="space-y-3 border border-stone-200 rounded-xl p-4">
+                      <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-stone-100">
+                        <div>
+                          <span className="font-black text-stone-900">
+                            {entry.conversation?.buyerName || 'Buyer'} &harr;{' '}
+                            {entry.conversation?.sellerShopName || 'Seller'}
+                          </span>
+                          {entry.conversation?.productTitle && (
+                            <span className="text-[11px] text-stone-500 block">
+                              Item: {entry.conversation.productTitle}
+                            </span>
+                          )}
+                        </div>
+                        <span className="px-2 py-0.5 rounded bg-rose-50 text-rose-700 font-bold text-[10px]">
+                          {entry.reason}
+                        </span>
+                      </div>
+                      <div className="space-y-2 max-h-64 overflow-y-auto bg-stone-50 p-3 rounded-xl">
+                        {entry.messages?.length > 0 ? (
+                          entry.messages.map((m: any) => (
+                            <div key={m.id} className="text-xs border-b border-stone-200/60 pb-1.5 last:border-none">
+                              <span className="font-black text-stone-900">{m.senderDisplayName}</span>{' '}
+                              <span className="text-[10px] text-stone-400">
+                                ({m.senderRole}) · {new Date(m.createdAt).toLocaleString()}
+                              </span>
+                              <p className="text-stone-700 mt-0.5">{m.content}</p>
+                              {m.attachment?.originalName && (
+                                <span className="inline-block mt-1 px-2 py-0.5 rounded bg-white border border-stone-200 text-[10px] text-stone-600">
+                                  Attachment: {m.attachment.originalName} ({m.attachment.id})
+                                </span>
+                              )}
+                            </div>
+                          ))
+                        ) : (
+                          <p className="text-stone-500 italic">No messages recorded in this thread.</p>
+                        )}
+                      </div>
+                    </div>
+                  ));
+                })()
+              )}
             </div>
           </div>
         </div>

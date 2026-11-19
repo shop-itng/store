@@ -66,6 +66,9 @@ async function main() {
     let minorUserId = '';
     let minorProfileSlug = '';
 
+    let minor2Token = '';
+    let minor2UserId = '';
+
     let outsiderToken = '';
     let outsiderUserId = '';
 
@@ -129,6 +132,25 @@ async function main() {
       const mJson: any = await mRes.json();
       minorToken = mJson.sessionToken;
       minorUserId = mJson.user.id;
+
+      // 1c-2. Second Minor Buyer (age 15)
+      const m2Res = await fetch(`${baseUrl}/api/auth/signup`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: `social_minor_peer_${ts}@shopit.ng`,
+          password: 'SocialPass123!',
+          name: 'Sade Olaniyi',
+          role: 'buyer',
+          age: 15,
+          hasGuardianConsent: true,
+          guardianName: 'Mr Olaniyi',
+        }),
+      });
+      assert.strictEqual(m2Res.status, 201);
+      const m2Json: any = await m2Res.json();
+      minor2Token = m2Json.sessionToken;
+      minor2UserId = m2Json.user.id;
 
       // 1d. Outsider user
       const oRes = await fetch(`${baseUrl}/api/auth/signup`, {
@@ -223,7 +245,7 @@ async function main() {
       });
       assert.strictEqual(svgRes.status, 400);
 
-      // 2b. Reject disguised PNG with invalid magic bytes
+      // 2b. Reject disguised PNG with invalid magic bytes & renamed EXE ('MZ...') as .png
       const badMagicRes = await fetch(`${baseUrl}/api/files/upload`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${sellerToken}` },
@@ -234,6 +256,17 @@ async function main() {
         }),
       });
       assert.strictEqual(badMagicRes.status, 400);
+
+      const exeAsPngRes = await fetch(`${baseUrl}/api/files/upload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${sellerToken}` },
+        body: JSON.stringify({
+          dataUrl: `data:image/png;base64,${Buffer.from([0x4d, 0x5a, 0x90, 0x00, 0x03, 0x00]).toString('base64')}`,
+          fileName: 'exploit.png',
+          purpose: 'product',
+        }),
+      });
+      assert.strictEqual(exeAsPngRes.status, 400);
 
       // 2c. Upload JPEG with EXIF APP1 block & verify EXIF bytes stripped in DB/served output
       const exifRes = await fetch(`${baseUrl}/api/files/upload`, {
@@ -385,10 +418,17 @@ async function main() {
       ).json();
       assert.strictEqual(sNotifAfter.unreadCount, 0);
 
-      // 3b. Buyer requests to follow Minor -> pending
-      const fMinor = await fetch(`${baseUrl}/api/follows`, {
+      // 3b. Adult Buyer CANNOT follow Minor (403), whereas under-18 Peer gets pending -> accept
+      const adultMinorFollow = await fetch(`${baseUrl}/api/follows`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${buyerToken}` },
+        body: JSON.stringify({ targetUserId: minorUserId }),
+      });
+      assert.strictEqual(adultMinorFollow.status, 403);
+
+      const fMinor = await fetch(`${baseUrl}/api/follows`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${minor2Token}` },
         body: JSON.stringify({ targetUserId: minorUserId }),
       });
       assert.strictEqual(fMinor.status, 201);
@@ -396,14 +436,14 @@ async function main() {
       assert.strictEqual(fMinorJson.followStatus, 'pending');
       assert.strictEqual(fMinorJson.followersCount, 0);
 
-      // Minor sees pending request and accepts it
+      // Minor sees pending request from peer and accepts it
       const reqList: any = await (
         await fetch(`${baseUrl}/api/follows/requests`, { headers: { Authorization: `Bearer ${minorToken}` } })
       ).json();
       assert.strictEqual(reqList.requests.length, 1);
-      assert.strictEqual(reqList.requests[0].followerId, buyerUserId);
+      assert.strictEqual(reqList.requests[0].followerId, minor2UserId);
 
-      const acceptRes = await fetch(`${baseUrl}/api/follows/requests/${buyerUserId}`, {
+      const acceptRes = await fetch(`${baseUrl}/api/follows/requests/${minor2UserId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${minorToken}` },
         body: JSON.stringify({ action: 'accept' }),
@@ -669,6 +709,197 @@ async function main() {
         headers: { Authorization: `Bearer ${buyerToken}` },
       });
       assert.strictEqual(profRestored.status, 200);
+    });
+
+    // -----------------------------------------------------------------------
+    // TEST 6: Discovery, Search (No Email/Minor Leak), Mutes & Follow Race Safety
+    // -----------------------------------------------------------------------
+    await test('6. Safe search/suggested discovery, mutes suppress notifications & 20x parallel follow race safety', async () => {
+      // Search finds seller publicly without exposing email/phone
+      const srRes = await fetch(`${baseUrl}/api/profiles/search?q=Adaeze`);
+      assert.strictEqual(srRes.status, 200);
+      const srJson: any = await srRes.json();
+      const foundSeller = srJson.profiles.find((p: any) => p.id === sellerUserId);
+      assert.ok(foundSeller);
+      assert.strictEqual(foundSeller.email, undefined);
+      assert.strictEqual(foundSeller.phone, undefined);
+
+      // Search excludes under-18 minor account
+      const minorSearch: any = await (await fetch(`${baseUrl}/api/profiles/search?q=Tunde`)).json();
+      assert.strictEqual(minorSearch.profiles.some((p: any) => p.id === minorUserId), false);
+
+      // Suggested sellers returns real adult seller for outsider (who doesn't follow seller yet)
+      const sugRes: any = await (
+        await fetch(`${baseUrl}/api/profiles/discover/suggested`, {
+          headers: { Authorization: `Bearer ${outsiderToken}` },
+        })
+      ).json();
+      assert.ok(Array.isArray(sugRes.sellers));
+      assert.ok(sugRes.sellers.some((s: any) => s.id === sellerUserId));
+
+      // Mute: Seller mutes Outsider -> Outsider follows Seller -> Seller receives NO new follower notification for Outsider
+      await fetch(`${baseUrl}/api/notifications/read-all`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${sellerToken}` },
+      });
+      const muteRes = await fetch(`${baseUrl}/api/mutes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${sellerToken}` },
+        body: JSON.stringify({ targetUserId: outsiderUserId }),
+      });
+      assert.strictEqual(muteRes.status, 201);
+
+      const mutesList: any = await (
+        await fetch(`${baseUrl}/api/mutes`, { headers: { Authorization: `Bearer ${sellerToken}` } })
+      ).json();
+      assert.ok(mutesList.mutes.some((m: any) => m.mutedUserId === outsiderUserId));
+
+      // 20 parallel follows from Outsider -> Seller (race-condition test)
+      const parallelFollows = await Promise.all(
+        Array.from({ length: 20 }, () =>
+          fetch(`${baseUrl}/api/follows`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${outsiderToken}` },
+            body: JSON.stringify({ targetUserId: sellerUserId }),
+          })
+        )
+      );
+      for (const pf of parallelFollows) {
+        assert.ok(pf.status === 200 || pf.status === 201, `Unexpected parallel follow status ${pf.status}`);
+      }
+      const exactRows = await query(
+        'SELECT COUNT(*)::int AS c FROM shopit_follows WHERE follower_id = $1 AND following_id = $2',
+        [outsiderUserId, sellerUserId]
+      );
+      assert.strictEqual(Number(exactRows.rows[0].c), 1);
+
+      // Because Seller muted Outsider, Seller got 0 notifications from Outsider's follow
+      const sNotifCheck: any = await (
+        await fetch(`${baseUrl}/api/notifications`, { headers: { Authorization: `Bearer ${sellerToken}` } })
+      ).json();
+      assert.strictEqual(sNotifCheck.unreadCount, 0);
+
+      // Unmute works cleanly
+      const unmuteRes = await fetch(`${baseUrl}/api/mutes/${outsiderUserId}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${sellerToken}` },
+      });
+      assert.strictEqual(unmuteRes.status, 200);
+    });
+
+    // -----------------------------------------------------------------------
+    // TEST 7: Moderator Reported-Only Chats, Chat Context Capture & Profile Moderation + RBAC
+    // -----------------------------------------------------------------------
+    await test('7. Chat report transcript capture, reported-only admin chats, profile moderation & RBAC', async () => {
+      // Non-moderator (buyer/outsider) must get 403 on moderator endpoints
+      const rbac1 = await fetch(`${baseUrl}/api/admin/reported-chats`, {
+        headers: { Authorization: `Bearer ${buyerToken}` },
+      });
+      assert.strictEqual(rbac1.status, 403);
+      const rbac2 = await fetch(`${baseUrl}/api/admin/users/${sellerUserId}/moderate-profile`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${outsiderToken}` },
+        body: JSON.stringify({ action: 'clear_bio' }),
+      });
+      assert.strictEqual(rbac2.status, 403);
+
+      // File a report on the existing chat conversation
+      const repRes = await fetch(`${baseUrl}/api/reports`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${buyerToken}` },
+        body: JSON.stringify({
+          targetType: 'chat',
+          targetId: conversationId,
+          targetTitle: 'Chat safety test',
+          reason: 'Requested off-platform contact',
+          details: 'Flagging suspicious message.',
+        }),
+      });
+      assert.strictEqual(repRes.status, 200);
+
+      // Create an admin/moderator account to verify moderator endpoints
+      const modEmail = `social_mod_${ts}@shopit.ng`;
+      await fetch(`${baseUrl}/api/auth/signup`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: modEmail,
+          password: 'ModPassword123!',
+          name: 'Moderator Kemi',
+          role: 'buyer',
+          age: 26,
+        }),
+      });
+      await query("UPDATE shopit_users SET role = 'admin', sub_role = 'moderator' WHERE LOWER(email) = LOWER($1)", [modEmail]);
+      const modLogin = await fetch(`${baseUrl}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: modEmail, password: 'ModPassword123!' }),
+      });
+      const modLoginJson: any = await modLogin.json();
+      const modToken = modLoginJson.sessionToken;
+      assert.ok(modToken);
+
+      // Reported chats endpoint returns the reported conversation + messages & context excerpt
+      const repChatsRes = await fetch(`${baseUrl}/api/admin/reported-chats`, {
+        headers: { Authorization: `Bearer ${modToken}` },
+      });
+      assert.strictEqual(repChatsRes.status, 200);
+      const repChatsJson: any = await repChatsRes.json();
+      const repEntry = repChatsJson.reportedChats.find((c: any) => c.conversationId === conversationId);
+      assert.ok(repEntry);
+      assert.ok(String(repEntry.details).includes('Recent Chat Context:'));
+      assert.ok(repEntry.messages.length >= 1);
+
+      // Moderator clears seller bio & resets display name cleanly
+      const modClear = await fetch(`${baseUrl}/api/admin/users/${sellerUserId}/moderate-profile`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${modToken}` },
+        body: JSON.stringify({ action: 'clear_bio', reason: 'Test moderation' }),
+      });
+      assert.strictEqual(modClear.status, 200);
+
+      const sAfterMod: any = await (
+        await fetch(`${baseUrl}/api/profiles/${sellerProfileSlug}`)
+      ).json();
+      assert.strictEqual(sAfterMod.profile.bio, '');
+    });
+
+    // -----------------------------------------------------------------------
+    // TEST 8: DELETE /api/profiles/me Cascades Files, Follows, Mutes & Anonymizes User
+    // -----------------------------------------------------------------------
+    await test('8. DELETE /api/profiles/me deletes shopit_files, follows, mutes & blocks further access', async () => {
+      // Upload a file as outsider & mute buyer as outsider so cascade deletion has rows to clean
+      await fetch(`${baseUrl}/api/files/upload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${outsiderToken}` },
+        body: JSON.stringify({
+          dataUrl: TINY_TXT_DATA_URL,
+          fileName: 'temp-note.txt',
+          purpose: 'chat',
+        }),
+      });
+      await fetch(`${baseUrl}/api/mutes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${outsiderToken}` },
+        body: JSON.stringify({ targetUserId: buyerUserId }),
+      });
+
+      const delRes = await fetch(`${baseUrl}/api/profiles/me`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${outsiderToken}` },
+        body: JSON.stringify({ password: 'SocialPass123!', confirmation: 'DELETE' }),
+      });
+      assert.strictEqual(delRes.status, 200);
+
+      const [fCnt, mCnt, fileCnt] = await Promise.all([
+        query('SELECT COUNT(*)::int AS c FROM shopit_follows WHERE follower_id = $1 OR following_id = $1', [outsiderUserId]),
+        query('SELECT COUNT(*)::int AS c FROM shopit_mutes WHERE muter_id = $1 OR muted_id = $1', [outsiderUserId]),
+        query('SELECT COUNT(*)::int AS c FROM shopit_files WHERE owner_id = $1', [outsiderUserId]),
+      ]);
+      assert.strictEqual(Number(fCnt.rows[0].c), 0);
+      assert.strictEqual(Number(mCnt.rows[0].c), 0);
+      assert.strictEqual(Number(fileCnt.rows[0].c), 0);
     });
 
     console.log(`\n=== SOCIAL, CHAT & FILES TEST SUMMARY: ${passed} passed, ${failed} failed ===`);

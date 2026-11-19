@@ -19,12 +19,18 @@ import {
   ExternalLink,
   Loader2,
   CheckCheck,
+  Check,
+  Bell,
+  BellOff,
+  Smile,
+  ShoppingBag,
 } from 'lucide-react';
 import { checkNumbersInText, PRESET_PRICES, PRESET_QUANTITIES } from '../utils/antiBypass';
 import { ChatAttachment, ChatMessage } from '../types';
 import { ReportModal, ReportTarget } from './ReportModal';
 import { UserIdentityBadge } from './UserIdentityBadge';
 import { uploadFileToServer } from '../utils/fileUpload';
+import { formatNaira } from '../utils/pricing';
 
 const formatFileSize = (bytes: number): string => {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 KB';
@@ -47,6 +53,9 @@ export const LockedChatView: React.FC = () => {
     openAuthModal,
     openProduct,
     blockUser,
+    muteUser,
+    unmuteUser,
+    fetchMutedUsers,
     addToCart,
     paymentsEnabled,
     products,
@@ -58,6 +67,7 @@ export const LockedChatView: React.FC = () => {
   const [selectedQuantity, setSelectedQuantity] = useState<number>(1);
   const [selectedPrice, setSelectedPrice] = useState<number>(1000);
   const [showOfferPicker, setShowOfferPicker] = useState<boolean>(false);
+  const [showEmojiPicker, setShowEmojiPicker] = useState<boolean>(false);
   const [numberWarning, setNumberWarning] = useState<string | null>(null);
   const [reportTarget, setReportTarget] = useState<ReportTarget | null>(null);
   const [sending, setSending] = useState(false);
@@ -66,9 +76,35 @@ export const LockedChatView: React.FC = () => {
   const [isUploadingFile, setIsUploadingFile] = useState(false);
   const [blockConfirmOpen, setBlockConfirmOpen] = useState(false);
   const [blockingUser, setBlockingUser] = useState(false);
+  const [mutedIds, setMutedIds] = useState<Set<string>>(new Set());
+  const [muteBusy, setMuteBusy] = useState(false);
+  const [lightboxImage, setLightboxImage] = useState<{ url: string; name: string } | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const QUICK_EMOJIS = ['😊', '🙏', '👍', '❤️', '🔥', '✨', '🎨', '🧶', '💎', '🛍️', '📦', '🎉'];
+
+  const formatDayLabel = (rawDate?: string): string | null => {
+    if (!rawDate) return null;
+    const d = new Date(rawDate);
+    if (Number.isNaN(d.getTime())) return null;
+    const today = new Date();
+    const yesterday = new Date();
+    yesterday.setDate(today.getDate() - 1);
+    const sameDay = (a: Date, b: Date) =>
+      a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+    if (sameDay(d, today)) return 'Today';
+    if (sameDay(d, yesterday)) return 'Yesterday';
+    return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+  };
+
+  useEffect(() => {
+    if (!currentUser?.id) return;
+    void fetchMutedUsers().then(list => {
+      setMutedIds(new Set(list.map(m => m.mutedUserId)));
+    });
+  }, [currentUser?.id, fetchMutedUsers]);
 
   const activeConv = conversations.find(c => c.id === activeConversationId) || conversations[0];
   const activeMessages = activeConv ? messages[activeConv.id] || [] : [];
@@ -427,6 +463,52 @@ export const LockedChatView: React.FC = () => {
                 </div>
 
                 <div className="flex items-center gap-1.5 shrink-0">
+                  {activeCounterpart?.userId && (
+                    <button
+                      type="button"
+                      disabled={muteBusy}
+                      onClick={async () => {
+                        const targetId = activeCounterpart.userId!;
+                        setMuteBusy(true);
+                        if (mutedIds.has(targetId)) {
+                          const r = await unmuteUser(targetId);
+                          if (r.status) {
+                            setMutedIds(prev => {
+                              const next = new Set(prev);
+                              next.delete(targetId);
+                              return next;
+                            });
+                          }
+                        } else {
+                          const r = await muteUser(targetId);
+                          if (r.status) {
+                            setMutedIds(prev => new Set(prev).add(targetId));
+                          }
+                        }
+                        setMuteBusy(false);
+                      }}
+                      className={`p-1.5 rounded-lg transition-colors flex items-center gap-1 text-[11px] font-bold whitespace-nowrap ${
+                        mutedIds.has(activeCounterpart.userId)
+                          ? 'text-amber-600 bg-amber-50 dark:bg-amber-950/40'
+                          : 'text-[#71717A] hover:text-[#FF6B00] hover:bg-stone-100 dark:hover:bg-[#1E2028]'
+                      }`}
+                      title={
+                        mutedIds.has(activeCounterpart.userId)
+                          ? 'Unmute chat notifications'
+                          : 'Mute notifications from this user'
+                      }
+                    >
+                      {mutedIds.has(activeCounterpart.userId) ? (
+                        <BellOff className="w-3.5 h-3.5" />
+                      ) : (
+                        <Bell className="w-3.5 h-3.5" />
+                      )}
+                      <span className="hidden sm:inline">
+                        {mutedIds.has(activeCounterpart.userId) ? 'Muted' : 'Mute'}
+                      </span>
+                    </button>
+                  )}
+
                   {activeCounterpart?.userId && !activeConv.isBlocked && (
                     <button
                       type="button"
@@ -574,9 +656,59 @@ export const LockedChatView: React.FC = () => {
                 </div>
               )}
 
+              {/* Compact Linked Product Card */}
+              {matchedProduct && (
+                <div className="px-3.5 py-2 bg-white dark:bg-[#15161C] border-b border-[#E4E4E7] dark:border-[#27272A] flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    {matchedProduct.images?.[0] ? (
+                      <img
+                        src={matchedProduct.images[0]}
+                        alt={matchedProduct.title}
+                        className="w-10 h-10 rounded-xl object-cover border border-[#E4E4E7] dark:border-[#27272A] shrink-0"
+                      />
+                    ) : (
+                      <div className="w-10 h-10 rounded-xl bg-[#FFF4EC] dark:bg-[#1E2028] flex items-center justify-center shrink-0">
+                        <ShoppingBag className="w-4 h-4 text-[#FF6B00]" />
+                      </div>
+                    )}
+                    <div className="min-w-0">
+                      <p className="text-xs font-black text-[#111111] dark:text-white truncate">
+                        {matchedProduct.title}
+                      </p>
+                      <div className="flex items-center gap-2 text-[11px]">
+                        <span className="font-black text-[#FF6B00]">{formatNaira(matchedProduct.displayPrice)}</span>
+                        <span
+                          className={`font-bold ${
+                            matchedProduct.isSoldOut || matchedProduct.stock <= 0
+                              ? 'text-rose-600'
+                              : 'text-emerald-700 dark:text-[#9FE870]'
+                          }`}
+                        >
+                          {matchedProduct.isSoldOut || matchedProduct.stock <= 0
+                            ? 'Sold Out'
+                            : 'In Stock'}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => openProduct(matchedProduct.id)}
+                    className="px-2.5 py-1 rounded-lg bg-[#FAFAFA] dark:bg-[#1E2028] border border-[#E4E4E7] dark:border-[#27272A] hover:border-[#FF6B00] text-[11px] font-bold text-[#111111] dark:text-white shrink-0"
+                  >
+                    View Item
+                  </button>
+                </div>
+              )}
+
               {/* Messages Feed */}
               <div className="flex-1 p-4 overflow-y-auto space-y-3 bg-[#FBFBFC] dark:bg-[#0D0E12]">
-                {activeMessages.map(msg => {
+                {activeMessages.map((msg, msgIndex) => {
+                  const prevMsg = msgIndex > 0 ? activeMessages[msgIndex - 1] : null;
+                  const currentDay = formatDayLabel(msg.createdAt);
+                  const prevDay = formatDayLabel(prevMsg?.createdAt);
+                  const showDayDivider = Boolean(currentDay && currentDay !== prevDay);
+
                   const isMe = Boolean(
                     currentUser &&
                       (msg.senderId === currentUser.id ||
@@ -585,54 +717,67 @@ export const LockedChatView: React.FC = () => {
                   );
                   const isSystem = msg.senderRole === 'system';
 
-                  if (isSystem) {
-                    return (
-                      <div key={msg.id} className="text-center my-2">
-                        <span className="inline-block px-3 py-1 bg-[#F4F4F5] dark:bg-[#1E2028] text-[#52525B] dark:text-[#D4D4D8] rounded-full text-[11px] font-medium border border-[#E4E4E7] dark:border-[#27272A]">
-                          {msg.content}
-                        </span>
-                      </div>
-                    );
-                  }
-
                   return (
-                    <div
-                      key={msg.id}
-                      className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}
-                    >
-                      <span className="text-[10px] text-[#71717A] dark:text-[#A1A1AA] mb-0.5 px-1 font-medium flex items-center gap-1">
-                        <span>{msg.senderDisplayName} · {msg.timestamp}</span>
-                        {isMe && msg.readByOther && (
-                          <span className="inline-flex items-center gap-0.5 text-[#16A34A] dark:text-[#9FE870] font-bold">
-                            · <CheckCheck className="w-3 h-3" /> Seen
+                    <React.Fragment key={msg.id}>
+                      {showDayDivider && (
+                        <div className="flex items-center justify-center my-2">
+                          <span className="px-3 py-0.5 rounded-full bg-white dark:bg-[#15161C] border border-[#E4E4E7] dark:border-[#27272A] text-[10px] font-bold text-[#71717A] dark:text-[#A1A1AA]">
+                            {currentDay}
                           </span>
-                        )}
-                      </span>
+                        </div>
+                      )}
 
-                      <div
-                        className={`max-w-[85%] rounded-2xl p-3 text-xs leading-relaxed ${
-                          isMe
-                            ? 'bg-[#111111] text-white rounded-br-none shadow-xs border border-[#27272A]'
-                            : 'bg-white dark:bg-[#15161C] text-[#111111] dark:text-white border border-[#E4E4E7] dark:border-[#27272A] rounded-bl-none shadow-xs'
-                        }`}
-                      >
-                        {/* File Attachment */}
-                        {msg.attachment && (
-                          <div className={msg.content ? 'mb-2' : ''}>
-                            {msg.attachment.kind === 'image' ? (
-                              <a
-                                href={msg.attachment.url}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="block rounded-xl overflow-hidden border border-black/10 dark:border-white/15 bg-black/5"
-                              >
-                                <img
-                                  src={msg.attachment.url}
-                                  alt={msg.attachment.originalName}
-                                  className="max-h-56 w-auto object-contain mx-auto"
-                                />
-                              </a>
-                            ) : (
+                      {isSystem ? (
+                        <div className="text-center my-2">
+                          <span className="inline-block px-3 py-1 bg-[#F4F4F5] dark:bg-[#1E2028] text-[#52525B] dark:text-[#D4D4D8] rounded-full text-[11px] font-medium border border-[#E4E4E7] dark:border-[#27272A]">
+                            {msg.content}
+                          </span>
+                        </div>
+                      ) : (
+                        <div className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}>
+                          <span className="text-[10px] text-[#71717A] dark:text-[#A1A1AA] mb-0.5 px-1 font-medium flex items-center gap-1">
+                            <span>{msg.senderDisplayName} · {msg.timestamp}</span>
+                            {isMe && (
+                              msg.readByOther ? (
+                                <span className="inline-flex items-center gap-0.5 text-[#16A34A] dark:text-[#9FE870] font-bold">
+                                  · <CheckCheck className="w-3 h-3" /> Seen
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-0.5 text-[#71717A]">
+                                  · <Check className="w-3 h-3" /> Sent
+                                </span>
+                              )
+                            )}
+                          </span>
+
+                          <div
+                            className={`max-w-[85%] rounded-2xl p-3 text-xs leading-relaxed ${
+                              isMe
+                                ? 'bg-[#111111] text-white rounded-br-none shadow-xs border border-[#27272A]'
+                                : 'bg-white dark:bg-[#15161C] text-[#111111] dark:text-white border border-[#E4E4E7] dark:border-[#27272A] rounded-bl-none shadow-xs'
+                            }`}
+                          >
+                            {/* File Attachment */}
+                            {msg.attachment && (
+                              <div className={msg.content ? 'mb-2' : ''}>
+                                {msg.attachment.kind === 'image' ? (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setLightboxImage({
+                                        url: msg.attachment!.url,
+                                        name: msg.attachment!.originalName,
+                                      })
+                                    }
+                                    className="block rounded-xl overflow-hidden border border-black/10 dark:border-white/15 bg-black/5 cursor-zoom-in"
+                                  >
+                                    <img
+                                      src={msg.attachment.url}
+                                      alt={msg.attachment.originalName}
+                                      className="max-h-56 w-auto object-contain mx-auto"
+                                    />
+                                  </button>
+                                ) : (
                               <a
                                 href={`${msg.attachment.url}?download=1`}
                                 download={msg.attachment.originalName}
@@ -692,6 +837,8 @@ export const LockedChatView: React.FC = () => {
                         )}
                       </div>
                     </div>
+                  )}
+                    </React.Fragment>
                   );
                 })}
                 <div ref={messagesEndRef} />
@@ -761,7 +908,24 @@ export const LockedChatView: React.FC = () => {
               )}
 
               {/* Message Input Form */}
-              <div className="p-3 bg-white dark:bg-[#15161C] border-t-2 border-[#111111]/10 dark:border-[#27272A]">
+              <div className="p-3 bg-white dark:bg-[#15161C] border-t-2 border-[#111111]/10 dark:border-[#27272A] relative">
+                {showEmojiPicker && !isThreadDisabled && (
+                  <div className="mb-2 p-2 rounded-xl bg-[#FAFAFA] dark:bg-[#1E2028] border border-[#E4E4E7] dark:border-[#27272A] flex flex-wrap gap-1.5">
+                    {QUICK_EMOJIS.map(emoji => (
+                      <button
+                        key={emoji}
+                        type="button"
+                        onClick={() => {
+                          setInputContent(prev => `${prev}${emoji}`);
+                          setShowEmojiPicker(false);
+                        }}
+                        className="w-8 h-8 rounded-lg hover:bg-white dark:hover:bg-[#15161C] text-base flex items-center justify-center transition-colors"
+                      >
+                        {emoji}
+                      </button>
+                    ))}
+                  </div>
+                )}
                 <form onSubmit={handleSendText} className="flex items-center gap-2">
                   <input
                     ref={fileInputRef}
@@ -783,6 +947,16 @@ export const LockedChatView: React.FC = () => {
                     ) : (
                       <Paperclip className="w-4 h-4" />
                     )}
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={isThreadDisabled}
+                    onClick={() => setShowEmojiPicker(v => !v)}
+                    title="Quick emoji"
+                    className="p-2.5 rounded-xl border-2 border-[#111111]/15 dark:border-[#27272A] hover:border-[#FF6B00] bg-[#FAFAFA] dark:bg-[#1E2028] text-[#111111] dark:text-white disabled:opacity-50 shrink-0"
+                  >
+                    <Smile className="w-4 h-4" />
                   </button>
 
                   <input
@@ -876,6 +1050,47 @@ export const LockedChatView: React.FC = () => {
               >
                 {blockingUser ? 'Blocking...' : 'Block User'}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Image Lightbox Modal */}
+      {lightboxImage && (
+        <div
+          onClick={() => setLightboxImage(null)}
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-xs animate-backdrop"
+        >
+          <div
+            onClick={e => e.stopPropagation()}
+            className="relative max-w-3xl w-full bg-[#111111] rounded-2xl border border-[#27272A] overflow-hidden shadow-2xl"
+          >
+            <div className="px-4 py-2.5 flex items-center justify-between border-b border-[#27272A] text-white text-xs">
+              <span className="font-bold truncate">{lightboxImage.name}</span>
+              <div className="flex items-center gap-2 shrink-0">
+                <a
+                  href={`${lightboxImage.url}?download=1`}
+                  download={lightboxImage.name}
+                  className="px-2.5 py-1 rounded-lg bg-[#FF6B00] text-[#111111] font-black inline-flex items-center gap-1"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Save</span>
+                </a>
+                <button
+                  type="button"
+                  onClick={() => setLightboxImage(null)}
+                  className="p-1 rounded-lg text-[#A1A1AA] hover:text-white"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+            <div className="p-4 flex items-center justify-center bg-black max-h-[80vh]">
+              <img
+                src={lightboxImage.url}
+                alt={lightboxImage.name}
+                className="max-h-[72vh] w-auto object-contain rounded-lg"
+              />
             </div>
           </div>
         </div>

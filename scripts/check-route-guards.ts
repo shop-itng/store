@@ -31,6 +31,8 @@ const PUBLIC_ALLOW_LIST = new Set([
   'GET /products/:id',
   'GET /sellers',
   'GET /sellers/:id',
+  'GET /profiles/discover/suggested',
+  'GET /profiles/search',
   'GET /profiles/:slug',
   'GET /profiles/:slug/followers',
   'GET /profiles/:slug/following',

@@ -28,6 +28,8 @@ import {
   sanitizeNotificationPrefs,
   sanitizePrivacySettings,
 } from '../lib/validation.js';
+import { checkAndRecordRateLimit } from '../db/otpStore.js';
+import { sendBrevoDirect } from '../lib/payments.js';
 
 const router = express.Router();
 
@@ -833,6 +835,7 @@ router.delete('/profiles/me', requireAuth, async (req: AuthenticatedRequest, res
 
       await client.query('DELETE FROM shopit_follows WHERE follower_id = $1 OR following_id = $1', [userId]);
       await client.query('DELETE FROM shopit_blocks WHERE blocker_id = $1 OR blocked_id = $1', [userId]);
+      await client.query('DELETE FROM shopit_mutes WHERE muter_id = $1 OR muted_id = $1', [userId]);
       await client.query('DELETE FROM shopit_wishlists WHERE user_id = $1', [userId]);
       await client.query('DELETE FROM shopit_carts WHERE user_id = $1', [userId]);
       await client.query('DELETE FROM shopit_notifications WHERE user_id = $1', [userId]);
@@ -928,7 +931,7 @@ async function getAcceptedFollowersCount(targetUserId: string): Promise<number> 
   return parseInt(String(res.rows[0]?.total || '0'), 10);
 }
 
-// POST /api/follows - Follow a member/seller (auto-pending for approval-required or under-18 accounts)
+// POST /api/follows - Follow a member/seller (enforces DB rate limit, youth safety, mutual alerts & concurrency safety)
 router.post('/follows', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const check = rejectUnknownFields(req.body, ['targetUserId']);
@@ -941,6 +944,14 @@ router.post('/follows', requireAuth, async (req: AuthenticatedRequest, res: Resp
     }
 
     const viewer = req.user!;
+    const rl = await checkAndRecordRateLimit(`follows:${viewer.userId}`, 60, 60 * 60 * 1000);
+    if (!rl.allowed) {
+      return res.status(429).json({
+        status: false,
+        message: 'Too many follow requests right now. Please wait before following more accounts.',
+      });
+    }
+
     const target = await resolveTargetUserRecord(rawTarget);
     if (!target || target.deleted_at || target.is_banned) {
       return res.status(404).json({ status: false, message: 'Account not found or unavailable.' });
@@ -959,6 +970,24 @@ router.post('/follows', requireAuth, async (req: AuthenticatedRequest, res: Resp
       return res.status(403).json({ status: false, message: 'Cannot follow this user due to a block.' });
     }
 
+    const viewerRes = await dbQuery(
+      'SELECT age, display_name, name, profile_slug FROM shopit_users WHERE id = $1 LIMIT 1',
+      [viewer.userId]
+    );
+    const vRow = viewerRes.rows[0];
+
+    const isTargetUnder18 =
+      (target.age !== null && target.age !== undefined && Number(target.age) < 18) || Boolean(target.s_under_18);
+    const viewerAge = vRow?.age !== null && vRow?.age !== undefined ? Number(vRow.age) : null;
+    const isViewerAdult = viewerAge === null || !Number.isFinite(viewerAge) || viewerAge >= 18;
+
+    if (isTargetUnder18 && isViewerAdult) {
+      return res.status(403).json({
+        status: false,
+        message: 'For youth safety, adults cannot follow or send follow requests to under-18 accounts.',
+      });
+    }
+
     const existing = await dbQuery(
       'SELECT id, status FROM shopit_follows WHERE follower_id = $1 AND following_id = $2 LIMIT 1',
       [viewer.userId, target.id]
@@ -969,42 +998,96 @@ router.post('/follows', requireAuth, async (req: AuthenticatedRequest, res: Resp
       return res.json({ status: true, followStatus: existingStatus, followersCount });
     }
 
-    const isUnder18 =
-      (target.age !== null && target.age !== undefined && Number(target.age) < 18) || Boolean(target.s_under_18);
-    const basePrivacy = isUnder18 ? UNDER_18_PRIVACY_SETTINGS : DEFAULT_PRIVACY_SETTINGS;
-    const privacy = sanitizePrivacySettings(parseJsonSafe(target.privacy_settings, basePrivacy), basePrivacy, isUnder18);
+    const basePrivacy = isTargetUnder18 ? UNDER_18_PRIVACY_SETTINGS : DEFAULT_PRIVACY_SETTINGS;
+    const privacy = sanitizePrivacySettings(parseJsonSafe(target.privacy_settings, basePrivacy), basePrivacy, isTargetUnder18);
 
-    const followStatus: 'pending' | 'accepted' = privacy.whoCanFollow === 'approval' ? 'pending' : 'accepted';
+    const followStatus: 'pending' | 'accepted' =
+      isTargetUnder18 || privacy.whoCanFollow === 'approval' ? 'pending' : 'accepted';
     const followId = `fol_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
 
-    await dbQuery(
+    const insRes = await dbQuery(
       `INSERT INTO shopit_follows (id, follower_id, following_id, status, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, NOW(), NOW())`,
+       VALUES ($1, $2, $3, $4, NOW(), NOW())
+       ON CONFLICT (follower_id, following_id) DO NOTHING
+       RETURNING id`,
       [followId, viewer.userId, target.id, followStatus]
     );
 
-    try {
-      const viewerRes = await dbQuery(
-        'SELECT display_name, name, profile_slug FROM shopit_users WHERE id = $1 LIMIT 1',
-        [viewer.userId]
+    if (insRes.rows.length === 0) {
+      const raceRes = await dbQuery(
+        'SELECT status FROM shopit_follows WHERE follower_id = $1 AND following_id = $2 LIMIT 1',
+        [viewer.userId, target.id]
       );
-      const vRow = viewerRes.rows[0];
-      const vName = vRow?.display_name || extractFirstName(vRow?.name || viewer.name || 'Someone');
-      const vSlug = vRow?.profile_slug || viewer.userId;
+      const settledStatus = raceRes.rows[0]?.status === 'accepted' ? 'accepted' : 'pending';
+      const followersCount = await getAcceptedFollowersCount(target.id);
+      return res.json({ status: true, followStatus: settledStatus, followersCount });
+    }
 
-      await dbQuery(
-        `INSERT INTO shopit_notifications (id, user_id, title, message, type, is_read, link, created_at)
-         VALUES ($1, $2, $3, $4, 'info', false, $5, NOW())`,
-        [
-          `notif_fol_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
-          target.id,
-          followStatus === 'pending' ? 'New Follow Request' : 'New Follower',
+    try {
+      const muteRes = await dbQuery(
+        'SELECT 1 FROM shopit_mutes WHERE muter_id = $1 AND muted_id = $2 LIMIT 1',
+        [target.id, viewer.userId]
+      );
+      const isMuted = muteRes.rows.length > 0;
+
+      if (!isMuted) {
+        const vName = vRow?.display_name || extractFirstName(vRow?.name || viewer.name || 'Someone');
+        const vSlug = vRow?.profile_slug || viewer.userId;
+
+        const reverseRes = await dbQuery(
+          `SELECT 1 FROM shopit_follows WHERE follower_id = $1 AND following_id = $2 AND status = 'accepted' LIMIT 1`,
+          [target.id, viewer.userId]
+        );
+        const isMutualFollowBack = followStatus === 'accepted' && reverseRes.rows.length > 0;
+
+        const notifTitle =
+          followStatus === 'pending'
+            ? 'New Follow Request'
+            : isMutualFollowBack
+            ? 'Follow Back — Friends!'
+            : 'New Follower';
+        const notifMsg =
           followStatus === 'pending'
             ? `${vName} requested to follow your Shop It profile.`
-            : `${vName} started following you on Shop It.`,
-          `/?profile=${encodeURIComponent(vSlug)}`,
-        ]
-      );
+            : isMutualFollowBack
+            ? `${vName} followed you back — you're now friends on Shop It!`
+            : `${vName} started following you on Shop It.`;
+
+        await dbQuery(
+          `INSERT INTO shopit_notifications (id, user_id, title, message, type, is_read, link, created_at)
+           VALUES ($1, $2, $3, $4, 'info', false, $5, NOW())`,
+          [
+            `notif_fol_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
+            target.id,
+            notifTitle,
+            notifMsg,
+            `/?profile=${encodeURIComponent(vSlug)}`,
+          ]
+        );
+
+        const targetEmailRes = await dbQuery(
+          'SELECT email, display_name, name, notification_prefs FROM shopit_users WHERE id = $1 LIMIT 1',
+          [target.id]
+        );
+        const tEmailRow = targetEmailRes.rows[0];
+        const tPrefs = sanitizeNotificationPrefs(
+          parseJsonSafe(tEmailRow?.notification_prefs, DEFAULT_NOTIFICATION_PREFS)
+        );
+        if (
+          tPrefs.emailFollowers &&
+          tEmailRow?.email &&
+          !String(tEmailRow.email).endsWith('.local')
+        ) {
+          const tName = tEmailRow.display_name || extractFirstName(tEmailRow.name || 'Friend');
+          sendBrevoDirect(
+            tEmailRow.email,
+            `Shop It: ${notifTitle}`,
+            `Hi ${tName},\n\n${notifMsg}\n\nVisit Shop It to view their profile.`,
+            `<p>Hi ${tName},</p><p>${notifMsg}</p>`,
+            tName
+          ).catch(() => {});
+        }
+      }
     } catch {}
 
     const followersCount = await getAcceptedFollowersCount(target.id);
@@ -1383,16 +1466,31 @@ async function handleFollowListRoute(
 
     const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit || '50'), 10) || 50));
     const offset = Math.max(0, parseInt(String(req.query.offset || '0'), 10) || 0);
+    const searchQ = String(req.query.q || '').trim().toLowerCase();
 
     const joinCol = mode === 'followers' ? 'f.follower_id' : 'f.following_id';
     const filterCol = mode === 'followers' ? 'f.following_id' : 'f.follower_id';
+
+    const params: any[] = [target.id];
+    let searchClause = '';
+    if (searchQ) {
+      params.push(`%${searchQ}%`);
+      const pIdx = params.length;
+      searchClause = ` AND (
+        LOWER(COALESCE(u.display_name, '')) LIKE $${pIdx}
+        OR LOWER(COALESCE(u.name, '')) LIKE $${pIdx}
+        OR LOWER(COALESCE(u.profile_slug, '')) LIKE $${pIdx}
+        OR LOWER(COALESCE(s.shop_name, '')) LIKE $${pIdx}
+      )`;
+    }
 
     const countRes = await dbQuery(
       `SELECT COUNT(*) as total
        FROM shopit_follows f
        JOIN shopit_users u ON u.id = ${joinCol}
-       WHERE ${filterCol} = $1 AND f.status = 'accepted' AND u.deleted_at IS NULL AND u.is_banned IS NOT TRUE`,
-      [target.id]
+       LEFT JOIN shopit_sellers s ON (u.id = s.user_id OR u.id = s.id)
+       WHERE ${filterCol} = $1 AND f.status = 'accepted' AND u.deleted_at IS NULL AND u.is_banned IS NOT TRUE${searchClause}`,
+      params
     );
     const total = parseInt(String(countRes.rows[0]?.total || '0'), 10);
 
@@ -1401,25 +1499,54 @@ async function handleFollowListRoute(
        FROM shopit_follows f
        JOIN shopit_users u ON u.id = ${joinCol}
        LEFT JOIN shopit_sellers s ON (u.id = s.user_id OR u.id = s.id)
-       WHERE ${filterCol} = $1 AND f.status = 'accepted' AND u.deleted_at IS NULL AND u.is_banned IS NOT TRUE
+       WHERE ${filterCol} = $1 AND f.status = 'accepted' AND u.deleted_at IS NULL AND u.is_banned IS NOT TRUE${searchClause}
        ORDER BY f.created_at DESC
-       LIMIT $2 OFFSET $3`,
-      [target.id, limit, offset]
+       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+      [...params, limit, offset]
     );
+
+    const listedIds: string[] = rowsRes.rows.map((r: any) => String(r.id)).filter(Boolean);
+    const viewerFollowingMap = new Map<string, 'pending' | 'accepted'>();
+    const viewerFollowedBySet = new Set<string>();
+    if (viewer && listedIds.length > 0) {
+      const lIn = buildInClause(listedIds, 2);
+      const [vfRes, vfbRes] = await Promise.all([
+        dbQuery(
+          `SELECT following_id, status FROM shopit_follows WHERE follower_id = $1 AND following_id IN (${lIn.placeholders})`,
+          [viewer.userId, ...lIn.params]
+        ),
+        dbQuery(
+          `SELECT follower_id FROM shopit_follows WHERE following_id = $1 AND follower_id IN (${lIn.placeholders}) AND status = 'accepted'`,
+          [viewer.userId, ...lIn.params]
+        ),
+      ]);
+      for (const r of vfRes.rows) {
+        viewerFollowingMap.set(String(r.following_id), r.status === 'accepted' ? 'accepted' : 'pending');
+      }
+      for (const r of vfbRes.rows) {
+        viewerFollowedBySet.add(String(r.follower_id));
+      }
+    }
 
     return res.json({
       status: true,
       total,
-      users: rowsRes.rows.map((r: any) => ({
-        id: r.id,
-        displayName: r.display_name || extractFirstName(r.name || 'Member'),
-        profileSlug: r.profile_slug || r.id,
-        avatarUrl: r.avatar_url || null,
-        campus: r.campus || '',
-        role: r.role,
-        shopName: r.shop_name || undefined,
-        followedAt: r.created_at,
-      })),
+      users: rowsRes.rows.map((r: any) => {
+        const vfStatus = viewer ? viewerFollowingMap.get(String(r.id)) || 'none' : undefined;
+        const isMutual = viewer ? vfStatus === 'accepted' && viewerFollowedBySet.has(String(r.id)) : false;
+        return {
+          id: r.id,
+          displayName: r.display_name || extractFirstName(r.name || 'Member'),
+          profileSlug: r.profile_slug || r.id,
+          avatarUrl: r.avatar_url || null,
+          campus: r.campus || '',
+          role: r.role,
+          shopName: r.shop_name || undefined,
+          followedAt: r.created_at,
+          viewerFollowStatus: vfStatus,
+          isMutual,
+        };
+      }),
     });
   } catch (err: any) {
     return res.status(500).json({ status: false, message: `Failed to fetch ${mode} list.` });
@@ -1433,6 +1560,315 @@ router.get('/profiles/:slug/followers', optionalAuth, (req: AuthenticatedRequest
 router.get('/profiles/:slug/following', optionalAuth, (req: AuthenticatedRequest, res: Response) =>
   handleFollowListRoute(req, res, 'following')
 );
+
+// ============================================================================
+// DISCOVERY, SAFE PEOPLE/SHOP SEARCH & MUTES
+// ============================================================================
+
+// GET /api/profiles/discover/suggested - Suggested makers & shops (real DB sellers only, no under-18)
+router.get('/profiles/discover/suggested', optionalAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const viewer = req.user;
+    const limit = Math.min(20, Math.max(1, parseInt(String(req.query.limit || '8'), 10) || 8));
+
+    let viewerCampus = '';
+    const excludeUserIds = new Set<string>();
+
+    if (viewer) {
+      excludeUserIds.add(viewer.userId);
+      const [vRes, folRes, blkRes] = await Promise.all([
+        dbQuery('SELECT campus FROM shopit_users WHERE id = $1 LIMIT 1', [viewer.userId]),
+        dbQuery('SELECT following_id FROM shopit_follows WHERE follower_id = $1', [viewer.userId]),
+        dbQuery('SELECT blocker_id, blocked_id FROM shopit_blocks WHERE blocker_id = $1 OR blocked_id = $1', [viewer.userId]),
+      ]);
+      viewerCampus = String(vRes.rows[0]?.campus || '').trim().toLowerCase();
+      for (const f of folRes.rows) excludeUserIds.add(String(f.following_id));
+      for (const b of blkRes.rows) {
+        if (b.blocker_id !== viewer.userId) excludeUserIds.add(String(b.blocker_id));
+        if (b.blocked_id !== viewer.userId) excludeUserIds.add(String(b.blocked_id));
+      }
+    }
+
+    const rowsRes = await dbQuery(
+      `SELECT u.id, u.name, u.display_name, u.profile_slug, u.avatar_url, u.campus, u.age,
+              s.id as s_id, s.shop_name, s.campus as s_campus, s.bio as s_bio, u.bio as u_bio,
+              s.logo_url as s_logo_url, s.is_verified_seller, s.verification_status,
+              s.under_18 as s_under_18, s.rating as s_rating
+       FROM shopit_users u
+       JOIN shopit_sellers s ON (u.id = s.user_id OR u.id = s.id)
+       WHERE u.deleted_at IS NULL
+         AND u.is_banned IS NOT TRUE
+         AND COALESCE(s.vacation_mode, false) = false
+         AND COALESCE(s.under_18, false) = false
+         AND (u.age IS NULL OR u.age >= 18)
+       ORDER BY COALESCE(s.is_verified_seller, false) DESC, COALESCE(s.rating, 5.0) DESC, u.created_at DESC
+       LIMIT 60`
+    );
+
+    const seen = new Set<string>();
+    const baseCandidates = rowsRes.rows.filter((r: any) => {
+      if (excludeUserIds.has(r.id) || seen.has(r.id)) return false;
+      seen.add(r.id);
+      return true;
+    });
+
+    const followerCountMap = new Map<string, number>();
+    const productCountMap = new Map<string, number>();
+
+    if (baseCandidates.length > 0) {
+      const userIds = baseCandidates.map((r: any) => String(r.id));
+      const sellerRefs = baseCandidates.flatMap((r: any) => [String(r.id), String(r.s_id || '')]).filter(Boolean);
+      const folIn = buildInClause(userIds, 1);
+      const prodIn = buildInClause(sellerRefs, 1);
+
+      const [folCountsRes, prodCountsRes] = await Promise.all([
+        dbQuery(
+          `SELECT following_id, COUNT(*) as cnt
+           FROM shopit_follows
+           WHERE status = 'accepted' AND following_id IN (${folIn.placeholders})
+           GROUP BY following_id`,
+          folIn.params
+        ),
+        dbQuery(
+          `SELECT seller_id, COUNT(*) as cnt
+           FROM shopit_products
+           WHERE is_paused IS NOT TRUE AND is_draft IS NOT TRUE AND seller_id IN (${prodIn.placeholders})
+           GROUP BY seller_id`,
+          prodIn.params
+        ),
+      ]);
+
+      for (const fr of folCountsRes.rows) {
+        followerCountMap.set(String(fr.following_id), parseInt(String(fr.cnt || '0'), 10) || 0);
+      }
+      for (const pr of prodCountsRes.rows) {
+        productCountMap.set(
+          String(pr.seller_id),
+          (productCountMap.get(String(pr.seller_id)) || 0) + (parseInt(String(pr.cnt || '0'), 10) || 0)
+        );
+      }
+    }
+
+    const candidates = baseCandidates
+      .map((r: any) => {
+        const campus = r.campus || r.s_campus || '';
+        const isSameCampus = Boolean(viewerCampus && campus.trim().toLowerCase() === viewerCampus);
+        const isVerified = Boolean(
+          r.is_verified_seller || r.verification_status === 'verified' || r.verification_status === 'approved'
+        );
+        const prodCountBySeller = r.s_id && r.s_id !== r.id ? productCountMap.get(String(r.s_id)) || 0 : 0;
+        const productCount = (productCountMap.get(String(r.id)) || 0) + prodCountBySeller;
+        const followersCount = followerCountMap.get(String(r.id)) || 0;
+        const rating = parseFloat(String(r.s_rating || '5.0'));
+        const score = (isSameCampus ? 50 : 0) + (isVerified ? 25 : 0) + Math.min(20, productCount * 4) + rating * 2;
+        return {
+          id: r.id,
+          displayName: r.display_name || extractFirstName(r.name || 'Seller'),
+          profileSlug: r.profile_slug || r.id,
+          shopName: r.shop_name || 'Artisan Shop',
+          avatarUrl: r.avatar_url || r.s_logo_url || null,
+          campus,
+          bio: String(r.u_bio || r.s_bio || '').slice(0, 120),
+          isVerifiedSeller: isVerified,
+          productCount,
+          followersCount,
+          rating,
+          isSameCampus,
+          _score: score,
+        };
+      })
+      .sort((a: any, b: any) => b._score - a._score)
+      .slice(0, limit)
+      .map(({ _score, ...rest }: any) => rest);
+
+    return res.json({ status: true, sellers: candidates });
+  } catch (err: any) {
+    console.error('[GET /profiles/discover/suggested Error]:', err?.message || err);
+    return res.status(500).json({ status: false, message: 'Failed to load suggested sellers.' });
+  }
+});
+
+// GET /api/profiles/search?q=... - Search members & shops by public fields only (never email/phone)
+router.get('/profiles/search', optionalAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    const limit = Math.min(30, Math.max(1, parseInt(String(req.query.limit || '12'), 10) || 12));
+    if (q.length < 2) {
+      return res.json({ status: true, profiles: [] });
+    }
+
+    const viewer = req.user;
+    const blockedSet = new Set<string>();
+    const followMap = new Map<string, 'pending' | 'accepted'>();
+
+    if (viewer) {
+      const [blkRes, folRes] = await Promise.all([
+        dbQuery('SELECT blocker_id, blocked_id FROM shopit_blocks WHERE blocker_id = $1 OR blocked_id = $1', [viewer.userId]),
+        dbQuery('SELECT following_id, status FROM shopit_follows WHERE follower_id = $1', [viewer.userId]),
+      ]);
+      for (const b of blkRes.rows) {
+        if (b.blocker_id !== viewer.userId) blockedSet.add(String(b.blocker_id));
+        if (b.blocked_id !== viewer.userId) blockedSet.add(String(b.blocked_id));
+      }
+      for (const f of folRes.rows) {
+        followMap.set(String(f.following_id), f.status === 'accepted' ? 'accepted' : 'pending');
+      }
+    }
+
+    const pattern = `%${q.toLowerCase()}%`;
+    const rowsRes = await dbQuery(
+      `SELECT u.id, u.name, u.display_name, u.profile_slug, u.avatar_url, u.campus, u.role, u.age,
+              s.id as s_id, s.shop_name, s.logo_url as s_logo_url, s.campus as s_campus,
+              s.is_verified_seller, s.verification_status, s.under_18 as s_under_18
+       FROM shopit_users u
+       LEFT JOIN shopit_sellers s ON (u.id = s.user_id OR u.id = s.id)
+       WHERE u.deleted_at IS NULL
+         AND u.is_banned IS NOT TRUE
+         AND COALESCE(s.under_18, false) = false
+         AND (u.age IS NULL OR u.age >= 18)
+         AND (
+           LOWER(COALESCE(u.display_name, '')) LIKE $1
+           OR LOWER(COALESCE(u.name, '')) LIKE $1
+           OR LOWER(COALESCE(u.profile_slug, '')) LIKE $1
+           OR LOWER(COALESCE(u.campus, '')) LIKE $1
+           OR LOWER(COALESCE(s.shop_name, '')) LIKE $1
+         )
+       ORDER BY COALESCE(s.is_verified_seller, false) DESC, u.created_at DESC
+       LIMIT 50`,
+      [pattern]
+    );
+
+    const seen = new Set<string>();
+    const filteredRows = rowsRes.rows
+      .filter((r: any) => {
+        if (blockedSet.has(r.id) || seen.has(r.id)) return false;
+        seen.add(r.id);
+        return true;
+      })
+      .slice(0, limit);
+
+    const searchFollowerCountMap = new Map<string, number>();
+    if (filteredRows.length > 0) {
+      const fIn = buildInClause(filteredRows.map((r: any) => String(r.id)), 1);
+      const fcRes = await dbQuery(
+        `SELECT following_id, COUNT(*) as cnt
+         FROM shopit_follows
+         WHERE status = 'accepted' AND following_id IN (${fIn.placeholders})
+         GROUP BY following_id`,
+        fIn.params
+      );
+      for (const fr of fcRes.rows) {
+        searchFollowerCountMap.set(String(fr.following_id), parseInt(String(fr.cnt || '0'), 10) || 0);
+      }
+    }
+
+    const profiles = filteredRows.map((r: any) => ({
+      id: r.id,
+      displayName: r.display_name || extractFirstName(r.name || 'Member'),
+      profileSlug: r.profile_slug || r.id,
+      role: r.role,
+      shopName: r.shop_name || undefined,
+      avatarUrl: r.avatar_url || r.s_logo_url || null,
+      campus: r.campus || r.s_campus || '',
+      isVerifiedSeller: Boolean(
+        r.is_verified_seller || r.verification_status === 'verified' || r.verification_status === 'approved'
+      ),
+      followersCount: searchFollowerCountMap.get(String(r.id)) || 0,
+      followStatus: viewer ? followMap.get(r.id) || 'none' : 'none',
+    }));
+
+    return res.json({ status: true, profiles });
+  } catch (err: any) {
+    console.error('[GET /profiles/search Error]:', err?.message || err);
+    return res.status(500).json({ status: false, message: 'Failed to search profiles.' });
+  }
+});
+
+// GET /api/mutes - List muted users for the caller
+router.get('/mutes', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const viewer = req.user!;
+    const rows = await dbQuery(
+      `SELECT m.id, m.muted_id, m.created_at, u.name, u.display_name, u.profile_slug, u.avatar_url
+       FROM shopit_mutes m
+       JOIN shopit_users u ON u.id = m.muted_id
+       WHERE m.muter_id = $1 AND u.deleted_at IS NULL
+       ORDER BY m.created_at DESC
+       LIMIT 100`,
+      [viewer.userId]
+    );
+    return res.json({
+      status: true,
+      mutes: rows.rows.map((r: any) => ({
+        id: r.id,
+        mutedUserId: r.muted_id,
+        displayName: r.display_name || extractFirstName(r.name || 'Member'),
+        profileSlug: r.profile_slug || r.muted_id,
+        avatarUrl: r.avatar_url || null,
+        createdAt: r.created_at,
+      })),
+    });
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: 'Failed to load muted accounts.' });
+  }
+});
+
+// POST /api/mutes - Mute notifications from a specific account
+router.post('/mutes', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const check = rejectUnknownFields(req.body, ['targetUserId']);
+    if (!check.ok) {
+      return res.status(400).json({ status: false, message: check.message });
+    }
+    const rawTarget = String(check.obj.targetUserId || '').trim();
+    if (!rawTarget) {
+      return res.status(400).json({ status: false, message: 'targetUserId is required.' });
+    }
+    const viewer = req.user!;
+    const target = await resolveTargetUserRecord(rawTarget);
+    if (!target || target.deleted_at) {
+      return res.status(404).json({ status: false, message: 'User account not found.' });
+    }
+    if (target.id === viewer.userId) {
+      return res.status(400).json({ status: false, message: 'You cannot mute yourself.' });
+    }
+
+    const muteId = `mute_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+    await dbQuery(
+      `INSERT INTO shopit_mutes (id, muter_id, muted_id, created_at)
+       VALUES ($1, $2, $3, NOW())
+       ON CONFLICT (muter_id, muted_id) DO NOTHING`,
+      [muteId, viewer.userId, target.id]
+    );
+
+    return res.status(201).json({
+      status: true,
+      mutedUserId: target.id,
+      message: `Muted notifications from ${target.display_name || extractFirstName(target.name || 'User')}.`,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: 'Failed to mute user.' });
+  }
+});
+
+// DELETE /api/mutes/:targetUserId - Unmute notifications from a user
+router.delete('/mutes/:targetUserId', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const viewer = req.user!;
+    const rawTarget = String(req.params.targetUserId || '').trim();
+    const target = await resolveTargetUserRecord(rawTarget);
+    const resolvedId = target?.id || rawTarget;
+
+    await dbQuery('DELETE FROM shopit_mutes WHERE muter_id = $1 AND muted_id = $2', [
+      viewer.userId,
+      resolvedId,
+    ]);
+
+    return res.json({ status: true, message: 'User unmuted.' });
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: 'Failed to unmute user.' });
+  }
+});
 
 // ============================================================================
 // GET /api/profiles/:slug - Public / Privacy-Aware Profile View
@@ -1493,16 +1929,30 @@ router.get('/profiles/:slug', optionalAuth, async (req: AuthenticatedRequest, re
     const basePrivacy = isUnder18 ? UNDER_18_PRIVACY_SETTINGS : DEFAULT_PRIVACY_SETTINGS;
     const privacySettings = sanitizePrivacySettings(parseJsonSafe(row.privacy_settings, basePrivacy), basePrivacy, isUnder18);
 
-    // Check viewer follow status
+    // Check viewer follow, mutual follow & mute status
     let followStatus: 'none' | 'pending' | 'accepted' = 'none';
+    let isMutualFollow = false;
+    let isMuted = false;
     if (viewer && !isOwner) {
-      const fRes = await dbQuery(
-        'SELECT status FROM shopit_follows WHERE follower_id = $1 AND following_id = $2 LIMIT 1',
-        [viewer.userId, row.id]
-      );
+      const [fRes, rfRes, mRes] = await Promise.all([
+        dbQuery('SELECT status FROM shopit_follows WHERE follower_id = $1 AND following_id = $2 LIMIT 1', [
+          viewer.userId,
+          row.id,
+        ]),
+        dbQuery(
+          "SELECT 1 FROM shopit_follows WHERE follower_id = $1 AND following_id = $2 AND status = 'accepted' LIMIT 1",
+          [row.id, viewer.userId]
+        ),
+        dbQuery('SELECT 1 FROM shopit_mutes WHERE muter_id = $1 AND muted_id = $2 LIMIT 1', [
+          viewer.userId,
+          row.id,
+        ]),
+      ]);
       if (fRes.rows[0]?.status) {
         followStatus = fRes.rows[0].status === 'accepted' ? 'accepted' : 'pending';
       }
+      isMutualFollow = followStatus === 'accepted' && rfRes.rows.length > 0;
+      isMuted = mRes.rows.length > 0;
     }
 
     const sellerRow = row.s_id
@@ -1545,6 +1995,8 @@ router.get('/profiles/:slug', optionalAuth, async (req: AuthenticatedRequest, re
           followersCount: parseInt(String(followersRes.rows[0]?.total || '0'), 10),
           followingCount: parseInt(String(followingRes.rows[0]?.total || '0'), 10),
           followStatus,
+          isMutualFollow,
+          isMuted,
           whoCanFollow: privacySettings.whoCanFollow,
           memberSince: row.created_at,
           isRestricted: true,
@@ -1637,6 +2089,8 @@ router.get('/profiles/:slug', optionalAuth, async (req: AuthenticatedRequest, re
             ? row.last_seen_at || row.last_login_at || row.created_at
             : null,
         followStatus,
+        isMutualFollow,
+        isMuted,
         pendingFollowRequestsCount: isOwner ? pendingFollowRequestsCount : undefined,
         whoCanFollow: privacySettings.whoCanFollow,
         whoCanMessage: privacySettings.whoCanMessage,

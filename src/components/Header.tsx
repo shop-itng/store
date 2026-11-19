@@ -458,12 +458,22 @@ export const Header: React.FC = () => {
               )}
             </div>
           ) : (
-            <button
-              onClick={() => openAuthModal('login')}
-              className="px-3 py-1.5 sm:px-4 sm:py-2 text-xs sm:text-sm font-bold text-[#111111] dark:text-white bg-white dark:bg-[#15161C] border-2 border-[#111111] dark:border-[#27272A] hover:border-[#FF6B00] dark:hover:border-[#FF6B00] hover:bg-[#FFF4EC] dark:hover:bg-[#1E2028] rounded-xl transition-all shadow-xs shrink-0"
-            >
-              Sign In
-            </button>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                onClick={() => openAuthModal('login')}
+                title="Log in to view your profile"
+                className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-[#52525B] dark:text-[#A1A1AA] hover:text-[#FF6B00] bg-[#FAFAFA] dark:bg-[#1E2028] border border-[#E4E4E7] dark:border-[#27272A] hover:border-[#FF6B00] rounded-xl transition-colors"
+              >
+                <span>Log in to view your profile</span>
+              </button>
+              <button
+                onClick={() => openAuthModal('login')}
+                className="px-3 py-1.5 sm:px-4 sm:py-2 text-xs sm:text-sm font-bold text-[#111111] dark:text-white bg-white dark:bg-[#15161C] border-2 border-[#111111] dark:border-[#27272A] hover:border-[#FF6B00] dark:hover:border-[#FF6B00] hover:bg-[#FFF4EC] dark:hover:bg-[#1E2028] rounded-xl transition-all shadow-xs shrink-0"
+              >
+                Sign In
+              </button>
+            </div>
           )}
         </div>
       </div>

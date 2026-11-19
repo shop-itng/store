@@ -29,7 +29,7 @@ import { NotFoundView } from './components/NotFoundView';
 import { ResetPasswordPage } from './components/ResetPasswordPage';
 import { AccountSettingsView } from './components/AccountSettingsView';
 import { Store, ShieldCheck, MapPin, Star, ArrowRight, PackageOpen, ShoppingBag, ShieldAlert, ArrowLeft, Clock, Loader2, Users } from 'lucide-react';
-import { Product } from './types';
+import { Product, SuggestedSellerItem, ProfileSearchResult } from './types';
 
 
 const MarketplaceContent: React.FC = () => {
@@ -39,8 +39,12 @@ const MarketplaceContent: React.FC = () => {
   const [followingProducts, setFollowingProducts] = React.useState<Product[]>([]);
   const [followingTotal, setFollowingTotal] = React.useState(0);
   const [followingShopsCount, setFollowingShopsCount] = React.useState(0);
+  const [followingPage, setFollowingPage] = React.useState(1);
   const [followingLoading, setFollowingLoading] = React.useState(false);
+  const [followingLoadingMore, setFollowingLoadingMore] = React.useState(false);
   const [followingError, setFollowingError] = React.useState<string | null>(null);
+  const [suggestedSellers, setSuggestedSellers] = React.useState<SuggestedSellerItem[]>([]);
+  const [profileResults, setProfileResults] = React.useState<ProfileSearchResult[]>([]);
 
   React.useEffect(() => {
     const timer = setTimeout(() => {
@@ -56,6 +60,7 @@ const MarketplaceContent: React.FC = () => {
     isCatalogLoading,
     products,
     filteredProducts,
+    searchQuery,
     sellers,
     safePickupSpots,
     setSelectedCampus,
@@ -67,12 +72,15 @@ const MarketplaceContent: React.FC = () => {
     currentUser,
     emergencyControls,
     fetchFollowingFeed,
+    fetchSuggestedSellers,
+    searchProfiles,
   } = useApp();
 
   const loadFollowingFeed = React.useCallback(async () => {
     if (!currentUser?.id) return;
     setFollowingLoading(true);
     setFollowingError(null);
+    setFollowingPage(1);
     const res = await fetchFollowingFeed(1);
     setFollowingLoading(false);
     if (!res.status) {
@@ -84,6 +92,22 @@ const MarketplaceContent: React.FC = () => {
     setFollowingShopsCount(res.followingCount);
   }, [currentUser?.id, fetchFollowingFeed]);
 
+  const loadMoreFollowingFeed = React.useCallback(async () => {
+    if (!currentUser?.id || followingLoadingMore) return;
+    const nextPage = followingPage + 1;
+    setFollowingLoadingMore(true);
+    const res = await fetchFollowingFeed(nextPage);
+    setFollowingLoadingMore(false);
+    if (res.status && res.products.length > 0) {
+      setFollowingProducts(prev => {
+        const seen = new Set(prev.map(p => p.id));
+        return [...prev, ...res.products.filter(p => !seen.has(p.id))];
+      });
+      setFollowingPage(nextPage);
+      setFollowingTotal(res.total);
+    }
+  }, [currentUser?.id, followingPage, followingLoadingMore, fetchFollowingFeed]);
+
   React.useEffect(() => {
     if (!currentUser?.id && feedTab === 'following') {
       setFeedTab('all');
@@ -91,6 +115,23 @@ const MarketplaceContent: React.FC = () => {
       void loadFollowingFeed();
     }
   }, [currentUser?.id, feedTab, activeView, loadFollowingFeed]);
+
+  React.useEffect(() => {
+    if (activeView !== 'catalog') return;
+    void fetchSuggestedSellers(8).then(setSuggestedSellers);
+  }, [activeView, currentUser?.id, fetchSuggestedSellers]);
+
+  React.useEffect(() => {
+    const clean = searchQuery.trim();
+    if (clean.length < 2) {
+      setProfileResults([]);
+      return;
+    }
+    const timer = setTimeout(() => {
+      void searchProfiles(clean, 8).then(setProfileResults);
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [searchQuery, searchProfiles]);
 
   const selectedProduct = products.find(p => p.id === selectedProductId);
 
@@ -231,10 +272,29 @@ const MarketplaceContent: React.FC = () => {
                     </button>
                   </div>
                 ) : followingProducts.length > 0 ? (
-                  <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3.5 sm:gap-5">
-                    {followingProducts.map((product, idx) => (
-                      <ProductCard key={product.id} product={product} index={idx} />
-                    ))}
+                  <div className="space-y-4">
+                    <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3.5 sm:gap-5">
+                      {followingProducts.map((product, idx) => (
+                        <ProductCard key={product.id} product={product} index={idx} />
+                      ))}
+                    </div>
+                    {followingProducts.length < followingTotal && (
+                      <div className="flex justify-center pt-2">
+                        <button
+                          type="button"
+                          disabled={followingLoadingMore}
+                          onClick={() => void loadMoreFollowingFeed()}
+                          className="px-5 py-2.5 rounded-xl bg-white dark:bg-[#15161C] border-2 border-[#111111] dark:border-[#27272A] hover:border-[#FF6B00] text-xs font-black text-[#111111] dark:text-white flex items-center gap-2"
+                        >
+                          {followingLoadingMore && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                          <span>
+                            {followingLoadingMore
+                              ? 'Loading more...'
+                              : `Load More (${followingProducts.length} of ${followingTotal})`}
+                          </span>
+                        </button>
+                      </div>
+                    )}
                   </div>
                 ) : (
                   <div className="bg-white dark:bg-[#15161C] rounded-2xl border border-[#E4E4E7] dark:border-[#27272A] p-10 text-center max-w-md mx-auto space-y-3 shadow-xs">
@@ -353,6 +413,92 @@ const MarketplaceContent: React.FC = () => {
                   >
                     Clear All Filters
                   </button>
+                </div>
+              )}
+              {feedTab === 'all' && profileResults.length > 0 && (
+                <div className="pt-2 space-y-2.5">
+                  <h3 className="text-xs font-black uppercase tracking-wider text-[#71717A] dark:text-[#A1A1AA]">
+                    People &amp; Shops Matching &ldquo;{searchQuery.trim()}&rdquo;
+                  </h3>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                    {profileResults.map(prof => (
+                      <button
+                        key={prof.id}
+                        type="button"
+                        onClick={() => openProfile(prof.profileSlug || prof.id)}
+                        className="text-left p-3 rounded-2xl bg-white dark:bg-[#15161C] border border-[#E4E4E7] dark:border-[#27272A] hover:border-[#FF6B00] transition-colors flex items-center gap-3"
+                      >
+                        <div className="w-10 h-10 rounded-full bg-[#FFF4EC] dark:bg-[#1E2028] border border-[#FED7AA] dark:border-[#27272A] overflow-hidden shrink-0 flex items-center justify-center font-black text-xs text-[#FF6B00]">
+                          {prof.avatarUrl ? (
+                            <img src={prof.avatarUrl} alt={prof.displayName} className="w-full h-full object-cover" />
+                          ) : (
+                            prof.displayName[0]?.toUpperCase() || 'M'
+                          )}
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="text-xs font-black text-[#111111] dark:text-white truncate flex items-center gap-1">
+                            <span className="truncate">{prof.shopName || prof.displayName}</span>
+                            {prof.isVerifiedSeller && (
+                              <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                            )}
+                          </div>
+                          <div className="text-[11px] text-[#71717A] dark:text-[#A1A1AA] truncate">
+                            {prof.displayName}
+                            {prof.campus ? ` · ${prof.campus}` : ''}
+                            {` · ${prof.followersCount} followers`}
+                          </div>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {feedTab === 'all' && !searchQuery.trim() && suggestedSellers.length > 0 && (
+                <div className="pt-4 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-xs sm:text-sm font-black text-[#111111] dark:text-white">
+                      Suggested Makers &amp; Shops
+                    </h3>
+                    <span className="text-[11px] text-[#71717A] dark:text-[#A1A1AA]">
+                      Real campus makers to follow
+                    </span>
+                  </div>
+                  <div className="flex items-stretch gap-3 overflow-x-auto pb-2 scrollbar-none">
+                    {suggestedSellers.map(sel => (
+                      <button
+                        key={sel.id}
+                        type="button"
+                        onClick={() => openProfile(sel.profileSlug || sel.id)}
+                        className="min-w-[210px] max-w-[230px] shrink-0 text-left p-3.5 rounded-2xl bg-white dark:bg-[#15161C] border border-[#E4E4E7] dark:border-[#27272A] hover:border-[#FF6B00] transition-colors flex flex-col justify-between gap-2"
+                      >
+                        <div className="flex items-center gap-2.5">
+                          <div className="w-9 h-9 rounded-full bg-[#FFF4EC] dark:bg-[#1E2028] border border-[#FED7AA] dark:border-[#27272A] overflow-hidden shrink-0 flex items-center justify-center font-black text-xs text-[#FF6B00]">
+                            {sel.avatarUrl ? (
+                              <img src={sel.avatarUrl} alt={sel.shopName} className="w-full h-full object-cover" />
+                            ) : (
+                              sel.shopName[0]?.toUpperCase() || 'S'
+                            )}
+                          </div>
+                          <div className="min-w-0">
+                            <div className="text-xs font-black text-[#111111] dark:text-white truncate flex items-center gap-1">
+                              <span className="truncate">{sel.shopName}</span>
+                              {sel.isVerifiedSeller && (
+                                <ShieldCheck className="w-3 h-3 text-emerald-600 shrink-0" />
+                              )}
+                            </div>
+                            <div className="text-[10px] text-[#71717A] dark:text-[#A1A1AA] truncate">
+                              {sel.campus || sel.displayName}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="flex items-center justify-between text-[10px] font-bold text-[#52525B] dark:text-[#A1A1AA] pt-1 border-t border-[#F4F4F5] dark:border-[#27272A]">
+                          <span>{sel.productCount} item(s)</span>
+                          <span className="text-[#FF6B00]">Visit &rarr;</span>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
                 </div>
               )}
             </section>

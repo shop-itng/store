@@ -65,6 +65,8 @@ export interface PublicProfileData {
   memberSince: string;
   lastSeenAt?: string | null;
   followStatus?: 'none' | 'pending' | 'accepted';
+  isMutualFollow?: boolean;
+  isMuted?: boolean;
   whoCanFollow?: 'everyone' | 'approval';
   whoCanMessage?: 'everyone' | 'followers' | 'mutual';
   showFollowersList?: boolean;
@@ -524,6 +526,8 @@ export interface FollowListUser {
   role?: string;
   shopName?: string;
   followedAt?: string;
+  viewerFollowStatus?: 'none' | 'pending' | 'accepted';
+  isMutual?: boolean;
 }
 
 export interface BlockedAccountItem {
@@ -534,6 +538,43 @@ export interface BlockedAccountItem {
   avatarUrl?: string | null;
   reason?: string;
   createdAt: string;
+}
+
+export interface MutedAccountItem {
+  id: string;
+  mutedUserId: string;
+  displayName: string;
+  profileSlug: string;
+  avatarUrl?: string | null;
+  createdAt: string;
+}
+
+export interface SuggestedSellerItem {
+  id: string;
+  displayName: string;
+  profileSlug: string;
+  shopName: string;
+  avatarUrl?: string | null;
+  campus?: string;
+  bio?: string;
+  isVerifiedSeller: boolean;
+  productCount: number;
+  followersCount: number;
+  rating: number;
+  isSameCampus?: boolean;
+}
+
+export interface ProfileSearchResult {
+  id: string;
+  displayName: string;
+  profileSlug: string;
+  role: string;
+  shopName?: string;
+  avatarUrl?: string | null;
+  campus?: string;
+  isVerifiedSeller: boolean;
+  followersCount: number;
+  followStatus: 'none' | 'pending' | 'accepted';
 }
 
 export interface DbNotificationItem {

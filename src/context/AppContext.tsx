@@ -31,6 +31,9 @@ import {
   FollowRequestItem,
   FollowListUser,
   BlockedAccountItem,
+  MutedAccountItem,
+  SuggestedSellerItem,
+  ProfileSearchResult,
   DbNotificationItem,
 } from '../types';
 import { VALID_COUPONS, INITIAL_SAFE_SPOTS } from '../data/mockData';
@@ -135,11 +138,20 @@ interface AppContextType {
   unfollowUser: (targetUserId: string) => Promise<{ status: boolean; followersCount?: number; message?: string }>;
   fetchFollowRequests: () => Promise<FollowRequestItem[]>;
   respondToFollowRequest: (followerId: string, action: 'accept' | 'decline') => Promise<{ status: boolean; followersCount?: number }>;
-  fetchFollowList: (slug: string, mode: 'followers' | 'following') => Promise<{ status: boolean; users: FollowListUser[]; total: number; message?: string }>;
+  fetchFollowList: (
+    slug: string,
+    mode: 'followers' | 'following',
+    q?: string
+  ) => Promise<{ status: boolean; users: FollowListUser[]; total: number; message?: string }>;
   fetchFollowingFeed: (page?: number) => Promise<{ status: boolean; products: Product[]; total: number; followingCount: number; message?: string }>;
+  fetchSuggestedSellers: (limit?: number) => Promise<SuggestedSellerItem[]>;
+  searchProfiles: (q: string, limit?: number) => Promise<ProfileSearchResult[]>;
   blockUser: (targetUserId: string, reason?: string) => Promise<{ status: boolean; message?: string }>;
   unblockUser: (targetUserId: string) => Promise<{ status: boolean; message?: string }>;
   fetchBlockedUsers: () => Promise<BlockedAccountItem[]>;
+  muteUser: (targetUserId: string) => Promise<{ status: boolean; message?: string }>;
+  unmuteUser: (targetUserId: string) => Promise<{ status: boolean; message?: string }>;
+  fetchMutedUsers: () => Promise<MutedAccountItem[]>;
 
   // Sellers
   sellers: SellerProfile[];
@@ -2582,17 +2594,30 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           ? attachment.id
           : undefined;
 
-    try {
-      const res = await fetch(`/api/chat/conversations/${encodeURIComponent(conversationId)}/messages`, {
+    const postPayload = JSON.stringify({
+      content,
+      presetOffer,
+      ...(attachmentFileId ? { attachment: { fileId: attachmentFileId } } : {}),
+    });
+    const url = `/api/chat/conversations/${encodeURIComponent(conversationId)}/messages`;
+
+    const attemptSend = async (): Promise<Response> =>
+      fetch(url, {
         method: 'POST',
         headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
         credentials: 'include',
-        body: JSON.stringify({
-          content,
-          presetOffer,
-          ...(attachmentFileId ? { attachment: { fileId: attachmentFileId } } : {}),
-        }),
+        body: postPayload,
       });
+
+    try {
+      let res: Response;
+      try {
+        res = await attemptSend();
+      } catch {
+        // Retry once automatically on transient network drop (never on HTTP 4xx/5xx)
+        await new Promise(resolve => setTimeout(resolve, 500));
+        res = await attemptSend();
+      }
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.status || !data.message) {
         notify(data.message || 'Unable to send message.', 'error');
@@ -2746,9 +2771,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   );
 
   const fetchFollowList = useCallback(
-    async (slug: string, mode: 'followers' | 'following') => {
+    async (slug: string, mode: 'followers' | 'following', q?: string) => {
       try {
-        const res = await fetch(`/api/profiles/${encodeURIComponent(slug)}/${mode}`, {
+        const qs = q && q.trim() ? `?q=${encodeURIComponent(q.trim())}` : '';
+        const res = await fetch(`/api/profiles/${encodeURIComponent(slug)}/${mode}${qs}`, {
           headers: getAuthHeaders(),
           credentials: 'include',
         });
@@ -2848,6 +2874,97 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const res = await fetch('/api/blocks', { headers: getAuthHeaders(), credentials: 'include' });
       const data = await res.json().catch(() => ({}));
       return res.ok && data.status && Array.isArray(data.blocks) ? data.blocks : [];
+    } catch {
+      return [];
+    }
+  }, [currentUser?.id]);
+
+  const fetchSuggestedSellers = useCallback(async (limit = 8): Promise<SuggestedSellerItem[]> => {
+    try {
+      const res = await fetch(`/api/profiles/discover/suggested?limit=${limit}`, {
+        headers: getAuthHeaders(),
+        credentials: 'include',
+      });
+      const data = await res.json().catch(() => ({}));
+      return res.ok && data.status && Array.isArray(data.sellers) ? data.sellers : [];
+    } catch {
+      return [];
+    }
+  }, []);
+
+  const searchProfiles = useCallback(async (q: string, limit = 8): Promise<ProfileSearchResult[]> => {
+    const clean = q.trim();
+    if (clean.length < 2) return [];
+    try {
+      const res = await fetch(
+        `/api/profiles/search?q=${encodeURIComponent(clean)}&limit=${limit}`,
+        { headers: getAuthHeaders(), credentials: 'include' }
+      );
+      const data = await res.json().catch(() => ({}));
+      return res.ok && data.status && Array.isArray(data.profiles) ? data.profiles : [];
+    } catch {
+      return [];
+    }
+  }, []);
+
+  const muteUser = useCallback(
+    async (targetUserId: string) => {
+      if (!currentUser?.id) {
+        openAuthModal('login');
+        return { status: false, message: 'Sign in required.' };
+      }
+      try {
+        const res = await fetch('/api/mutes', {
+          method: 'POST',
+          headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+          credentials: 'include',
+          body: JSON.stringify({ targetUserId }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.status) {
+          notify(data.message || 'Could not mute notifications.', 'error');
+          return { status: false, message: data.message };
+        }
+        notify(data.message || 'Notifications muted for this account.', 'info');
+        return { status: true, message: data.message };
+      } catch {
+        notify('Network error muting account.', 'error');
+        return { status: false };
+      }
+    },
+    [currentUser?.id]
+  );
+
+  const unmuteUser = useCallback(
+    async (targetUserId: string) => {
+      if (!currentUser?.id) return { status: false };
+      try {
+        const res = await fetch(`/api/mutes/${encodeURIComponent(targetUserId)}`, {
+          method: 'DELETE',
+          headers: getAuthHeaders(),
+          credentials: 'include',
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.status) {
+          notify(data.message || 'Could not unmute user.', 'error');
+          return { status: false, message: data.message };
+        }
+        notify('Notifications unmuted.', 'success');
+        return { status: true };
+      } catch {
+        notify('Network error unmuting user.', 'error');
+        return { status: false };
+      }
+    },
+    [currentUser?.id]
+  );
+
+  const fetchMutedUsers = useCallback(async (): Promise<MutedAccountItem[]> => {
+    if (!currentUser?.id) return [];
+    try {
+      const res = await fetch('/api/mutes', { headers: getAuthHeaders(), credentials: 'include' });
+      const data = await res.json().catch(() => ({}));
+      return res.ok && data.status && Array.isArray(data.mutes) ? data.mutes : [];
     } catch {
       return [];
     }
@@ -4052,9 +4169,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         respondToFollowRequest,
         fetchFollowList,
         fetchFollowingFeed,
+        fetchSuggestedSellers,
+        searchProfiles,
         blockUser,
         unblockUser,
         fetchBlockedUsers,
+        muteUser,
+        unmuteUser,
+        fetchMutedUsers,
         sellers,
         getSellerById,
         currentSeller,

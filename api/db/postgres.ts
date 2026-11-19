@@ -81,6 +81,7 @@ export const CORE_SCHEMA_TABLES = [
   'shopit_follows',
   'shopit_blocks',
   'shopit_files',
+  'shopit_mutes',
 ] as const;
 
 export function getDatabaseUrlSource(): string | null {
@@ -911,6 +912,16 @@ export async function runMigration(): Promise<void> {
     );
     CREATE INDEX IF NOT EXISTS idx_shopit_files_owner ON shopit_files (owner_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_shopit_files_conv ON shopit_files (conversation_id);
+
+    -- 31. Mutes Table (Mute notifications/alerts from a user without blocking)
+    CREATE TABLE IF NOT EXISTS shopit_mutes (
+      id VARCHAR(64) PRIMARY KEY,
+      muter_id VARCHAR(64) NOT NULL REFERENCES shopit_users(id) ON DELETE CASCADE,
+      muted_id VARCHAR(64) NOT NULL REFERENCES shopit_users(id) ON DELETE CASCADE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (muter_id, muted_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_shopit_mutes_muter ON shopit_mutes (muter_id);
   `;
 
   // Comprehensive column healing: ensures every table has all required columns regardless of initial creation schema
