@@ -102,6 +102,7 @@ export interface PublicProfileData {
     isVerifiedSeller: boolean;
     verificationStatus: SellerProfile['verificationStatus'];
     vacationMode: boolean;
+    under18?: boolean;
   } | null;
 }
 

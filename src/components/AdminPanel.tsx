@@ -425,6 +425,14 @@ export const AdminPanel: React.FC = () => {
       databaseUrlConfigured: boolean;
       redisConfigured: boolean;
       configuredDbEnvVar?: string;
+      databaseHost?: string;
+      tableCount?: number;
+      databaseSizeBytes?: number;
+      databaseSizeMb?: number;
+      storageLimitMb?: number;
+      fileStorageBytes?: number;
+      fileStorageMb?: number;
+      fileCount?: number;
     };
   } | null>(null);
   const [loadingMetrics, setLoadingMetrics] = useState(false);
