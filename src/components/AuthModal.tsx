@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useApp } from '../context/AppContext';
 import { UserRole } from '../types';
 import { NIGERIAN_STATES } from '../data/nigerianLocations';
@@ -86,9 +86,15 @@ export const AuthModal: React.FC = () => {
   const [under18, setUnder18] = useState(false);
   const [guardianName, setGuardianName] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [modalError, setModalError] = useState<string | null>(null);
+  const signupLockRef = useRef(false);
   const [pendingForceChangeUser, setPendingForceChangeUser] = useState<any>(null);
   const [forceNewPassword, setForceNewPassword] = useState('');
   const [forceConfirmPassword, setForceConfirmPassword] = useState('');
+
+  useEffect(() => {
+    setModalError(null);
+  }, [authTab, isAuthModalOpen]);
 
   // Sync preferredSignupRole when AuthModal opens or switches into signup
   useEffect(() => {
@@ -223,17 +229,22 @@ export const AuthModal: React.FC = () => {
   // 2. Login Flow (Email & Password verified against PostgreSQL + New Device Challenge)
   const handleLoginFormSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setModalError(null);
     const cleanEmail = loginEmail.trim().toLowerCase();
     const cleanPass = loginPassword.trim();
     const currentDeviceId = getDeviceId();
 
     if (!cleanEmail || !cleanEmail.includes('@') || !cleanEmail.includes('.')) {
-      notify('Please enter a valid registered email address.', 'error');
+      const msg = 'Please enter a valid registered email address.';
+      setModalError(msg);
+      notify(msg, 'error');
       return;
     }
 
     if (!cleanPass) {
-      notify('Please enter your password.', 'error');
+      const msg = 'Please enter your password.';
+      setModalError(msg);
+      notify(msg, 'error');
       return;
     }
 
@@ -248,17 +259,21 @@ export const AuthModal: React.FC = () => {
         credentials: 'include',
         body: JSON.stringify({ email: cleanEmail, password: cleanPass }),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (res.ok && data.status && data.user) {
         matchedUser = { ...data.user, mustChangePassword: Boolean(data.mustChangePassword ?? data.user?.mustChangePassword) };
         sessionToken = data.sessionToken;
       } else {
-        notify(data.message || 'Invalid email or password.', 'error');
+        const msg = data.message || 'Invalid email or password.';
+        setModalError(msg);
+        notify(msg, 'error');
         return;
       }
 
       if (!matchedUser) {
-        notify('Invalid email or password.', 'error');
+        const msg = 'Invalid email or password.';
+        setModalError(msg);
+        notify(msg, 'error');
         return;
       }
 
@@ -391,48 +406,66 @@ export const AuthModal: React.FC = () => {
     notify(`[Security Alert] A new 6-digit code was sent to ${cleanEmail}. Valid for 10 minutes.`, 'info');
   };
 
-  // 3. Initial Signup Flow (Email only - no phone number required)
+  // 3. Initial Signup Flow (Email only - single atomic send-otp lock + strict OTP verification)
   const handleInitialSignup = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (signupLockRef.current || isSubmitting) return;
+    setModalError(null);
+
     const cleanEmail = email.trim().toLowerCase();
 
     if (!cleanEmail || !cleanEmail.includes('@') || !cleanEmail.includes('.')) {
-      notify('Please enter a valid email address.', 'error');
+      const msg = 'Please enter a valid email address.';
+      setModalError(msg);
+      notify(msg, 'error');
       return;
     }
 
     if (password.length < 8) {
-      notify('Password should be at least 8 characters.', 'error');
+      const msg = 'Password should be at least 8 characters.';
+      setModalError(msg);
+      notify(msg, 'error');
       return;
     }
 
     const parsedAge = parseInt(signupAge, 10);
     if (!signupAge || isNaN(parsedAge)) {
-      notify('Please enter your age.', 'error');
+      const msg = 'Please enter your age.';
+      setModalError(msg);
+      notify(msg, 'error');
       return;
     }
 
     if (parsedAge < 10) {
-      notify('You must be at least 10 years old to use Shop It.', 'error');
+      const msg = 'You must be at least 10 years old to use Shop It.';
+      setModalError(msg);
+      notify(msg, 'error');
       return;
     }
 
     if (parsedAge < 18) {
       if (!guardianConsentGiven) {
-        notify('Users aged 10 to 17 require parent or guardian consent to register.', 'error');
+        const msg = 'Users aged 10 to 17 require parent or guardian consent to register.';
+        setModalError(msg);
+        notify(msg, 'error');
         return;
       }
       if (!signupGuardianName.trim()) {
-        notify('Please enter your parent or guardian name.', 'error');
+        const msg = 'Please enter your parent or guardian name.';
+        setModalError(msg);
+        notify(msg, 'error');
         return;
       }
     }
 
     if (!agreedToTerms) {
-      notify('You must agree to the Terms of Service and Privacy Policy to create an account.', 'error');
+      const msg = 'You must agree to the Terms of Service and Privacy Policy to create an account.';
+      setModalError(msg);
+      notify(msg, 'error');
       return;
     }
 
+    signupLockRef.current = true;
     setIsSubmitting(true);
     try {
       const authData = {
@@ -448,67 +481,83 @@ export const AuthModal: React.FC = () => {
       };
 
       const otpResult = await generateEmailOtp(cleanEmail, 'signup', { name: name.trim() });
-      setPendingAuthData(authData);
 
-      // If email delivery fails or OTP dispatch errors, never block user creation: register immediately
-      if (!otpResult.success || otpResult.emailDelivered === false) {
-        if (role === 'seller') {
-          setAuthTab('seller_register');
-          notify('Email delivery is unavailable right now — complete your shop profile to finish signing up.', 'info');
-          return;
+      if (!otpResult.success) {
+        if (otpResult.waitSeconds && otpResult.waitSeconds > 0) {
+          setSignupCooldown(otpResult.waitSeconds);
+          const waitMsg = `Please wait ${otpResult.waitSeconds}s before requesting another verification code.`;
+          setModalError(waitMsg);
+          notify(waitMsg, 'info');
+        } else {
+          const errMsg = otpResult.error || 'Unable to send verification code. Please try again.';
+          setModalError(errMsg);
+          notify(errMsg, 'error');
         }
-
-        const resp = await fetch('/api/auth/register', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'include',
-          body: JSON.stringify({
-            email: cleanEmail,
-            password,
-            name: name.trim(),
-            role: 'buyer',
-            age: parsedAge,
-            hasGuardianConsent: parsedAge < 18 ? guardianConsentGiven : true,
-            guardianName: parsedAge < 18 ? signupGuardianName.trim() : undefined,
-          }),
-        });
-        const regData = await resp.json();
-        if (!resp.ok || !regData.status) {
-          notify(regData.message || 'Unable to create account.', 'error');
-          return;
-        }
-        login({ ...regData.user, sessionToken: regData.sessionToken });
-        closeAuthModal();
-        notify('Account created and saved in database!', 'success');
         return;
       }
 
+      if (otpResult.emailDelivered === false) {
+        const deliveryMsg = 'We could not deliver the verification email right now. Please try again in a few moments.';
+        setModalError(deliveryMsg);
+        notify(deliveryMsg, 'error');
+        return;
+      }
+
+      setPendingAuthData(authData);
       setSignupCooldown(60);
       setOtpCode('');
       setAuthTab('otp');
       notify(`[Email Verification] A 6-digit code was sent to ${cleanEmail}! Valid for 10 minutes.`, 'info');
     } finally {
+      signupLockRef.current = false;
       setIsSubmitting(false);
     }
   };
 
   const handleResendSignupCode = async () => {
-    if (!pendingAuthData?.email) return;
-    const otpResult = await generateEmailOtp(pendingAuthData.email, 'signup', { name: pendingAuthData.name });
-    if (!otpResult.success) {
-      notify(otpResult.error || 'Please wait before requesting a new code.', 'error');
-      return;
+    if (!pendingAuthData?.email || signupLockRef.current || signupCooldown > 0) return;
+    setModalError(null);
+    signupLockRef.current = true;
+    try {
+      const otpResult = await generateEmailOtp(pendingAuthData.email, 'signup', { name: pendingAuthData.name });
+      if (!otpResult.success) {
+        if (otpResult.waitSeconds && otpResult.waitSeconds > 0) {
+          setSignupCooldown(otpResult.waitSeconds);
+        }
+        const msg = otpResult.error || 'Please wait before requesting a new code.';
+        setModalError(msg);
+        notify(msg, 'error');
+        return;
+      }
+      if (otpResult.emailDelivered === false) {
+        const msg = 'Email delivery is unavailable right now. Please try again shortly.';
+        setModalError(msg);
+        notify(msg, 'error');
+        return;
+      }
+      setSignupCooldown(60);
+      notify(`[Email Verification] A new 6-digit code was sent to ${pendingAuthData.email}! Valid for 10 minutes.`, 'info');
+    } finally {
+      signupLockRef.current = false;
     }
-    setSignupCooldown(60);
-    notify(`[Email Verification] A new 6-digit code was sent to ${pendingAuthData.email}! Valid for 10 minutes.`, 'info');
   };
 
   const handleOtpSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isSubmitting) return;
+    setModalError(null);
+    if (!otpCode || otpCode.trim().length !== 6) {
+      const msg = 'Please enter the 6-digit code sent to your email.';
+      setModalError(msg);
+      notify(msg, 'error');
+      return;
+    }
     setIsSubmitting(true);
     try {
-      await verifyOtp(otpCode);
+      const res = await verifyOtp(otpCode);
+      if (!res.success && res.error) {
+        setModalError(res.error);
+      }
     } finally {
       setIsSubmitting(false);
     }
@@ -536,14 +585,17 @@ export const AuthModal: React.FC = () => {
   const handleSellerFormSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isSubmitting) return;
+    setModalError(null);
     if (under18 && !guardianName.trim()) {
-      notify('Youth sellers under 18 require a verified guardian name for payouts.', 'error');
+      const msg = 'Youth sellers under 18 require a verified guardian name for payouts.';
+      setModalError(msg);
+      notify(msg, 'error');
       return;
     }
 
     setIsSubmitting(true);
     try {
-      await submitSellerRegistration({
+      const res = await submitSellerRegistration({
         shopName,
         location: {
           state: stateName,
@@ -555,6 +607,9 @@ export const AuthModal: React.FC = () => {
         under18,
         guardianName: under18 ? guardianName.trim() : undefined,
       });
+      if (!res.success && res.error) {
+        setModalError(res.error);
+      }
     } finally {
       setIsSubmitting(false);
     }
@@ -603,6 +658,16 @@ export const AuthModal: React.FC = () => {
                 <span className="absolute bottom-[-13px] left-0 w-full h-0.5 bg-[#FF6B00]" />
               )}
             </button>
+          </div>
+        )}
+
+        {modalError && (
+          <div
+            role="alert"
+            className="flex items-start gap-2 rounded-xl border border-red-300 bg-red-50 px-3.5 py-2.5 text-xs font-semibold text-red-800"
+          >
+            <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+            <span>{modalError}</span>
           </div>
         )}
 
@@ -942,7 +1007,10 @@ export const AuthModal: React.FC = () => {
                 type="email"
                 required
                 value={email}
-                onChange={e => setEmail(e.target.value)}
+                onChange={e => {
+                  setEmail(e.target.value);
+                  if (signupCooldown > 0) setSignupCooldown(0);
+                }}
                 placeholder="name@gmail.com"
                 className="w-full h-11 px-3.5 rounded-xl border border-slate-200 text-xs sm:text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#FF6B00]"
               />
@@ -1058,14 +1126,29 @@ export const AuthModal: React.FC = () => {
 
             <button
               type="submit"
-              disabled={isSubmitting}
+              disabled={isSubmitting || signupCooldown > 0}
               className="w-full h-12 bg-[#FF6B00] hover:bg-[#FF7A1A] text-[#111111] border-2 border-[#111111] font-black rounded-xl text-xs sm:text-sm transition-all flex items-center justify-center gap-2 shadow-[0_3px_0_#111111] active:translate-y-0.5 disabled:opacity-60"
             >
               <span className="w-5 h-5 rounded-full bg-[#9FE870] text-[#111111] flex items-center justify-center font-black">
                 →
               </span>
-              <span>{isSubmitting ? 'Sending Email Code...' : 'Continue with Email OTP'}</span>
+              <span>
+                {isSubmitting
+                  ? 'Sending Email Code...'
+                  : signupCooldown > 0
+                    ? `Please wait ${signupCooldown}s before resending`
+                    : 'Continue with Email OTP'}
+              </span>
             </button>
+            {signupCooldown > 0 && pendingAuthData?.email === email.trim().toLowerCase() && (
+              <button
+                type="button"
+                onClick={() => setAuthTab('otp')}
+                className="w-full text-center text-xs font-bold text-[#FF6B00] hover:underline"
+              >
+                Already have your 6-digit code? Enter verification code →
+              </button>
+            )}
           </form>
         )}
 

@@ -84,7 +84,7 @@ interface AppContextType {
   setPreferredSignupRole: (role: UserRole) => void;
   pendingAuthData: any;
   setPendingAuthData: (data: any) => void;
-  verifyOtp: (code: string) => Promise<boolean>;
+  verifyOtp: (code: string) => Promise<{ success: boolean; error?: string }>;
   submitSellerRegistration: (sellerData: {
     shopName: string;
     campus?: Campus;
@@ -93,7 +93,7 @@ interface AppContextType {
     bio: string;
     under18: boolean;
     guardianName?: string;
-  }) => Promise<void>;
+  }) => Promise<{ success: boolean; error?: string }>;
   refreshCurrentUser: () => Promise<void>;
 
   // Catalog & Products
@@ -236,7 +236,7 @@ interface AppContextType {
   setActiveConversationId: (id: string | null) => void;
   refreshConversations: () => Promise<void>;
   markConversationRead: (conversationId: string) => Promise<void>;
-  loadConversationMessages: (conversationId: string) => Promise<void>;
+  loadConversationMessages: (conversationId: string, options?: { incremental?: boolean }) => Promise<boolean>;
   openChat: (conversationId?: string, targetInfo?: { orderId?: string; productId?: string; sellerId?: string }) => Promise<void>;
   sendMessage: (
     conversationId: string,
@@ -932,15 +932,56 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     void refreshNotifications();
   }, [currentUser?.id, currentUser?.role, refreshFinancials, refreshConversations, refreshNotifications]);
 
-  // Adaptive background sync for notifications & conversations (paused when tab hidden)
+  const chatPollCursorRef = useRef<Record<string, { createdAt: string; id: string }>>({});
+  const lastUnreadCountRef = useRef<number | null>(null);
+
+  // Gentle background sync: lightweight /api/chat/unread-count when outside chat + notifications, paused when tab hidden
   useEffect(() => {
-    if (!currentUser?.id) return;
-    const interval = setInterval(() => {
+    if (!currentUser?.id) {
+      lastUnreadCountRef.current = null;
+      chatPollCursorRef.current = {};
+      return;
+    }
+
+    const runSyncTick = async () => {
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
-      void refreshConversations();
+      try {
+        const unreadRes = await fetch('/api/chat/unread-count', {
+          headers: getAuthHeaders(),
+          credentials: 'include',
+        });
+        if (unreadRes.ok) {
+          const unreadData = await unreadRes.json().catch(() => ({}));
+          if (typeof unreadData.unreadCount === 'number') {
+            if (lastUnreadCountRef.current !== null && unreadData.unreadCount !== lastUnreadCountRef.current) {
+              void refreshConversations();
+            }
+            lastUnreadCountRef.current = unreadData.unreadCount;
+          }
+        }
+      } catch {}
       void refreshNotifications();
-    }, 15000);
-    return () => clearInterval(interval);
+    };
+
+    const interval = setInterval(() => {
+      void runSyncTick();
+    }, 20000);
+
+    const handleVisibility = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        void runSyncTick();
+      }
+    };
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleVisibility);
+    }
+
+    return () => {
+      clearInterval(interval);
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', handleVisibility);
+      }
+    };
   }, [currentUser?.id, refreshConversations, refreshNotifications]);
 
   // Sync cart and wishlist to PostgreSQL only on explicit user changes (not initial hydration)
@@ -1167,10 +1208,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setPendingAuthData(null);
   };
 
-  const verifyOtp = async (code: string): Promise<boolean> => {
+  const verifyOtp = async (code: string): Promise<{ success: boolean; error?: string }> => {
     if (!pendingAuthData?.email) {
-      notify('No pending verification found. Please sign up again.', 'error');
-      return false;
+      const msg = 'No pending verification found. Please fill out the signup form again.';
+      notify(msg, 'error');
+      return { success: false, error: msg };
     }
 
     try {
@@ -1184,19 +1226,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           code: code.trim(),
         }),
       });
-      const verification = await verifyResp.json();
-      if (!verifyResp.ok || !verification.status) {
-        notify(verification.message || verification.error || 'Invalid or expired verification code.', 'error');
-        return false;
+      const verification = await verifyResp.json().catch(() => ({}));
+      if (!verifyResp.ok || !verification.status || !verification.signupVerificationToken) {
+        const errMsg = verification.message || verification.error || 'Invalid or expired verification code.';
+        notify(errMsg, 'error');
+        return { success: false, error: errMsg };
       }
 
-      const signupVerificationToken = verification.signupVerificationToken;
+      const signupVerificationToken = String(verification.signupVerificationToken);
 
       if (pendingAuthData.role === 'seller') {
         setPendingAuthData((prev: any) => ({ ...prev, signupVerificationToken }));
         setAuthTab('seller_register');
-        notify('Email verified! Complete your shop profile.', 'success');
-        return true;
+        notify('Email verified! Complete your shop profile to finish creating your account.', 'success');
+        return { success: true };
       } else {
         const resp = await fetch('/api/auth/register', {
           method: 'POST',
@@ -1213,22 +1256,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             signupVerificationToken,
           }),
         });
-        const regData = await resp.json();
+        const regData = await resp.json().catch(() => ({}));
         if (!resp.ok || !regData.status) {
-          notify(regData.message || 'Database error saving user account.', 'error');
-          return false;
+          const regErr = regData.message || 'Could not complete account registration. Please request a fresh code and try again.';
+          notify(regErr, 'error');
+          return { success: false, error: regErr };
         }
 
         const savedUser = regData.user;
         login({ ...savedUser, sessionToken: regData.sessionToken });
         closeAuthModal();
         notify('Account created and registered successfully in database!', 'success');
-        return true;
+        return { success: true };
       }
     } catch (err: any) {
-      console.error('[Registration Error]:', err.message);
-      notify('Unable to connect to database server. Please try again.', 'error');
-      return false;
+      const netMsg = 'Unable to connect to the registration server. Please check your network and try again.';
+      notify(netMsg, 'error');
+      return { success: false, error: netMsg };
     }
   };
 
@@ -1256,7 +1300,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     bio: string;
     under18: boolean;
     guardianName?: string;
-  }) => {
+  }): Promise<{ success: boolean; error?: string }> => {
     const resolvedArea = sellerData.locationArea || sellerData.location?.area || 'Lagos Mainland';
 
     // Authenticated buyer upgrading to seller shop
@@ -1277,10 +1321,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               guardianName: sellerData.guardianName,
             }),
           });
-          const data = await resp.json();
+          const data = await resp.json().catch(() => ({}));
           if (!resp.ok || !data.status) {
-            notify(data.message || 'Unable to create seller shop.', 'error');
-            return;
+            const msg = data.message || 'Unable to create seller shop.';
+            notify(msg, 'error');
+            return { success: false, error: msg };
           }
           const upgradedUser = data.user;
           if (upgradedUser?.sellerProfile) {
@@ -1291,18 +1336,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           setActiveView('seller_dashboard');
           fetchMarketplaceData();
           notify(`Shop "${sellerData.shopName}" created and saved in database!`, 'success');
-          return;
-        } catch (err: any) {
-          console.error('[Seller Upgrade Error]:', err.message);
-          notify('Unable to reach database server. Please try again.', 'error');
-          return;
+          return { success: true };
+        } catch {
+          const msg = 'Unable to reach database server. Please try again.';
+          notify(msg, 'error');
+          return { success: false, error: msg };
         }
       }
 
       setPreferredSignupRole('seller');
       setAuthTab('signup');
-      notify('Please fill out your account details before launching your shop.', 'error');
-      return;
+      const msg = 'Please fill out your account details and verify your email first.';
+      notify(msg, 'error');
+      return { success: false, error: msg };
+    }
+
+    if (!pendingAuthData.signupVerificationToken) {
+      setAuthTab('otp');
+      const msg = 'Please verify your 6-digit email OTP code first before launching your shop.';
+      notify(msg, 'error');
+      return { success: false, error: msg };
     }
 
     try {
@@ -1327,10 +1380,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }),
       });
 
-      const regData = await resp.json();
+      const regData = await resp.json().catch(() => ({}));
       if (!resp.ok || !regData.status) {
-        notify(regData.message || 'Database error saving seller shop.', 'error');
-        return;
+        const msg = regData.message || 'Database error saving seller shop.';
+        notify(msg, 'error');
+        return { success: false, error: msg };
       }
 
       if (regData.sessionToken && typeof localStorage !== 'undefined') {
@@ -1384,9 +1438,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setActiveView('seller_dashboard');
       fetchMarketplaceData();
       notify(`Shop "${sellerData.shopName}" registered in ${resolvedArea} and saved to database!`, 'success');
-    } catch (err: any) {
-      console.error('[Seller Registration Error]:', err.message);
-      notify('Unable to reach database server. Please try again.', 'error');
+      return { success: true };
+    } catch {
+      const msg = 'Unable to reach database server. Please try again.';
+      notify(msg, 'error');
+      return { success: false, error: msg };
     }
   };
 
@@ -2434,37 +2490,124 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   );
 
   const loadConversationMessages = useCallback(
-    async (conversationId: string) => {
-      if (!currentUser?.id || !conversationId) return;
+    async (conversationId: string, options?: { incremental?: boolean }): Promise<boolean> => {
+      if (!currentUser?.id || !conversationId) return false;
       try {
-        const res = await fetch(`/api/chat/conversations/${encodeURIComponent(conversationId)}/messages`, {
-          headers: getAuthHeaders(),
-          credentials: 'include',
-        });
+        const cursor = options?.incremental ? chatPollCursorRef.current[conversationId] : undefined;
+        const qs = cursor
+          ? `?afterCreatedAt=${encodeURIComponent(cursor.createdAt)}&afterId=${encodeURIComponent(cursor.id)}`
+          : '';
+        const res = await fetch(
+          `/api/chat/conversations/${encodeURIComponent(conversationId)}/messages${qs}`,
+          {
+            headers: getAuthHeaders(),
+            credentials: 'include',
+          }
+        );
         const data = await res.json().catch(() => ({}));
-        if (res.ok && data.status && Array.isArray(data.messages)) {
-          const formatted: ChatMessage[] = data.messages.map((m: any) => ({
-            ...m,
-            timestamp: m.createdAt
-              ? new Date(m.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-              : m.timestamp || 'Just now',
-          }));
-          setMessages(prev => ({ ...prev, [conversationId]: formatted }));
-          void markConversationRead(conversationId);
+        if (!res.ok || !data.status || !Array.isArray(data.messages)) return false;
+
+        if (cursor && data.messages.length === 0) {
+          return false;
         }
-      } catch {}
+
+        const formatted: ChatMessage[] = data.messages.map((m: any) => ({
+          ...m,
+          timestamp: m.createdAt
+            ? new Date(m.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+            : m.timestamp || 'Just now',
+        }));
+
+        if (formatted.length > 0) {
+          const newest = formatted[formatted.length - 1];
+          if (newest.createdAt && newest.id) {
+            chatPollCursorRef.current[conversationId] = {
+              createdAt: newest.createdAt,
+              id: newest.id,
+            };
+          }
+        }
+
+        if (cursor) {
+          setMessages(prev => {
+            const existing = prev[conversationId] || [];
+            const existingIds = new Set(existing.map(m => m.id));
+            const additions = formatted.filter(m => !existingIds.has(m.id));
+            if (additions.length === 0) return prev;
+            return { ...prev, [conversationId]: [...existing, ...additions] };
+          });
+        } else {
+          setMessages(prev => ({ ...prev, [conversationId]: formatted }));
+        }
+
+        void markConversationRead(conversationId);
+        return formatted.length > 0;
+      } catch {
+        return false;
+      }
     },
     [currentUser?.id, markConversationRead]
   );
 
-  // Adaptive 4s polling for the open chat conversation
+  // Gentle adaptive polling when inside an active chat conversation:
+  // 3.5s -> 7s -> 12s -> 18s backoff on idle, instant reset on new activity/focus, paused when tab hidden.
   useEffect(() => {
     if (!currentUser?.id || activeView !== 'chat' || !activeConversationId) return;
-    const interval = setInterval(() => {
+    let cancelled = false;
+    let timerId: ReturnType<typeof setTimeout> | null = null;
+    const BACKOFF_MS = [3500, 7000, 12000, 18000];
+    let stepIndex = 0;
+
+    const scheduleNext = () => {
+      if (cancelled) return;
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
-      void loadConversationMessages(activeConversationId);
-    }, 4000);
-    return () => clearInterval(interval);
+      const delay = BACKOFF_MS[Math.min(stepIndex, BACKOFF_MS.length - 1)];
+      timerId = setTimeout(async () => {
+        if (cancelled) return;
+        const hasNew = await loadConversationMessages(activeConversationId, { incremental: true });
+        stepIndex = hasNew ? 0 : Math.min(stepIndex + 1, BACKOFF_MS.length - 1);
+        scheduleNext();
+      }, delay);
+    };
+
+    const resetAndPollNow = () => {
+      if (cancelled) return;
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        if (timerId) {
+          clearTimeout(timerId);
+          timerId = null;
+        }
+        return;
+      }
+      stepIndex = 0;
+      if (timerId) {
+        clearTimeout(timerId);
+        timerId = null;
+      }
+      void loadConversationMessages(activeConversationId, { incremental: true }).then(() => {
+        scheduleNext();
+      });
+    };
+
+    scheduleNext();
+
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', resetAndPollNow);
+    }
+    if (typeof window !== 'undefined') {
+      window.addEventListener('focus', resetAndPollNow);
+    }
+
+    return () => {
+      cancelled = true;
+      if (timerId) clearTimeout(timerId);
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', resetAndPollNow);
+      }
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('focus', resetAndPollNow);
+      }
+    };
   }, [currentUser?.id, activeView, activeConversationId, loadConversationMessages]);
 
   const openChat = useCallback(
@@ -2630,6 +2773,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           ? new Date(data.message.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
           : 'Just now',
       };
+
+      if (savedMsg.createdAt && savedMsg.id) {
+        chatPollCursorRef.current[conversationId] = {
+          createdAt: savedMsg.createdAt,
+          id: savedMsg.id,
+        };
+      }
 
       setMessages(prev => {
         const list = prev[conversationId] || [];

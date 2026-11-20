@@ -3,6 +3,7 @@ import http from 'http';
 import assert from 'assert';
 import { app } from '../api/index.js';
 import { query, runMigration } from '../api/db/postgres.js';
+import { issueSignupVerificationToken } from '../api/db/otpStore.js';
 
 let passed = 0;
 let failed = 0;
@@ -77,17 +78,19 @@ async function main() {
     // -----------------------------------------------------------------------
     await test('1. Signups (seller, buyer, minor, outsider), profiles/me & canonical settings + minor safety', async () => {
       // 1a. Adult Seller
+      const sEmail = `social_seller_${ts}@shopit.ng`;
       const sRes = await fetch(`${baseUrl}/api/auth/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          email: `social_seller_${ts}@shopit.ng`,
+          email: sEmail,
           password: 'SocialPass123!',
           name: 'Adaeze Okafor',
           role: 'seller',
           age: 22,
           shopName: 'Ada Crafts Studio',
           campus: 'UNILAG (Akoka)',
+          signupVerificationToken: await issueSignupVerificationToken(sEmail),
         }),
       });
       assert.strictEqual(sRes.status, 201);
@@ -98,15 +101,17 @@ async function main() {
       assert.ok(sellerToken);
 
       // 1b. Adult Buyer
+      const bEmail = `social_buyer_${ts}@shopit.ng`;
       const bRes = await fetch(`${baseUrl}/api/auth/signup`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          email: `social_buyer_${ts}@shopit.ng`,
+          email: bEmail,
           password: 'SocialPass123!',
           name: 'Chidi Nwosu',
           role: 'buyer',
           age: 21,
+          signupVerificationToken: await issueSignupVerificationToken(bEmail),
         }),
       });
       assert.strictEqual(bRes.status, 201);
@@ -115,17 +120,19 @@ async function main() {
       buyerUserId = bJson.user.id;
 
       // 1c. Minor Buyer (age 16)
+      const mEmail = `social_minor_${ts}@shopit.ng`;
       const mRes = await fetch(`${baseUrl}/api/auth/signup`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          email: `social_minor_${ts}@shopit.ng`,
+          email: mEmail,
           password: 'SocialPass123!',
           name: 'Tunde Adeyemi',
           role: 'buyer',
           age: 16,
           hasGuardianConsent: true,
           guardianName: 'Mrs Adeyemi',
+          signupVerificationToken: await issueSignupVerificationToken(mEmail),
         }),
       });
       assert.strictEqual(mRes.status, 201);
@@ -134,17 +141,19 @@ async function main() {
       minorUserId = mJson.user.id;
 
       // 1c-2. Second Minor Buyer (age 15)
+      const m2Email = `social_minor_peer_${ts}@shopit.ng`;
       const m2Res = await fetch(`${baseUrl}/api/auth/signup`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          email: `social_minor_peer_${ts}@shopit.ng`,
+          email: m2Email,
           password: 'SocialPass123!',
           name: 'Sade Olaniyi',
           role: 'buyer',
           age: 15,
           hasGuardianConsent: true,
           guardianName: 'Mr Olaniyi',
+          signupVerificationToken: await issueSignupVerificationToken(m2Email),
         }),
       });
       assert.strictEqual(m2Res.status, 201);
@@ -153,15 +162,17 @@ async function main() {
       minor2UserId = m2Json.user.id;
 
       // 1d. Outsider user
+      const oEmail = `social_outsider_${ts}@shopit.ng`;
       const oRes = await fetch(`${baseUrl}/api/auth/signup`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          email: `social_outsider_${ts}@shopit.ng`,
+          email: oEmail,
           password: 'SocialPass123!',
           name: 'Bisi Balogun',
           role: 'buyer',
           age: 23,
+          signupVerificationToken: await issueSignupVerificationToken(oEmail),
         }),
       });
       assert.strictEqual(oRes.status, 201);
@@ -828,6 +839,7 @@ async function main() {
           name: 'Moderator Kemi',
           role: 'buyer',
           age: 26,
+          signupVerificationToken: await issueSignupVerificationToken(modEmail),
         }),
       });
       await query("UPDATE shopit_users SET role = 'admin', sub_role = 'moderator' WHERE LOWER(email) = LOWER($1)", [modEmail]);

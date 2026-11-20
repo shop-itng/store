@@ -12,7 +12,7 @@ import {
   deleteOtpRecord,
   verifyAndConsumeOtp,
   issueSignupVerificationToken,
-  consumeSignupVerificationToken,
+  consumeSignupVerificationTokenInTx,
   hashOtp,
   savePaymentRecord,
   saveReportRecord,
@@ -29,6 +29,7 @@ import {
   pingRedis,
   runMigration,
   getDatabaseUrl,
+  getDatabaseHealthStats,
   getAllPlatformConfig,
   getPlatformSetting,
   setPlatformSetting,
@@ -92,6 +93,12 @@ import {
 import marketplaceRouter, { processEscrowAutoRelease } from './routes/marketplace.js';
 import profilesRouter from './routes/profiles.js';
 import filesRouter from './routes/files.js';
+import {
+  fileStorage,
+  NEON_FREE_PLAN_LIMIT_MB,
+  DB_STORAGE_ALERT_RATIO,
+} from './lib/fileStorage.js';
+import { MINIMUM_PLATFORM_AGE, isMinorAccount } from './config/minorSafety.js';
 
 // Fail-closed startup guard: refuse to boot unless APP_SECRET is valid (64+ hex chars)
 validateAppSecret();
@@ -109,18 +116,21 @@ app.use(cookieParser());
 const IS_PROD = process.env.NODE_ENV === 'production' || Boolean(process.env.VERCEL);
 
 const PRODUCTION_APP_URL = 'https://shopitng.vercel.app';
+const REDIRECT_APP_URL = 'https://shop-itng-pied.vercel.app';
 
 const APP_URL = (
   process.env.APP_URL ||
-  (process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}` : '') ||
-  (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : '') ||
   PRODUCTION_APP_URL
 ).replace(/\/$/, '');
+
+function normalizeOriginUrl(raw: string): string {
+  return raw.trim().replace(/\/+$/, '');
+}
 
 function getAllowedOrigins(req?: express.Request): string[] {
   const extra = (process.env.ALLOWED_ORIGINS || '')
     .split(',')
-    .map(s => s.trim().replace(/\/$/, ''))
+    .map(normalizeOriginUrl)
     .filter(Boolean);
 
   const ngAllowedHosts = (process.env.NG_ALLOWED_HOSTS || '')
@@ -128,34 +138,41 @@ function getAllowedOrigins(req?: express.Request): string[] {
     .map(s => s.trim().toLowerCase())
     .filter(Boolean);
 
-  const hostHeader = req ? String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim().toLowerCase() : '';
-  const protoHeader = req ? String(req.headers['x-forwarded-proto'] || req.protocol || 'https').split(',')[0].trim().toLowerCase() : 'https';
   const sameHostOrigins: string[] = [];
-  if (hostHeader) {
-    const cleanHost = hostHeader.replace(/:\d+$/, '');
-    const isTrustedDeploymentHost =
-      cleanHost.endsWith('.run.app') ||
-      cleanHost.endsWith('.vercel.app') ||
-      cleanHost === 'shopitng.vercel.app' ||
-      cleanHost === 'localhost' ||
-      cleanHost === '127.0.0.1' ||
-      ngAllowedHosts.includes(cleanHost);
-    if (isTrustedDeploymentHost) {
-      sameHostOrigins.push(`${protoHeader === 'http' ? 'http' : 'https'}://${hostHeader}`);
+  if (req && (!IS_PROD || ngAllowedHosts.length > 0)) {
+    const hostHeader = String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim().toLowerCase();
+    const protoHeader = String(req.headers['x-forwarded-proto'] || req.protocol || 'https').split(',')[0].trim().toLowerCase();
+    if (hostHeader) {
+      const cleanHost = hostHeader.replace(/:\d+$/, '');
+      const isAllowedDynamicHost =
+        (!IS_PROD && (cleanHost === 'localhost' || cleanHost === '127.0.0.1')) ||
+        ngAllowedHosts.includes(cleanHost);
+      if (isAllowedDynamicHost) {
+        sameHostOrigins.push(`${protoHeader === 'http' ? 'http' : 'https'}://${hostHeader}`);
+      }
     }
   }
 
   const defaults = [
-    APP_URL,
     PRODUCTION_APP_URL,
+    REDIRECT_APP_URL,
+    APP_URL,
     ...sameHostOrigins,
-    ...(process.env.VERCEL_PROJECT_PRODUCTION_URL
-      ? [`https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`.replace(/\/$/, '')]
-      : []),
-    ...(process.env.VERCEL_URL ? [`https://${process.env.VERCEL_URL}`.replace(/\/$/, '')] : []),
     ...(IS_PROD ? [] : ['http://localhost:3000', 'http://127.0.0.1:3000']),
-  ];
-  return Array.from(new Set([...defaults, ...extra]));
+  ].map(normalizeOriginUrl);
+
+  return Array.from(new Set([...defaults, ...extra].filter(Boolean)));
+}
+
+async function checkStorageThresholdAlert(databaseSizeMb: number): Promise<void> {
+  const thresholdMb = NEON_FREE_PLAN_LIMIT_MB * DB_STORAGE_ALERT_RATIO;
+  if (!Number.isFinite(databaseSizeMb) || databaseSizeMb < thresholdMb) return;
+  const dayKey = new Date().toISOString().slice(0, 10);
+  await dispatchAdminAlert(
+    `db_storage_70pct_${dayKey}`,
+    `Database Storage Alert (${databaseSizeMb} MB / ${NEON_FREE_PLAN_LIMIT_MB} MB)`,
+    `PostgreSQL database size reached <strong>${databaseSizeMb} MB</strong>, exceeding the 70% threshold (${thresholdMb.toFixed(1)} MB of ${NEON_FREE_PLAN_LIMIT_MB} MB Neon Free plan). Review stored files or upgrade storage before hitting 1 GB.`
+  ).catch(() => {});
 }
 
 function escapeHtml(raw: unknown): string {
@@ -191,13 +208,17 @@ app.use(
   })
 );
 
-// Strict CORS + CSRF Origin enforcement
+// Strict CORS + CSRF Origin enforcement (never blocks Flutterwave server-to-server webhook POSTs)
 app.use((req, res, next) => {
-  const originHeader = req.headers.origin ? String(req.headers.origin).replace(/\/$/, '') : '';
+  const originHeader = req.headers.origin ? normalizeOriginUrl(String(req.headers.origin)) : '';
   const allowedOrigins = getAllowedOrigins(req);
   const isWebhookPath =
     req.path === '/webhooks/flutterwave' ||
     req.path === '/api/webhooks/flutterwave';
+
+  if (isWebhookPath) {
+    return next();
+  }
 
   const isOriginAllowed = !originHeader || allowedOrigins.includes(originHeader);
 
@@ -219,19 +240,19 @@ app.use((req, res, next) => {
     return res.status(204).end();
   }
 
-  if (!isWebhookPath && originHeader && !isOriginAllowed && !['GET', 'HEAD'].includes(req.method)) {
+  if (originHeader && !isOriginAllowed && !['GET', 'HEAD'].includes(req.method)) {
     return res.status(403).json({ status: false, error: 'CORS_ORIGIN_FORBIDDEN', message: 'Origin not allowed.' });
   }
 
-  // Cookie-based state changes must originate from allowed origins (exempt webhooks & explicit Bearer token callers)
-  if (!isWebhookPath && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
+  // Cookie-based state changes must originate from allowed origins (exempt explicit Bearer/session-token callers)
+  if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
     const hasCookieSession = Boolean(req.cookies?.[SESSION_COOKIE_NAME]);
     const hasExplicitTokenHeader = Boolean(req.headers.authorization || req.headers['x-session-token']);
     if (hasCookieSession && !hasExplicitTokenHeader) {
       let refererOrigin = '';
       if (!originHeader && req.headers.referer) {
         try {
-          refererOrigin = new URL(String(req.headers.referer)).origin.replace(/\/$/, '');
+          refererOrigin = normalizeOriginUrl(new URL(String(req.headers.referer)).origin);
         } catch {}
       }
       const effectiveOrigin = originHeader || refererOrigin;
@@ -295,18 +316,34 @@ router.get('/version', (_req, res) => {
   });
 });
 
-// Health check (verifies PostgreSQL connection + core schema tables + optional Redis)
+// Health check (verifies PostgreSQL connection + core schema tables + Flutterwave readiness + optional Redis)
 router.get(['/health', '/api/health'], async (_req, res) => {
-  const pgPing = await pingPostgres();
-  const redisPing = await pingRedis();
+  const [pgPing, redisPing, dbStats] = await Promise.all([
+    pingPostgres(),
+    pingRedis(),
+    getDatabaseHealthStats(),
+  ]);
   const isPgOk = pgPing.ok;
   const hasRedisConfig = Boolean(process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL);
   const isRedisOk = !hasRedisConfig || redisPing.ok;
+  const flutterwaveConfigured = Boolean(getFlwSecretKey() && getFlwPublicKey() && getFlwWebhookHash());
+  const paymentsEnabledFlag = String(process.env.PAYMENTS_ENABLED || '').toLowerCase() === 'true';
+  const payoutsEnabledFlag = String(process.env.PAYOUTS_ENABLED || '').toLowerCase() === 'true';
 
   if (isPgOk && isRedisOk) {
     return res.status(200).json({
       status: 'OK',
       database: pgPing.provider,
+      databaseConnected: true,
+      databaseHost: dbStats.databaseHost,
+      tableCount: dbStats.tableCount,
+      databaseSizeMb: dbStats.databaseSizeMb,
+      fileStorageBytes: dbStats.fileStorageBytes,
+      fileStorageMb: dbStats.fileStorageMb,
+      fileCount: dbStats.fileCount,
+      flutterwaveConfigured,
+      paymentsEnabled: paymentsEnabledFlag,
+      payoutsEnabled: payoutsEnabledFlag,
       schemaOk: Boolean(pgPing.schemaOk),
       timestamp: new Date().toISOString(),
     });
@@ -321,6 +358,13 @@ router.get(['/health', '/api/health'], async (_req, res) => {
   return res.status(503).json({
     status: 'ERROR',
     failing: failingServices.join(', '),
+    databaseConnected: isPgOk,
+    databaseHost: dbStats.databaseHost,
+    tableCount: dbStats.tableCount,
+    databaseSizeMb: dbStats.databaseSizeMb,
+    flutterwaveConfigured,
+    paymentsEnabled: paymentsEnabledFlag,
+    payoutsEnabled: payoutsEnabledFlag,
     schemaOk: Boolean(pgPing.schemaOk),
     ...(pgPing.missingTables && pgPing.missingTables.length > 0 ? { missingTables: pgPing.missingTables } : {}),
     ...(safeDbError ? { error: safeDbError } : {}),
@@ -401,25 +445,24 @@ router.post(['/auth/register', '/auth/signup'], async (req, res) => {
     }
 
     const parsedAge = parseInt(String(age), 10);
-    if (isNaN(parsedAge) || parsedAge < 10 || parsedAge > 120) {
-      return res.status(400).json({ status: false, message: 'You must be at least 10 years old to register on Shop It.' });
+    if (isNaN(parsedAge) || parsedAge < MINIMUM_PLATFORM_AGE || parsedAge > 120) {
+      return res.status(400).json({ status: false, message: `You must be at least ${MINIMUM_PLATFORM_AGE} years old to register on Shop It.` });
     }
 
-    if (parsedAge < 18 && (!hasGuardianConsent || !guardianName || !String(guardianName).trim())) {
+    if (isMinorAccount({ age: parsedAge }) && (!hasGuardianConsent || !guardianName || !String(guardianName).trim())) {
       return res.status(400).json({
         status: false,
         message: 'Parent or guardian consent and guardian name are required for users under 18.',
       });
     }
 
-    // Consume single-use server-issued signup OTP proof token if present; never block registration if unverified or Redis/email failed
-    let isVerifiedEmail = false;
-    if (signupVerificationToken) {
-      try {
-        isVerifiedEmail = await consumeSignupVerificationToken(cleanEmail, String(signupVerificationToken));
-      } catch {
-        isVerifiedEmail = false;
-      }
+    const cleanVerificationToken = String(signupVerificationToken || '').trim();
+    if (!cleanVerificationToken) {
+      return res.status(403).json({
+        status: false,
+        error: 'EMAIL_OTP_REQUIRED',
+        message: 'Please verify your 6-digit email verification code before completing registration.',
+      });
     }
 
     const userRole = role === 'seller' ? 'seller' : 'buyer';
@@ -429,12 +472,19 @@ router.post(['/auth/register', '/auth/signup'], async (req, res) => {
     const resolvedCampus = campus ? String(campus).trim() : (userRole === 'seller' ? 'Lagos Mainland' : '');
     const resolvedArea = location?.area ? String(location.area).trim() : (userRole === 'seller' ? 'Yaba' : '');
     const resolvedBio = bio ? String(bio).trim().slice(0, 200) : '';
-    const initialPrivacy = parsedAge < 18 ? UNDER_18_PRIVACY_SETTINGS : DEFAULT_PRIVACY_SETTINGS;
+    const isVerifiedEmail = true;
+    const initialPrivacy = isMinorAccount({ age: parsedAge }) ? UNDER_18_PRIVACY_SETTINGS : DEFAULT_PRIVACY_SETTINGS;
 
     const txResult = await withTransaction(async client => {
       const existing = await client.query('SELECT id FROM shopit_users WHERE LOWER(email) = LOWER($1)', [cleanEmail]);
       if (existing.rows.length > 0) {
         return { conflict: true as const };
+      }
+
+      // Consume verified email record INSIDE the exact same PostgreSQL transaction as user insertion
+      const verifiedConsumed = await consumeSignupVerificationTokenInTx(client, cleanEmail, cleanVerificationToken);
+      if (!verifiedConsumed) {
+        return { unverifiedSignup: true as const };
       }
 
       const profileSlug = await generateUniqueProfileSlug(
@@ -555,13 +605,21 @@ router.post(['/auth/register', '/auth/signup'], async (req, res) => {
         );
       }
 
-      return { conflict: false as const, savedUser: userInsert.rows[0], sellerProfile };
+      return { conflict: false as const, unverifiedSignup: false as const, savedUser: userInsert.rows[0], sellerProfile };
     });
 
     if (txResult.conflict) {
       return res.status(409).json({
         status: false,
         message: 'An account with this email address already exists. Please log in.',
+      });
+    }
+
+    if (txResult.unverifiedSignup) {
+      return res.status(403).json({
+        status: false,
+        error: 'EMAIL_OTP_REQUIRED',
+        message: 'Your email verification code is missing, expired, or already used. Please verify a new 6-digit code first.',
       });
     }
 
@@ -607,7 +665,7 @@ router.post(['/auth/register', '/auth/signup'], async (req, res) => {
       userAgent: req.get('user-agent'),
     });
 
-    // Non-blocking email alert to admin (already persisted atomically in shopit_admin_alerts)
+    // Non-blocking email alert to admin & Welcome email dispatched ONLY after user exists in PostgreSQL
     dispatchAdminAlert(
       `new_user_${userId}`,
       `New ${userRole === 'seller' ? 'Seller' : 'Buyer'} Signed Up: ${cleanName}`,
@@ -618,6 +676,15 @@ router.post(['/auth/register', '/auth/signup'], async (req, res) => {
        ${signupShopName ? `Shop: <strong>${escapeHtml(signupShopName)}</strong> (${escapeHtml(signupCampus || 'Campus')})<br/>` : ''}
        Registered At: <strong>${new Date().toISOString()}</strong>`
     ).catch(() => {});
+
+    if (process.env.BREVO_API_KEY && !cleanEmail.endsWith('.local')) {
+      const welcomeTpl = renderTransactionalEmail('welcome', {
+        name: cleanName,
+        role: userRole,
+        appUrl: PRODUCTION_APP_URL,
+      });
+      sendBrevoDirect(cleanEmail, welcomeTpl.subject, welcomeTpl.text, welcomeTpl.html, cleanName).catch(() => {});
+    }
 
     return res.status(201).json({
       status: true,
@@ -1985,8 +2052,12 @@ router.get('/admin/metrics', requireModerator, async (_req: AuthenticatedRequest
       ),
     ]);
 
-    const pgPing = await pingPostgres();
-    const redisPing = await pingRedis();
+    const [pgPing, redisPing, dbStats] = await Promise.all([
+      pingPostgres(),
+      pingRedis(),
+      getDatabaseHealthStats(),
+    ]);
+    await checkStorageThresholdAlert(dbStats.databaseSizeMb);
     const cutoffMs = Date.now() - 24 * 60 * 60 * 1000;
 
     return res.json({
@@ -2031,6 +2102,14 @@ router.get('/admin/metrics', requireModerator, async (_req: AuthenticatedRequest
         provider: pgPing.provider,
         databaseUrlConfigured: Boolean(getDatabaseUrl()),
         redisConfigured: Boolean(process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL),
+        databaseHost: dbStats.databaseHost,
+        tableCount: dbStats.tableCount,
+        databaseSizeBytes: dbStats.databaseSizeBytes,
+        databaseSizeMb: dbStats.databaseSizeMb,
+        storageLimitMb: NEON_FREE_PLAN_LIMIT_MB,
+        fileStorageBytes: dbStats.fileStorageBytes,
+        fileStorageMb: dbStats.fileStorageMb,
+        fileCount: dbStats.fileCount,
       },
     });
   } catch (err: any) {
@@ -3782,25 +3861,34 @@ router.post('/auth/send-otp', async (req, res) => {
       }
     }
 
-    if (cleanPurpose !== 'signup') {
-      const ipRl = await checkAndRecordRateLimit(`otp_ip:${req.ip || 'unknown'}`, 25, 15 * 60 * 1000);
-      if (!ipRl.allowed) {
-        return res.status(429).json({ status: false, message: 'Too many verification code requests. Please try again later.' });
-      }
+    const ipRl = await checkAndRecordRateLimit(`otp_ip:${req.ip || 'unknown'}`, 25, 15 * 60 * 1000);
+    if (!ipRl.allowed) {
+      return res.status(429).json({
+        status: false,
+        error: 'RATE_LIMITED',
+        message: 'Too many verification code requests. Please try again in a few minutes.',
+        waitSeconds: ipRl.retryAfterSeconds || 60,
+      });
+    }
 
-      const cooldownCheck = await checkOtpResendCooldown(cleanEmail, cleanPurpose);
-      if (!cooldownCheck.allowed) {
-        return res.status(429).json({
-          status: false,
-          message: `Please wait ${cooldownCheck.waitSeconds}s before requesting a new code.`,
-          waitSeconds: cooldownCheck.waitSeconds,
-        });
-      }
+    const cooldownCheck = await checkOtpResendCooldown(cleanEmail, cleanPurpose);
+    if (!cooldownCheck.allowed) {
+      return res.status(429).json({
+        status: false,
+        error: 'OTP_COOLDOWN',
+        message: `A code was just sent. Please wait ${cooldownCheck.waitSeconds}s before requesting another code.`,
+        waitSeconds: cooldownCheck.waitSeconds,
+      });
+    }
 
-      const rateCheck = await checkOtpRateLimit(cleanEmail, deviceId);
-      if (!rateCheck.allowed) {
-        return res.status(429).json({ status: false, message: rateCheck.reason });
-      }
+    const rateCheck = await checkOtpRateLimit(cleanEmail, deviceId);
+    if (!rateCheck.allowed) {
+      return res.status(429).json({
+        status: false,
+        error: 'RATE_LIMITED',
+        message: rateCheck.reason,
+        waitSeconds: 60,
+      });
     }
 
     // Never reveal registered vs unregistered email on password_reset (uniform response)
@@ -3819,10 +3907,8 @@ router.post('/auth/send-otp', async (req, res) => {
 
     const code = String(crypto.randomInt(100000, 1000000));
     const codeHash = hashOtp(code);
-    await saveHashedOtp(cleanEmail, cleanPurpose, codeHash, metadata).catch(() => {});
-    if (cleanPurpose !== 'signup') {
-      await recordOtpRateLimit(cleanEmail, deviceId).catch(() => {});
-    }
+    await saveHashedOtp(cleanEmail, cleanPurpose, codeHash, metadata);
+    await recordOtpRateLimit(cleanEmail, deviceId);
 
     const templateMap: Record<string, EmailTemplateKey> = {
       signup: 'signup_code',
@@ -3851,12 +3937,12 @@ router.post('/auth/send-otp', async (req, res) => {
       metadata?.name
     ).catch(() => false);
 
-    if (IS_PROD && !emailSent && cleanPurpose !== 'password_reset' && cleanPurpose !== 'signup') {
+    if (IS_PROD && !emailSent && cleanPurpose !== 'password_reset') {
       await deleteOtpRecord(cleanEmail, cleanPurpose).catch(() => {});
       return res.status(503).json({
         status: false,
         error: 'EMAIL_SERVICE_UNAVAILABLE',
-        message: 'Verification email service is temporarily unavailable. Please try again shortly.',
+        message: 'Verification email service could not deliver the code right now. Please try again shortly.',
       });
     }
 
@@ -3877,7 +3963,7 @@ router.post('/auth/send-otp', async (req, res) => {
           ? 'If an account with this email exists, a 6-digit verification code has been sent.'
           : emailSent
             ? 'A 6-digit verification code has been sent to your email.'
-            : 'Email delivery is temporarily unavailable; you may finish creating your account directly.',
+            : 'Verification code saved in database (email delivery skipped in local/non-production mode).',
     });
   } catch (err: any) {
     console.error('[Server Error in /api/auth/send-otp]', err.message);
@@ -4694,13 +4780,17 @@ router.all(['/cron/daily', '/cron/escrow'], requireCronSecret, async (req, res) 
   const escrow = await processEscrowAutoRelease(50);
   const unshipped = await processUnshippedOrders(50);
   const reconciliation = await runDailyReconciliationCheck();
+  const orphanCleanup = await fileStorage.cleanupOrphanedFiles();
+  const dbStats = await getDatabaseHealthStats();
+  await checkStorageThresholdAlert(dbStats.databaseSizeMb);
 
   const workCount =
     expired.expiredCount +
     escrow.releasedCount +
     unshipped.remindedCount +
     unshipped.refundedCount +
-    expired.purgedDocsCount;
+    expired.purgedDocsCount +
+    orphanCleanup.deletedCount;
   if (workCount > 0 || !reconciliation.ok) {
     await logAuditEvent({
       action: 'CRON_DAILY_PROCESSED',
@@ -4712,6 +4802,8 @@ router.all(['/cron/daily', '/cron/escrow'], requireCronSecret, async (req, res) 
         unshippedRemindedCount: unshipped.remindedCount,
         unshippedRefundedCount: unshipped.refundedCount,
         purgedDocsCount: expired.purgedDocsCount,
+        cleanedOrphanFilesCount: orphanCleanup.deletedCount,
+        databaseSizeMb: dbStats.databaseSizeMb,
         reconciliationOk: reconciliation.ok,
       },
       ip: req.ip,
@@ -4728,6 +4820,8 @@ router.all(['/cron/daily', '/cron/escrow'], requireCronSecret, async (req, res) 
       unshippedRemindedCount: unshipped.remindedCount,
       unshippedRefundedCount: unshipped.refundedCount,
       purgedDocsCount: expired.purgedDocsCount,
+      cleanedOrphanFilesCount: orphanCleanup.deletedCount,
+      databaseSizeMb: dbStats.databaseSizeMb,
       reconciliationOk: reconciliation.ok,
     },
     timestamp: new Date().toISOString(),

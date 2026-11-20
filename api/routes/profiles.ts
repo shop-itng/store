@@ -30,6 +30,11 @@ import {
 } from '../lib/validation.js';
 import { checkAndRecordRateLimit } from '../db/otpStore.js';
 import { sendBrevoDirect } from '../lib/payments.js';
+import {
+  MINOR_SAFETY_RULES,
+  evaluateMinorFollowRule,
+  isMinorAccount,
+} from '../config/minorSafety.js';
 
 const router = express.Router();
 
@@ -971,20 +976,28 @@ router.post('/follows', requireAuth, async (req: AuthenticatedRequest, res: Resp
     }
 
     const viewerRes = await dbQuery(
-      'SELECT age, display_name, name, profile_slug FROM shopit_users WHERE id = $1 LIMIT 1',
+      `SELECT u.age, u.display_name, u.name, u.profile_slug, s.under_18 AS s_under_18
+       FROM shopit_users u
+       LEFT JOIN shopit_sellers s ON (s.user_id = u.id OR s.id = u.id)
+       WHERE u.id = $1 LIMIT 1`,
       [viewer.userId]
     );
     const vRow = viewerRes.rows[0];
 
-    const isTargetUnder18 =
-      (target.age !== null && target.age !== undefined && Number(target.age) < 18) || Boolean(target.s_under_18);
+    const isTargetUnder18 = isMinorAccount({ age: target.age, sellerUnder18: target.s_under_18 });
     const viewerAge = vRow?.age !== null && vRow?.age !== undefined ? Number(vRow.age) : null;
-    const isViewerAdult = viewerAge === null || !Number.isFinite(viewerAge) || viewerAge >= 18;
-
-    if (isTargetUnder18 && isViewerAdult) {
+    const isViewerUnder18 = isMinorAccount({ age: viewerAge, sellerUnder18: vRow?.s_under_18 });
+    const followDecision = evaluateMinorFollowRule({
+      viewerAge,
+      viewerIsUnder18: isViewerUnder18,
+      targetIsUnder18: isTargetUnder18,
+    });
+    if (!followDecision.allowed) {
       return res.status(403).json({
         status: false,
-        message: 'For youth safety, adults cannot follow or send follow requests to under-18 accounts.',
+        message:
+          followDecision.reason ||
+          'For youth safety, adults cannot follow or send follow requests to under-18 accounts.',
       });
     }
 
@@ -1002,7 +1015,7 @@ router.post('/follows', requireAuth, async (req: AuthenticatedRequest, res: Resp
     const privacy = sanitizePrivacySettings(parseJsonSafe(target.privacy_settings, basePrivacy), basePrivacy, isTargetUnder18);
 
     const followStatus: 'pending' | 'accepted' =
-      isTargetUnder18 || privacy.whoCanFollow === 'approval' ? 'pending' : 'accepted';
+      followDecision.forcedStatus || (privacy.whoCanFollow === 'approval' ? 'pending' : 'accepted');
     const followId = `fol_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
 
     const insRes = await dbQuery(
@@ -1607,6 +1620,9 @@ router.get('/profiles/discover/suggested', optionalAuth, async (req: Authenticat
 
     const seen = new Set<string>();
     const baseCandidates = rowsRes.rows.filter((r: any) => {
+      if (MINOR_SAFETY_RULES.hideMinorsFromSearchAndDiscovery && isMinorAccount({ age: r.age, sellerUnder18: r.s_under_18 })) {
+        return false;
+      }
       if (excludeUserIds.has(r.id) || seen.has(r.id)) return false;
       seen.add(r.id);
       return true;
@@ -1741,6 +1757,9 @@ router.get('/profiles/search', optionalAuth, async (req: AuthenticatedRequest, r
     const seen = new Set<string>();
     const filteredRows = rowsRes.rows
       .filter((r: any) => {
+        if (MINOR_SAFETY_RULES.hideMinorsFromSearchAndDiscovery && isMinorAccount({ age: r.age, sellerUnder18: r.s_under_18 })) {
+          return false;
+        }
         if (blockedSet.has(r.id) || seen.has(r.id)) return false;
         seen.add(r.id);
         return true;

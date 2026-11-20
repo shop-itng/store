@@ -141,10 +141,10 @@ export function buildPgPoolConfig(dbUrl: string): pg.PoolConfig {
   let ssl: pg.PoolConfig['ssl'];
   if (sslMode === 'disable' || (isLocalHost && !sslMode)) {
     ssl = false;
-  } else if (sslMode === 'verify-full' || sslMode === 'verify-ca') {
-    ssl = { rejectUnauthorized: true };
-  } else {
+  } else if (sslMode === 'no-verify' || sslMode === 'allow' || sslMode === 'prefer' || (isLocalHost && sslMode === 'require')) {
     ssl = { rejectUnauthorized: false };
+  } else {
+    ssl = { rejectUnauthorized: true };
   }
 
   return {
@@ -325,6 +325,73 @@ export async function pingPostgres(): Promise<{
       error: err.message,
     };
   }
+}
+
+export async function getDatabaseHealthStats(): Promise<{
+  databaseHost: string;
+  tableCount: number;
+  databaseSizeBytes: number;
+  databaseSizeMb: number;
+  fileStorageBytes: number;
+  fileStorageMb: number;
+  fileCount: number;
+}> {
+  const dbUrl = getDatabaseUrl();
+  let databaseHost = 'pg-mem';
+  if (dbUrl) {
+    try {
+      databaseHost = new URL(dbUrl).hostname || 'postgres';
+    } catch {
+      databaseHost = 'postgres';
+    }
+  }
+
+  let tableCount = 0;
+  let databaseSizeBytes = 0;
+  let fileStorageBytes = 0;
+  let fileCount = 0;
+
+  try {
+    const pool = await getPool();
+    if (!migrationCompleted) {
+      await runMigration();
+    }
+
+    if (isPgMem) {
+      databaseHost = 'pg-mem';
+      tableCount = CORE_SCHEMA_TABLES.length;
+    } else {
+      const [tblRes, sizeRes] = await Promise.all([
+        pool.query(
+          `SELECT COUNT(*)::int AS cnt FROM information_schema.tables WHERE table_schema = 'public'`
+        ),
+        pool.query(`SELECT pg_database_size(current_database())::bigint AS size_bytes`),
+      ]);
+      tableCount = Number(tblRes.rows[0]?.cnt || 0);
+      databaseSizeBytes = Number(sizeRes.rows[0]?.size_bytes || 0);
+    }
+
+    const fileRes = await pool.query(
+      `SELECT COALESCE(SUM(size_bytes), 0)::bigint AS used_bytes, COUNT(*)::int AS cnt FROM shopit_files`
+    );
+    fileStorageBytes = Number(fileRes.rows[0]?.used_bytes || 0);
+    fileCount = Number(fileRes.rows[0]?.cnt || 0);
+    if (isPgMem && databaseSizeBytes === 0) {
+      databaseSizeBytes = Math.round(fileStorageBytes * 1.35);
+    }
+  } catch {}
+
+  const databaseSizeMb = Math.round((databaseSizeBytes / (1024 * 1024)) * 100) / 100;
+  const fileStorageMb = Math.round((fileStorageBytes / (1024 * 1024)) * 100) / 100;
+  return {
+    databaseHost,
+    tableCount,
+    databaseSizeBytes,
+    databaseSizeMb,
+    fileStorageBytes,
+    fileStorageMb,
+    fileCount,
+  };
 }
 
 export async function pingRedis(): Promise<{ ok: boolean; error?: string }> {
@@ -678,6 +745,9 @@ export async function runMigration(): Promise<void> {
     );
 
     CREATE INDEX IF NOT EXISTS idx_shopit_chat_conv ON shopit_chat_messages (conversation_id, created_at ASC);
+    CREATE INDEX IF NOT EXISTS idx_shopit_chat_conv_created_id ON shopit_chat_messages (conversation_id, created_at ASC, id ASC);
+    CREATE INDEX IF NOT EXISTS idx_shopit_chat_convs_buyer ON shopit_chat_conversations (buyer_id, last_message_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_shopit_chat_convs_seller ON shopit_chat_conversations (seller_id, last_message_at DESC);
 
     -- 13. Audit Logs Table (Immutable security event logging)
     CREATE TABLE IF NOT EXISTS shopit_audit_logs (

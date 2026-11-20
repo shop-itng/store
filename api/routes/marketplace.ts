@@ -7,7 +7,7 @@ import {
   DEFAULT_EMERGENCY_CONTROLS,
   DEFAULT_FEE_SETTINGS_DB,
 } from '../db/postgres.js';
-import { verifyAndConsumeOtp } from '../db/otpStore.js';
+import { checkAndRecordRateLimit, verifyAndConsumeOtp } from '../db/otpStore.js';
 import {
   requireAuth,
   requireAdmin,
@@ -34,6 +34,11 @@ import {
   UNDER_18_PRIVACY_SETTINGS,
   rejectUnknownFields,
 } from '../lib/validation.js';
+import {
+  evaluateMinorChatStart,
+  evaluateMinorMessageSend,
+  isMinorAccount,
+} from '../config/minorSafety.js';
 
 const router = express.Router();
 
@@ -2584,6 +2589,31 @@ router.get('/chat/conversations', requireAuth, async (req: AuthenticatedRequest,
   }
 });
 
+/**
+ * GET /api/chat/unread-count
+ * Lightweight single-query endpoint used by gentle global badge polling (avoids fetching full threads/messages).
+ */
+router.get('/chat/unread-count', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const user = req.user!;
+    const sellerLookup = user.sellerId || user.userId;
+    const countRes = await dbQuery(
+      `SELECT COUNT(*)::int AS unread_count
+       FROM shopit_chat_messages m
+       JOIN shopit_chat_conversations c ON c.id = m.conversation_id
+       WHERE (c.buyer_id = $1 AND m.sender_id != c.buyer_id AND m.created_at > COALESCE(c.buyer_last_read_at, '1970-01-01T00:00:00Z'::timestamptz))
+          OR ((c.seller_id = $1 OR c.seller_id = $2) AND m.sender_id = c.buyer_id AND m.created_at > COALESCE(c.seller_last_read_at, '1970-01-01T00:00:00Z'::timestamptz))`,
+      [user.userId, sellerLookup]
+    );
+    return res.json({
+      status: true,
+      unreadCount: Number(countRes.rows[0]?.unread_count || 0),
+    });
+  } catch (err: any) {
+    return res.status(500).json({ status: false, message: 'Unable to fetch unread message count.' });
+  }
+});
+
 router.post('/chat/conversations', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const user = req.user!;
@@ -2614,16 +2644,16 @@ router.post('/chat/conversations', requireAuth, async (req: AuthenticatedRequest
         targetUserRow = fallbackUserRes.rows[0];
       }
     }
-    if (targetUserRow?.deleted_at || targetUserRow?.is_banned) {
+    if (!targetUserRow || targetUserRow.deleted_at || targetUserRow.is_banned) {
       return res.status(404).json({ status: false, message: 'This seller account is unavailable.' });
     }
 
-    const canonicalSellerId = targetUserRow?.id || String(sellerId);
-    const sellerUserId = targetUserRow?.user_id || targetUserRow?.u_id || canonicalSellerId;
+    const canonicalSellerId = targetUserRow.id || String(sellerId);
+    const sellerUserId = targetUserRow.user_id || targetUserRow.u_id || canonicalSellerId;
     if (sellerUserId === user.userId || isUserSellerOwner(user, canonicalSellerId)) {
       return res.status(400).json({ status: false, message: 'You cannot open a chat conversation with your own shop.' });
     }
-    const shopName = targetUserRow?.shop_name || 'Artisan';
+    const shopName = targetUserRow.shop_name || 'Artisan';
 
     // Check mutual block
     if (user.role !== 'admin') {
@@ -2638,63 +2668,124 @@ router.post('/chat/conversations', requireAuth, async (req: AuthenticatedRequest
       }
     }
 
-    // Check recipient's whoCanMessage privacy setting (order partners bypass restriction)
-    if (user.role !== 'admin' && targetUserRow) {
-      const isUnder18 =
-        (targetUserRow.age !== null && targetUserRow.age !== undefined && Number(targetUserRow.age) < 18) ||
-        Boolean(targetUserRow.s_under_18);
-      const basePrivacy = isUnder18 ? UNDER_18_PRIVACY_SETTINGS : DEFAULT_PRIVACY_SETTINGS;
+    // DB-verify productId and orderId (client cannot spoof a fake product/order link)
+    const cleanProductId = productId ? String(productId).trim() : null;
+    const cleanOrderId = orderId ? String(orderId).trim() : null;
+
+    let verifiedProduct: { id: string; title: string; images: any } | null = null;
+    if (cleanProductId) {
+      const prodRes = await dbQuery(
+        `SELECT id, seller_id, title, images, is_draft
+         FROM shopit_products
+         WHERE id = $1
+         LIMIT 1`,
+        [cleanProductId]
+      );
+      const pRow = prodRes.rows[0];
+      if (!pRow || pRow.is_draft) {
+        return res.status(404).json({ status: false, message: 'Referenced product listing was not found.' });
+      }
+      if (pRow.seller_id !== canonicalSellerId && pRow.seller_id !== sellerUserId) {
+        return res.status(403).json({ status: false, message: 'That product does not belong to this seller.' });
+      }
+      verifiedProduct = { id: pRow.id, title: pRow.title, images: pRow.images };
+    }
+
+    let verifiedOrderId: string | null = null;
+    if (cleanOrderId) {
+      const ordRes = await dbQuery(
+        `SELECT id, buyer_id, items FROM shopit_orders WHERE id = $1 LIMIT 1`,
+        [cleanOrderId]
+      );
+      const oRow = ordRes.rows[0];
+      if (!oRow) {
+        return res.status(404).json({ status: false, message: 'Referenced order was not found.' });
+      }
+      const orderItems = Array.isArray(oRow.items)
+        ? oRow.items
+        : typeof oRow.items === 'string'
+          ? (() => { try { return JSON.parse(oRow.items); } catch { return []; } })()
+          : [];
+      const involvesSeller = orderItems.some(
+        (it: any) => it?.sellerId === canonicalSellerId || it?.sellerId === sellerUserId
+      );
+      if ((oRow.buyer_id !== user.userId && user.role !== 'admin') || !involvesSeller) {
+        return res.status(403).json({ status: false, message: 'You are not authorized to chat on this order.' });
+      }
+      verifiedOrderId = oRow.id;
+    }
+
+    // Also detect any existing DB order between buyer and this seller
+    const existingOrderRes = verifiedOrderId
+      ? null
+      : await dbQuery(
+          `SELECT id FROM shopit_orders
+           WHERE buyer_id = $1 AND (items::text LIKE $2 OR items::text LIKE $3)
+           ORDER BY created_at DESC LIMIT 1`,
+          [user.userId, `%"sellerId":"${canonicalSellerId}"%`, `%"sellerId":"${sellerUserId}"%`]
+        );
+    const hasExistingOrder = Boolean(verifiedOrderId || existingOrderRes?.rows?.length);
+
+    // Fetch buyer age to enforce minor safety rules strictly in both directions
+    const buyerAgeRes = await dbQuery('SELECT age FROM shopit_users WHERE id = $1 LIMIT 1', [user.userId]);
+    const buyerIsUnder18 = isMinorAccount({ age: buyerAgeRes.rows[0]?.age });
+    const sellerIsUnder18 = isMinorAccount({ age: targetUserRow.age, sellerUnder18: targetUserRow.s_under_18 });
+
+    const minorChatGate = evaluateMinorChatStart({
+      sellerIsUnder18,
+      buyerIsUnder18,
+      hasVerifiedProduct: Boolean(verifiedProduct),
+      hasVerifiedOrder: hasExistingOrder,
+      isAdmin: user.role === 'admin',
+    });
+    if (!minorChatGate.allowed) {
+      return res.status(403).json({
+        status: false,
+        message: minorChatGate.reason,
+      });
+    }
+
+    // Check adult/recipient's whoCanMessage privacy setting (product/order or mutual/follower rules)
+    if (user.role !== 'admin' && !sellerIsUnder18 && !buyerIsUnder18) {
+      const basePrivacy = DEFAULT_PRIVACY_SETTINGS;
       const rawPrivacy = typeof targetUserRow.privacy_settings === 'string'
         ? (() => { try { return JSON.parse(targetUserRow.privacy_settings); } catch { return basePrivacy; } })()
         : targetUserRow.privacy_settings || basePrivacy;
-      const privacy = sanitizePrivacySettings(rawPrivacy, basePrivacy, isUnder18);
+      const privacy = sanitizePrivacySettings(rawPrivacy, basePrivacy, false);
 
-      if (privacy.whoCanMessage !== 'everyone') {
-        const [fViewerToTarget, fTargetToViewer, orderRes] = await Promise.all([
+      if (privacy.whoCanMessage !== 'everyone' && !hasExistingOrder) {
+        const [fViewerToTarget, fTargetToViewer] = await Promise.all([
           dbQuery(`SELECT 1 FROM shopit_follows WHERE follower_id = $1 AND following_id = $2 AND status = 'accepted' LIMIT 1`, [user.userId, sellerUserId]),
           dbQuery(`SELECT 1 FROM shopit_follows WHERE follower_id = $1 AND following_id = $2 AND status = 'accepted' LIMIT 1`, [sellerUserId, user.userId]),
-          dbQuery(
-            `SELECT 1 FROM shopit_orders
-             WHERE buyer_id = $1 AND (items::text LIKE $2 OR items::text LIKE $3)
-             LIMIT 1`,
-            [user.userId, `%"sellerId":"${canonicalSellerId}"%`, `%"sellerId":"${sellerUserId}"%`]
-          ),
         ]);
-        const hasOrder = Boolean(orderId) || orderRes.rows.length > 0;
         const viewerFollows = fViewerToTarget.rows.length > 0;
         const targetFollows = fTargetToViewer.rows.length > 0;
 
-        if (!hasOrder) {
-          if (privacy.whoCanMessage === 'followers' && !viewerFollows) {
-            return res.status(403).json({
-              status: false,
-              message: 'This member only accepts messages from followers or customers with an order.',
-            });
-          }
-          if (privacy.whoCanMessage === 'mutual' && !(viewerFollows && targetFollows)) {
-            return res.status(403).json({
-              status: false,
-              message: 'This member only accepts messages from mutual followers or customers with an order.',
-            });
-          }
+        if (privacy.whoCanMessage === 'followers' && !viewerFollows) {
+          return res.status(403).json({
+            status: false,
+            message: 'This member only accepts messages from followers or customers with an order.',
+          });
+        }
+        if (privacy.whoCanMessage === 'mutual' && !(viewerFollows && targetFollows)) {
+          return res.status(403).json({
+            status: false,
+            message: 'This member only accepts messages from mutual followers or customers with an order.',
+          });
         }
       }
     }
 
-    let resolvedTitle = productTitle ? String(productTitle).trim().slice(0, 200) : null;
+    let resolvedTitle = verifiedProduct?.title || (productTitle ? String(productTitle).trim().slice(0, 200) : null);
     let resolvedImage = productImage ? String(productImage).trim() : null;
-    if (productId && (!resolvedTitle || !resolvedImage)) {
-      const prodRes = await dbQuery('SELECT title, images FROM shopit_products WHERE id = $1', [productId]);
-      if (prodRes.rows.length > 0) {
-        resolvedTitle = resolvedTitle || prodRes.rows[0].title;
-        if (!resolvedImage && Array.isArray(prodRes.rows[0].images) && prodRes.rows[0].images[0]) {
-          resolvedImage = prodRes.rows[0].images[0];
-        }
-      }
+    if (verifiedProduct && !resolvedImage && Array.isArray(verifiedProduct.images) && verifiedProduct.images[0]) {
+      resolvedImage = verifiedProduct.images[0];
     }
 
     const userMap = await batchLoadUserMeta([user.userId, canonicalSellerId, sellerUserId]);
     const buyerDisplayName = userMap.get(user.userId)?.displayName || extractFirstName(user.name || 'Member');
+
+    const effectiveOrderId = verifiedOrderId || existingOrderRes?.rows?.[0]?.id || null;
 
     const existing = await dbQuery(
       `SELECT * FROM shopit_chat_conversations
@@ -2704,7 +2795,7 @@ router.post('/chat/conversations', requireAuth, async (req: AuthenticatedRequest
     );
     if (existing.rows.length > 0) {
       let existingRow = existing.rows[0];
-      if (productId || orderId || resolvedTitle) {
+      if (verifiedProduct?.id || effectiveOrderId || resolvedTitle) {
         const upd = await dbQuery(
           `UPDATE shopit_chat_conversations
            SET product_id = COALESCE($1, product_id),
@@ -2715,7 +2806,7 @@ router.post('/chat/conversations', requireAuth, async (req: AuthenticatedRequest
                buyer_masked_id = COALESCE($6, buyer_masked_id)
            WHERE id = $7
            RETURNING *`,
-          [productId || null, resolvedTitle, resolvedImage, orderId || null, shopName, buyerDisplayName, existingRow.id]
+          [verifiedProduct?.id || null, resolvedTitle, resolvedImage, effectiveOrderId, shopName, buyerDisplayName, existingRow.id]
         );
         if (upd.rows.length > 0) existingRow = upd.rows[0];
       }
@@ -2735,14 +2826,14 @@ router.post('/chat/conversations', requireAuth, async (req: AuthenticatedRequest
         last_message, last_message_at, buyer_last_read_at, created_at
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'Chat started', NOW(), NOW(), NOW())
       RETURNING *`,
-      [convId, orderId || null, productId || null, resolvedTitle, resolvedImage, user.userId, buyerDisplayName, canonicalSellerId, shopName]
+      [convId, effectiveOrderId, verifiedProduct?.id || null, resolvedTitle, resolvedImage, user.userId, buyerDisplayName, canonicalSellerId, shopName]
     );
 
     await logAuditEvent({
       action: 'CHAT_CONVERSATION_STARTED',
       actor: { id: user.userId, email: user.email, role: user.role },
       target: { type: 'conversation', id: convId },
-      details: { sellerId: canonicalSellerId, shopName, productId: productId || null, productTitle: resolvedTitle, orderId: orderId || null },
+      details: { sellerId: canonicalSellerId, shopName, productId: verifiedProduct?.id || null, productTitle: resolvedTitle, orderId: effectiveOrderId },
       ip: req.ip,
       userAgent: req.get('user-agent'),
     });
@@ -2799,6 +2890,12 @@ router.post('/chat/conversations/:id/read', requireAuth, async (req: Authenticat
 router.get('/chat/conversations/:id/messages', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const user = req.user!;
+    const rl = await checkAndRecordRateLimit(`chat_poll:${user.userId}`, 60, 60 * 1000);
+    if (!rl.allowed) {
+      res.setHeader('Retry-After', String(rl.retryAfterSeconds || 10));
+      return res.status(429).json({ status: false, message: 'Polling too quickly. Slowing down requests.' });
+    }
+
     const { id } = req.params;
     const convRes = await dbQuery('SELECT * FROM shopit_chat_conversations WHERE id = $1', [id]);
     if (convRes.rows.length === 0) {
@@ -2809,10 +2906,41 @@ router.get('/chat/conversations/:id/messages', requireAuth, async (req: Authenti
       return res.status(403).json({ status: false, message: 'Access denied to this conversation.' });
     }
 
-    const result = await dbQuery(
-      'SELECT * FROM shopit_chat_messages WHERE conversation_id = $1 ORDER BY created_at ASC LIMIT 200',
-      [id]
-    );
+    const afterId = req.query.afterId ? String(req.query.afterId).trim() : '';
+    let afterCreatedAt = req.query.afterCreatedAt ? String(req.query.afterCreatedAt).trim() : '';
+    let anchorDbCreatedAt: any = null;
+
+    if (afterId) {
+      const anchorRes = await dbQuery(
+        'SELECT created_at FROM shopit_chat_messages WHERE conversation_id = $1 AND id = $2 LIMIT 1',
+        [id, afterId]
+      );
+      if (anchorRes.rows[0]?.created_at) {
+        anchorDbCreatedAt = anchorRes.rows[0].created_at;
+        afterCreatedAt = new Date(anchorRes.rows[0].created_at).toISOString();
+      }
+    }
+
+    const hasCursor = Boolean(anchorDbCreatedAt || (afterCreatedAt && !Number.isNaN(Date.parse(afterCreatedAt))));
+    const cursorTimestamp = anchorDbCreatedAt || afterCreatedAt;
+    const result = hasCursor
+      ? await dbQuery(
+          `SELECT * FROM shopit_chat_messages
+           WHERE conversation_id = $1
+             AND (created_at > $2::timestamptz OR (created_at = $2::timestamptz AND id > $3))
+             AND id != $3
+           ORDER BY created_at ASC, id ASC
+           LIMIT 200`,
+          [id, cursorTimestamp, afterId || '__none__']
+        )
+      : await dbQuery(
+          'SELECT * FROM shopit_chat_messages WHERE conversation_id = $1 ORDER BY created_at ASC, id ASC LIMIT 200',
+          [id]
+        );
+
+    if (result.rows.length === 0) {
+      return res.json({ status: true, messages: [], hasNew: false });
+    }
 
     const senderMap = await batchLoadUserMeta([conv.buyer_id, conv.seller_id, ...result.rows.map((r: any) => r.sender_id)]);
     const buyerReadMs = conv.buyer_last_read_at ? new Date(conv.buyer_last_read_at).getTime() : 0;
@@ -2820,6 +2948,7 @@ router.get('/chat/conversations/:id/messages', requireAuth, async (req: Authenti
 
     return res.json({
       status: true,
+      hasNew: true,
       messages: result.rows.map((row: any) => {
         const sMeta = row.sender_id ? senderMap.get(row.sender_id) : undefined;
         const senderDisplayName =
@@ -2880,8 +3009,37 @@ router.post('/chat/conversations/:id/messages', requireAuth, async (req: Authent
       return res.status(403).json({ status: false, message: 'This conversation has been locked by moderation.' });
     }
 
-    const sellerOwnerRes = await dbQuery('SELECT user_id FROM shopit_sellers WHERE id = $1 OR user_id = $1 LIMIT 1', [conv.seller_id]);
+    const sellerOwnerRes = await dbQuery(
+      `SELECT s.user_id, s.under_18 as s_under_18, u.age as u_age
+       FROM shopit_sellers s
+       LEFT JOIN shopit_users u ON (u.id = s.user_id OR u.id = s.id)
+       WHERE s.id = $1 OR s.user_id = $1
+       LIMIT 1`,
+      [conv.seller_id]
+    );
     const sellerUserId = sellerOwnerRes.rows[0]?.user_id || conv.seller_id;
+    const [buyerAgeRow, sellerAgeRow] = await Promise.all([
+      dbQuery('SELECT age FROM shopit_users WHERE id = $1 LIMIT 1', [conv.buyer_id]),
+      sellerOwnerRes.rows[0]
+        ? Promise.resolve({ rows: [sellerOwnerRes.rows[0]] })
+        : dbQuery('SELECT age as u_age FROM shopit_users WHERE id = $1 LIMIT 1', [sellerUserId]),
+    ]);
+
+    const buyerIsUnder18 = isMinorAccount({ age: buyerAgeRow.rows[0]?.age });
+    const sellerIsUnder18 = isMinorAccount({
+      age: sellerAgeRow.rows[0]?.u_age,
+      sellerUnder18: sellerAgeRow.rows[0]?.s_under_18,
+    });
+    const minorMsgGate = evaluateMinorMessageSend({
+      sellerIsUnder18,
+      buyerIsUnder18,
+      conversationProductId: conv.product_id,
+      conversationOrderId: conv.order_id,
+      isAdmin: user.role === 'admin',
+    });
+    if (!minorMsgGate.allowed) {
+      return res.status(403).json({ status: false, message: minorMsgGate.reason });
+    }
 
     if (user.role !== 'admin') {
       const blkRes = await dbQuery(
@@ -2977,11 +3135,12 @@ router.post('/chat/conversations/:id/messages', requireAuth, async (req: Authent
 
     const nowIso = new Date().toISOString();
 
-    await dbQuery(
+    const insRes = await dbQuery(
       `INSERT INTO shopit_chat_messages (
         id, conversation_id, sender_id, sender_role, sender_masked_name,
         content, is_blocked_bypass, preset_offer, attachment, created_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())`,
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::timestamptz)
+      RETURNING created_at`,
       [
         msgId,
         id,
@@ -2992,8 +3151,12 @@ router.post('/chat/conversations/:id/messages', requireAuth, async (req: Authent
         isBypass,
         sanitizedPresetOffer ? JSON.stringify(sanitizedPresetOffer) : null,
         savedAttachment ? JSON.stringify(savedAttachment) : null,
+        nowIso,
       ]
     );
+    const storedCreatedAt = insRes.rows[0]?.created_at
+      ? new Date(insRes.rows[0].created_at).toISOString()
+      : nowIso;
 
     const nextViolations = (parseInt(conv.bypass_violations_count, 10) || 0) + (isBypass ? 1 : 0);
     const readCursorColumn = conv.buyer_id === user.userId ? 'buyer_last_read_at' : 'seller_last_read_at';
@@ -3084,8 +3247,8 @@ router.post('/chat/conversations/:id/messages', requireAuth, async (req: Authent
         readByOther: false,
         isBlockedBypass: isBypass,
         presetOffer: sanitizedPresetOffer,
-        createdAt: nowIso,
-        timestamp: nowIso,
+        createdAt: storedCreatedAt,
+        timestamp: storedCreatedAt,
       },
       isChatLocked: nextViolations >= 2 || Boolean(conv.is_chat_locked),
       bypassViolationsCount: nextViolations,

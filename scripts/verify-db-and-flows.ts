@@ -24,7 +24,11 @@ async function runTests() {
   assert.strictEqual(poolConfig.user, 'neondb_owner');
   assert.strictEqual(poolConfig.password, 'npg_Secret123@');
   assert.strictEqual(poolConfig.database, 'neondb');
-  assert.deepStrictEqual(poolConfig.ssl, { rejectUnauthorized: false });
+  assert.deepStrictEqual(poolConfig.ssl, { rejectUnauthorized: true });
+  assert.deepStrictEqual(
+    buildPgPoolConfig('postgresql://neondb_owner:pass@ep-cool-sunset-123456.us-east-2.aws.neon.tech/neondb?sslmode=verify-full').ssl,
+    { rejectUnauthorized: true }
+  );
 
   // Instantiate an actual pg.Pool using discrete config (without connecting over the network)
   const testPool = new pg.Pool(poolConfig);
@@ -278,8 +282,9 @@ async function runTests() {
     });
     assert.strictEqual(ksRes.status, 200);
 
-    // Server-side guarantee: NOTHING blocks new user registration (not pauseSellerSignups, not maintenanceMode)
+    // Server-side guarantee: NOTHING blocks new verified user registration (not pauseSellerSignups, not maintenanceMode)
     const unblockedSellerEmail = `unblocked_seller_${ts}@test.edu.ng`;
+    const unblockedSellerProof = await issueSignupVerificationToken(unblockedSellerEmail);
     const unblockedSellerRegRes = await fetch(`${baseUrl}/api/auth/register`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -291,6 +296,7 @@ async function runTests() {
         age: 21,
         shopName: 'Always Open Shop',
         campus: 'UNILAG (Akoka)',
+        signupVerificationToken: unblockedSellerProof,
       }),
     });
     const unblockedSellerRegData: any = await unblockedSellerRegRes.json();

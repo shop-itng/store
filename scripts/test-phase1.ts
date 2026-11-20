@@ -48,8 +48,8 @@ async function main() {
       tokenVersion: 1,
     });
 
-    // C11: Registration enforcement (unverified signup allowed & persisted + admin alert; password >= 8, minor consent)
-    await test('C11: POST /api/auth/register allows unverified signup (201) and writes admin alert', async () => {
+    // C11: Registration enforcement (OTP verification record required; password >= 8, minor consent)
+    await test('C11: POST /api/auth/register refuses unverified signup (403 EMAIL_OTP_REQUIRED) without creating user', async () => {
       const noOtpEmail = `nootp_${Date.now()}@shopit.ng`;
       const res = await fetch(`${baseUrl}/api/auth/register`, {
         method: 'POST',
@@ -62,11 +62,11 @@ async function main() {
           age: 20,
         }),
       });
-      assert.strictEqual(res.status, 201);
+      assert.strictEqual(res.status, 403);
       const data: any = await res.json();
-      assert.strictEqual(data.user.isVerifiedEmail, false);
-      const alertCheck = await query('SELECT alert_key FROM shopit_admin_alerts WHERE user_id = $1', [data.user.id]);
-      assert.ok(alertCheck.rows.length >= 1, 'Admin alert must be inserted in the same transaction');
+      assert.strictEqual(data.error, 'EMAIL_OTP_REQUIRED');
+      const userCheck = await query('SELECT id FROM shopit_users WHERE LOWER(email) = LOWER($1)', [noOtpEmail]);
+      assert.strictEqual(userCheck.rows.length, 0);
     });
 
     await test('C11: POST /api/auth/register rejects password shorter than 8 chars (400)', async () => {

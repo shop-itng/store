@@ -9,6 +9,7 @@ import {
   ensureBootstrapAdminFromEnv,
 } from '../api/db/postgres.js';
 import { createSession } from '../api/auth/sessionStore.js';
+import { issueSignupVerificationToken } from '../api/db/otpStore.js';
 import { runReadOnlyReconciliation } from './reconcile-ledger.js';
 import { restoreBackupPayload } from './restore-backup.js';
 
@@ -99,7 +100,7 @@ async function main() {
         });
         assert.strictEqual(ksRes.status, 200);
 
-        // 1a. send-otp during email + Redis outage must NOT fail 503; returns emailDelivered: false
+        // 1a. send-otp saves OTP in Postgres during Redis + Brevo outage in non-prod; verify-otp records shopit_verified_signups
         const buyerEmail = `outage_buyer_${ts}@shopit.ng`;
         const otpRes = await origFetch(`${baseUrl}/api/auth/send-otp`, {
           method: 'POST',
@@ -111,8 +112,8 @@ async function main() {
         assert.strictEqual(otpJson.status, true);
         assert.strictEqual(otpJson.emailDelivered, false);
 
-        // 1b. Buyer signup via /api/auth/signup without verification token -> 201 + Postgres + Admin Alert
-        const buyerRegRes = await origFetch(`${baseUrl}/api/auth/signup`, {
+        // Unverified /auth/signup must fail closed with 403
+        const unverifiedRes = await origFetch(`${baseUrl}/api/auth/signup`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -123,14 +124,31 @@ async function main() {
             age: 22,
           }),
         });
+        assert.strictEqual(unverifiedRes.status, 403);
+
+        // 1b. With OTP proof token (even while Redis is DOWN & maintenanceMode=true & pauseSellerSignups=true) -> 201 + Postgres + Admin Alert
+        const buyerProof = await issueSignupVerificationToken(buyerEmail);
+        const buyerRegRes = await origFetch(`${baseUrl}/api/auth/signup`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: buyerEmail,
+            password: 'ResilientPass123!',
+            name: 'Resilient Buyer',
+            role: 'buyer',
+            age: 22,
+            signupVerificationToken: buyerProof,
+          }),
+        });
         assert.strictEqual(buyerRegRes.status, 201);
         const buyerRegJson: any = await buyerRegRes.json();
         assert.ok(buyerRegJson.sessionToken);
-        assert.strictEqual(buyerRegJson.user.isVerifiedEmail, false);
+        assert.strictEqual(buyerRegJson.user.isVerifiedEmail, true);
         newBuyerId = buyerRegJson.user.id;
 
         // 1c. Seller registration via /api/auth/register -> 201 + Postgres + Wallet + Admin Alert
         const sellerEmail = `outage_seller_${ts}@shopit.ng`;
+        const sellerProof = await issueSignupVerificationToken(sellerEmail);
         const sellerRegRes = await origFetch(`${baseUrl}/api/auth/register`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -142,6 +160,7 @@ async function main() {
             age: 24,
             shopName: 'Resilient Beads',
             campus: 'UNILAG (Akoka)',
+            signupVerificationToken: sellerProof,
           }),
         });
         assert.strictEqual(sellerRegRes.status, 201);

@@ -1045,6 +1045,50 @@ export const AdminPanel: React.FC = () => {
             </span>
           </div>
         </div>
+
+        {metricsData?.database && (
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
+            <div className="rounded-xl border border-stone-200 bg-stone-50/70 px-3.5 py-2.5 flex items-center justify-between text-xs">
+              <div>
+                <span className="text-[10px] font-bold uppercase text-stone-500 block">Database Host &amp; Tables</span>
+                <span className="font-mono font-bold text-stone-900">{metricsData.database.databaseHost || 'postgres'}</span>
+              </div>
+              <span className="px-2 py-0.5 rounded-full bg-white border border-stone-200 text-[11px] font-black text-stone-800">
+                {metricsData.database.tableCount ?? 0} tables
+              </span>
+            </div>
+
+            <div className={`rounded-xl border px-3.5 py-2.5 flex items-center justify-between text-xs ${
+              (metricsData.database.databaseSizeMb || 0) >= ((metricsData.database.storageLimitMb || 1024) * 0.7)
+                ? 'border-amber-300 bg-amber-50'
+                : 'border-stone-200 bg-stone-50/70'
+            }`}>
+              <div>
+                <span className="text-[10px] font-bold uppercase text-stone-500 block">Postgres Storage Usage</span>
+                <span className="font-black text-stone-900">
+                  {Number(metricsData.database.databaseSizeMb || 0).toFixed(2)} MB / {metricsData.database.storageLimitMb || 1024} MB
+                </span>
+              </div>
+              <span className={`px-2 py-0.5 rounded-full text-[10px] font-black ${
+                (metricsData.database.databaseSizeMb || 0) >= ((metricsData.database.storageLimitMb || 1024) * 0.7)
+                  ? 'bg-amber-600 text-white'
+                  : 'bg-emerald-100 text-emerald-800'
+              }`}>
+                {Math.min(100, Math.round(((metricsData.database.databaseSizeMb || 0) / (metricsData.database.storageLimitMb || 1024)) * 100))}%
+              </span>
+            </div>
+
+            <div className="rounded-xl border border-stone-200 bg-stone-50/70 px-3.5 py-2.5 flex items-center justify-between text-xs">
+              <div>
+                <span className="text-[10px] font-bold uppercase text-stone-500 block">Uploaded File Storage</span>
+                <span className="font-black text-stone-900">
+                  {Number(metricsData.database.fileStorageMb || 0).toFixed(2)} MB ({metricsData.database.fileCount ?? 0} files)
+                </span>
+              </div>
+              <span className="text-[10px] font-bold text-stone-500">25 MB/user cap</span>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* ========================================================= */}

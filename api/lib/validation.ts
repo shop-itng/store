@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { MINOR_SAFETY_RULES } from '../config/minorSafety.js';
 
 export const PROFILE_INTERESTS = [
   'Waist Beads & Jewelry',
@@ -55,12 +56,7 @@ export const DEFAULT_PRIVACY_SETTINGS: PrivacySettings = {
 };
 
 export const UNDER_18_PRIVACY_SETTINGS: PrivacySettings = {
-  profileVisibility: 'public',
-  whoCanFollow: 'approval',
-  whoCanMessage: 'mutual',
-  showFollowersList: false,
-  showFollowingList: false,
-  showLastSeen: false,
+  ...MINOR_SAFETY_RULES.lockedPrivacySettings,
 };
 
 export function rejectUnknownFields(

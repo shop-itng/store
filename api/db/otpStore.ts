@@ -450,9 +450,14 @@ export async function issueSignupVerificationToken(email: string): Promise<strin
 }
 
 /**
- * Atomically consumes and validates a signup verification token before creating a user account.
+ * Validates and consumes a signup verification token inside an existing PostgreSQL transaction
+ * so `shopit_verified_signups` consumption and `shopit_users` creation commit or roll back together.
  */
-export async function consumeSignupVerificationToken(email: string, rawToken: string): Promise<boolean> {
+export async function consumeSignupVerificationTokenInTx(
+  client: any,
+  email: string,
+  rawToken: string
+): Promise<boolean> {
   const cleanEmail = email.trim().toLowerCase();
   if (!rawToken || typeof rawToken !== 'string') return false;
 
@@ -462,28 +467,33 @@ export async function consumeSignupVerificationToken(email: string, rawToken: st
     .update(`${cleanEmail}:${rawToken.trim()}`)
     .digest('hex');
 
-  return withTransaction(async client => {
-    const res = await client.query(
-      'SELECT token_hash, expires_at FROM shopit_verified_signups WHERE email = $1 FOR UPDATE',
-      [cleanEmail]
-    );
-    if (res.rows.length === 0) return false;
+  const res = await client.query(
+    'SELECT token_hash, expires_at FROM shopit_verified_signups WHERE email = $1 FOR UPDATE',
+    [cleanEmail]
+  );
+  if (res.rows.length === 0) return false;
 
-    const row = res.rows[0];
-    if (Date.now() > Number(row.expires_at)) {
-      await client.query('DELETE FROM shopit_verified_signups WHERE email = $1', [cleanEmail]);
-      return false;
-    }
-
-    const storedBuf = Buffer.from(String(row.token_hash));
-    const expectedBuf = Buffer.from(expectedHash);
-    if (storedBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(storedBuf, expectedBuf)) {
-      return false;
-    }
-
+  const row = res.rows[0];
+  if (Date.now() > Number(row.expires_at)) {
     await client.query('DELETE FROM shopit_verified_signups WHERE email = $1', [cleanEmail]);
-    return true;
-  });
+    return false;
+  }
+
+  const storedBuf = Buffer.from(String(row.token_hash));
+  const expectedBuf = Buffer.from(expectedHash);
+  if (storedBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(storedBuf, expectedBuf)) {
+    return false;
+  }
+
+  await client.query('DELETE FROM shopit_verified_signups WHERE email = $1', [cleanEmail]);
+  return true;
+}
+
+/**
+ * Atomically consumes and validates a signup verification token before creating a user account.
+ */
+export async function consumeSignupVerificationToken(email: string, rawToken: string): Promise<boolean> {
+  return withTransaction(client => consumeSignupVerificationTokenInTx(client, email, rawToken));
 }
 
 // -------------------------------------------------------------

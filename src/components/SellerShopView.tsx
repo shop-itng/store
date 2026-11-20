@@ -667,19 +667,29 @@ export const SellerShopView: React.FC<SellerShopViewProps> = ({ slugOrId, onBack
                   </button>
 
                   {hasSellerPresence && (
-                    <button
-                      type="button"
-                      onClick={() =>
-                        void openChat(undefined, {
-                          sellerId: profile.id,
-                          productId: activeProducts[0]?.id,
-                        })
-                      }
-                      className="px-4 py-2.5 rounded-xl bg-[#111111] hover:bg-[#18181B] text-[#9FE870] border-2 border-[#111111] hover:border-[#FF6B00] font-black text-xs flex items-center gap-2 transition-all shadow-[0_2px_0_#FF6B00]"
-                    >
-                      <MessageSquare className="w-4 h-4 text-[#FF6B00]" />
-                      <span>Message Seller</span>
-                    </button>
+                    (profile.isUnder18 || profile.seller?.under18) && activeProducts.length === 0 ? (
+                      <span
+                        title="Under-18 makers can only be messaged from a specific product listing or order."
+                        className="px-4 py-2.5 rounded-xl bg-stone-100 dark:bg-zinc-800 text-stone-500 dark:text-zinc-400 border border-stone-300 dark:border-zinc-700 font-bold text-xs flex items-center gap-2 cursor-not-allowed"
+                      >
+                        <Lock className="w-3.5 h-3.5" />
+                        <span>Message via Product or Order</span>
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          void openChat(undefined, {
+                            sellerId: profile.id,
+                            productId: activeProducts[0]?.id,
+                          })
+                        }
+                        className="px-4 py-2.5 rounded-xl bg-[#111111] hover:bg-[#18181B] text-[#9FE870] border-2 border-[#111111] hover:border-[#FF6B00] font-black text-xs flex items-center gap-2 transition-all shadow-[0_2px_0_#FF6B00]"
+                      >
+                        <MessageSquare className="w-4 h-4 text-[#FF6B00]" />
+                        <span>Message Seller</span>
+                      </button>
+                    )
                   )}
 
                   {currentUser && (

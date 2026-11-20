@@ -641,9 +641,9 @@ async function main() {
     });
 
     // -------------------------------------------------------------------------
-    // TEST 14: POST /auth/register allows unverified signup (201, isVerifiedEmail=false) & writes admin alert
+    // TEST 14: POST /auth/register refuses without valid shopit_verified_signups proof token (403)
     // -------------------------------------------------------------------------
-    await test('14. POST /api/auth/register without signupVerificationToken still saves user (201) and alerts admin', async () => {
+    await test('14. POST /api/auth/register refuses signup without valid OTP proof (403 EMAIL_OTP_REQUIRED)', async () => {
       const unverifiedEmail = `unverified_${ts}@shopit.ng`;
       const res = await origFetch(`${baseUrl}/api/auth/register`, {
         method: 'POST',
@@ -656,13 +656,11 @@ async function main() {
           age: 20,
         }),
       });
-      assert.strictEqual(res.status, 201);
+      assert.strictEqual(res.status, 403);
       const regData: any = await res.json();
-      assert.strictEqual(regData.user.isVerifiedEmail, false);
+      assert.strictEqual(regData.error, 'EMAIL_OTP_REQUIRED');
       const userCheck = await query('SELECT id FROM shopit_users WHERE email = $1', [unverifiedEmail]);
-      assert.strictEqual(userCheck.rows.length, 1);
-      const alertCheck = await query('SELECT alert_key FROM shopit_admin_alerts WHERE user_id = $1', [regData.user.id]);
-      assert.strictEqual(alertCheck.rows.length, 1);
+      assert.strictEqual(userCheck.rows.length, 0);
     });
 
     // -------------------------------------------------------------------------

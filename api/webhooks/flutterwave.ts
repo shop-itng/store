@@ -60,6 +60,12 @@ function timingSafeCompareHash(provided: string, expected: string): boolean {
   return crypto.timingSafeEqual(a, b);
 }
 
+function logWebhookLine(event: string, txRef: string, result: string): void {
+  const safeEvent = String(event || 'unknown').replace(/[\r\n\s]+/g, '_').slice(0, 60);
+  const safeRef = String(txRef || 'none').replace(/[\r\n\s]+/g, '_').slice(0, 100);
+  console.log(`[FLW Webhook] event=${safeEvent} tx_ref=${safeRef} result=${result}`);
+}
+
 /**
  * Handles Flutterwave v3 Webhook events (`charge.completed` and `transfer.completed`).
  * Verifies `verif-hash` header against FLW_WEBHOOK_SECRET_HASH (constant-time)
@@ -83,7 +89,11 @@ export default async function handler(req: any, res: any) {
     return res.end(JSON.stringify({ status: false, message: 'Method Not Allowed' }));
   }
 
+  let logEvent = 'unknown';
+  let logTxRef = 'none';
+
   if (process.env.PAYMENTS_ENABLED !== 'true') {
+    logWebhookLine(logEvent, logTxRef, 'payments-disabled');
     res.setHeader('Content-Type', 'application/json');
     res.statusCode = 503;
     return res.end(
@@ -100,6 +110,7 @@ export default async function handler(req: any, res: any) {
 
   // Fail closed if secret hash or gateway secret key is missing
   if (!webhookSecretHash || !secretKey) {
+    logWebhookLine(logEvent, logTxRef, 'missing-config');
     res.setHeader('Content-Type', 'application/json');
     res.statusCode = 503;
     return res.end(
@@ -113,12 +124,14 @@ export default async function handler(req: any, res: any) {
   try {
     const providedHash = String(req.headers['verif-hash'] || '').trim();
     if (!providedHash) {
+      logWebhookLine(logEvent, logTxRef, 'rejected-signature');
       res.setHeader('Content-Type', 'application/json');
       res.statusCode = 401;
       return res.end(JSON.stringify({ status: false, message: 'Missing verif-hash webhook signature' }));
     }
 
     if (!timingSafeCompareHash(providedHash, webhookSecretHash)) {
+      logWebhookLine(logEvent, logTxRef, 'rejected-signature');
       await logAuditEvent({
         action: 'WEBHOOK_SIGNATURE_REJECTED',
         actor: { id: 'flutterwave_webhook', email: 'webhook@flutterwave', role: 'system' },
@@ -141,14 +154,18 @@ export default async function handler(req: any, res: any) {
     const payload: any = JSON.parse(rawBuffer.toString('utf-8') || '{}');
     const event = String(payload.event || '').trim();
     const data = payload.data || {};
+    logEvent = event || 'unknown';
+    logTxRef = String(data.tx_ref || data.reference || 'none').trim() || 'none';
 
     // 1. Handle Transfer (Payout) Webhook
     if (event === 'transfer.completed') {
       const flwTransferStatus = String(data.status || '').toUpperCase();
       const transferRef = String(data.reference || '').trim();
       const flwTransferId = data.id ? String(data.id) : '';
+      logTxRef = transferRef || flwTransferId || 'none';
 
       if (!transferRef && !flwTransferId) {
+        logWebhookLine(logEvent, logTxRef, 'ignored');
         res.setHeader('Content-Type', 'application/json');
         res.statusCode = 200;
         return res.end(JSON.stringify({ status: true, message: 'Transfer webhook missing reference; acknowledged.' }));
@@ -246,6 +263,17 @@ export default async function handler(req: any, res: any) {
         return { found: true, outcome: flwTransferStatus, reference: payout.reference };
       });
 
+      const tResult = !transferOutcome.found
+        ? 'not-found'
+        : transferOutcome.outcome === 'already_reversed'
+          ? 'duplicate'
+          : transferOutcome.outcome === 'reversed'
+            ? 'payout-reversed'
+            : transferOutcome.outcome === 'success'
+              ? 'accepted'
+              : String(transferOutcome.outcome || 'ignored');
+      logWebhookLine(logEvent, logTxRef, tResult);
+
       await logAuditEvent({
         action: 'PAYOUT_WEBHOOK_PROCESSED',
         actor: { id: 'flutterwave_webhook', email: 'webhook@flutterwave', role: 'system' },
@@ -263,8 +291,10 @@ export default async function handler(req: any, res: any) {
     // 2. Handle Charge Completion Webhook
     const reference = String(data.tx_ref || '').trim();
     const flwTransactionId = data.id ? String(data.id).trim() : '';
+    logTxRef = reference || flwTransactionId || 'none';
 
     if (event !== 'charge.completed' || (!reference && !flwTransactionId)) {
+      logWebhookLine(logEvent, logTxRef, 'ignored');
       res.setHeader('Content-Type', 'application/json');
       res.statusCode = 200;
       return res.end(JSON.stringify({ status: true, message: 'Event ignored or ping acknowledged.' }));
@@ -280,6 +310,7 @@ export default async function handler(req: any, res: any) {
           [String(data.status).toLowerCase(), JSON.stringify({ flwTransactionId, rawStatus: data.status }), reference]
         ).catch(() => {});
       }
+      logWebhookLine(logEvent, logTxRef, 'non-successful');
       res.setHeader('Content-Type', 'application/json');
       res.statusCode = 200;
       return res.end(
@@ -315,12 +346,14 @@ export default async function handler(req: any, res: any) {
     }
 
     if (verifyRes.status >= 500) {
+      logWebhookLine(logEvent, logTxRef, 'upstream-error');
       res.setHeader('Content-Type', 'application/json');
       res.statusCode = 502;
       return res.end(JSON.stringify({ status: false, message: 'Flutterwave verification upstream temporarily unavailable.' }));
     }
 
     if (!verifyRes.ok || verifyData?.status !== 'success' || verifyData?.data?.status !== 'successful') {
+      logWebhookLine(logEvent, logTxRef, 'verify-failed');
       res.setHeader('Content-Type', 'application/json');
       res.statusCode = 400;
       return res.end(
@@ -332,7 +365,9 @@ export default async function handler(req: any, res: any) {
     }
 
     const verifiedRef = String(verifyData.data.tx_ref || reference).trim();
+    logTxRef = verifiedRef || logTxRef;
     if (!verifiedRef || (reference && verifiedRef !== reference)) {
+      logWebhookLine(logEvent, logTxRef, 'tx-ref-mismatch');
       res.setHeader('Content-Type', 'application/json');
       res.statusCode = 400;
       return res.end(JSON.stringify({ status: false, message: 'Verified tx_ref mismatch.' }));
@@ -360,18 +395,21 @@ export default async function handler(req: any, res: any) {
     });
 
     if (!settlement.found) {
+      logWebhookLine(logEvent, logTxRef, 'not-found');
       res.setHeader('Content-Type', 'application/json');
       res.statusCode = 404;
       return res.end(JSON.stringify({ status: false, message: 'Order reference (tx_ref) not found.' }));
     }
 
     if (settlement.currencyMismatch || settlement.amountMismatch) {
+      logWebhookLine(logEvent, logTxRef, settlement.amountMismatch ? 'amount-mismatch' : 'currency-mismatch');
       res.setHeader('Content-Type', 'application/json');
       res.statusCode = 400;
       return res.end(JSON.stringify({ status: false, message: 'Currency or paid amount mismatch.' }));
     }
 
     if (settlement.expired) {
+      logWebhookLine(logEvent, logTxRef, 'expired');
       res.setHeader('Content-Type', 'application/json');
       res.statusCode = 409;
       return res.end(
@@ -404,12 +442,14 @@ export default async function handler(req: any, res: any) {
       });
     }
 
+    logWebhookLine(logEvent, verifiedRef, settlement.alreadyPaid ? 'duplicate' : 'accepted');
     res.setHeader('Content-Type', 'application/json');
     res.statusCode = 200;
     return res.end(
       JSON.stringify({
         status: true,
         alreadyProcessed: settlement.alreadyPaid,
+        duplicate: Boolean(settlement.alreadyPaid),
         reference: verifiedRef,
         flwTransactionId: verifyData.data.id,
         message: settlement.alreadyPaid
@@ -418,6 +458,7 @@ export default async function handler(req: any, res: any) {
       })
     );
   } catch (err: any) {
+    logWebhookLine(logEvent, logTxRef, 'error');
     console.error('[Flutterwave Webhook Error]:', err.message);
     await sendAdminAlert(
       `webhook_err_${Math.floor(Date.now() / 60000)}`,

@@ -11,9 +11,9 @@ import { logAuditEvent } from '../auth/sessionStore.js';
 import {
   ALLOWED_UPLOAD_PURPOSES,
   rejectUnknownFields,
-  validateAndSanitizeUploadFile,
   type UploadFilePurpose,
 } from '../lib/validation.js';
+import { fileStorage, processAndValidateUpload } from '../lib/fileStorage.js';
 
 const router = express.Router();
 
@@ -50,7 +50,8 @@ function isOrderParticipant(orderRow: any, userId: string, sellerId?: string): b
 
 /**
  * POST /api/files/upload
- * Unified persistent PostgreSQL file storage endpoint.
+ * Unified persistent storage endpoint with 4 MB raw limit, sharp image resizing (<=1280px, <400KB),
+ * 2 MB PDF cap, EXIF stripping, and 25 MB per-user storage quota.
  */
 router.post('/files/upload', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
@@ -109,32 +110,37 @@ router.post('/files/upload', requireAuth, async (req: AuthenticatedRequest, res:
       }
     }
 
-    const validated = validateAndSanitizeUploadFile({ dataUrl, fileName, purpose });
+    const validated = await processAndValidateUpload({ dataUrl, fileName, purpose });
     if (!validated.valid) {
-      return res.status(400).json({ status: false, message: validated.message });
+      return res.status(validated.statusCode || 400).json({ status: false, message: validated.message });
+    }
+
+    const usage = await fileStorage.getUserStorageUsage(caller.userId);
+    if (usage.usedBytes + validated.sizeBytes > usage.limitBytes) {
+      return res.status(413).json({
+        status: false,
+        error: 'STORAGE_QUOTA_EXCEEDED',
+        message: 'You have reached the 25 MB account storage limit. Delete old files to upload new ones.',
+        usage,
+      });
     }
 
     const fileId = 'file_' + crypto.randomBytes(12).toString('hex');
     const isPublic = PUBLIC_PURPOSES.has(purpose);
 
-    await dbQuery(
-      `INSERT INTO shopit_files (
-        id, owner_id, purpose, original_name, mime_type, size_bytes, sha256, data_base64, is_public, conversation_id, order_id, created_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())`,
-      [
-        fileId,
-        caller.userId,
-        purpose,
-        validated.cleanName,
-        validated.mimeType,
-        validated.sizeBytes,
-        validated.sha256,
-        validated.base64Data,
-        isPublic,
-        cleanConversationId,
-        cleanOrderId,
-      ]
-    );
+    const saved = await fileStorage.saveFile({
+      id: fileId,
+      ownerId: caller.userId,
+      purpose,
+      originalName: validated.cleanName,
+      mimeType: validated.mimeType,
+      sizeBytes: validated.sizeBytes,
+      sha256: validated.sha256,
+      base64Data: validated.base64Data,
+      isPublic,
+      conversationId: cleanConversationId,
+      orderId: cleanOrderId,
+    });
 
     await logAuditEvent({
       action: 'FILE_UPLOADED',
@@ -156,15 +162,21 @@ router.post('/files/upload', requireAuth, async (req: AuthenticatedRequest, res:
     return res.status(201).json({
       status: true,
       file: {
-        id: fileId,
+        id: saved.id,
         url,
-        originalName: validated.cleanName,
-        mimeType: validated.mimeType,
-        sizeBytes: validated.sizeBytes,
+        originalName: saved.originalName,
+        mimeType: saved.mimeType,
+        sizeBytes: saved.sizeBytes,
         kind: validated.kind,
-        purpose,
-        isPublic,
-        createdAt: new Date().toISOString(),
+        purpose: saved.purpose,
+        isPublic: saved.isPublic,
+        createdAt: saved.createdAt,
+      },
+      usage: {
+        usedBytes: usage.usedBytes + saved.sizeBytes,
+        limitBytes: usage.limitBytes,
+        remainingBytes: Math.max(0, usage.limitBytes - (usage.usedBytes + saved.sizeBytes)),
+        fileCount: usage.fileCount + 1,
       },
     });
   } catch (err: any) {
@@ -175,35 +187,31 @@ router.post('/files/upload', requireAuth, async (req: AuthenticatedRequest, res:
 
 /**
  * GET /api/files/mine
- * Lists metadata of files uploaded by the current authenticated user.
+ * Lists metadata-only rows (never data_base64) + storage quota usage for the current user.
  */
 router.get('/files/mine', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const caller = req.user!;
-    const result = await dbQuery(
-      `SELECT id, purpose, original_name, mime_type, size_bytes, is_public, conversation_id, order_id, created_at
-       FROM shopit_files
-       WHERE owner_id = $1
-       ORDER BY created_at DESC
-       LIMIT 100`,
-      [caller.userId]
-    );
+    const [rows, usage] = await Promise.all([
+      fileStorage.listUserFilesMetadata(caller.userId, 100),
+      fileStorage.getUserStorageUsage(caller.userId),
+    ]);
 
-    const files = result.rows.map((r: any) => ({
+    const files = rows.map(r => ({
       id: r.id,
       url: `/api/files/${r.id}`,
       purpose: r.purpose,
-      originalName: r.original_name,
-      mimeType: r.mime_type,
-      sizeBytes: Number(r.size_bytes || 0),
-      kind: String(r.mime_type || '').startsWith('image/') ? 'image' : 'document',
-      isPublic: Boolean(r.is_public),
-      conversationId: r.conversation_id || undefined,
-      orderId: r.order_id || undefined,
-      createdAt: r.created_at,
+      originalName: r.originalName,
+      mimeType: r.mimeType,
+      sizeBytes: r.sizeBytes,
+      kind: String(r.mimeType || '').startsWith('image/') ? 'image' : 'document',
+      isPublic: r.isPublic,
+      conversationId: r.conversationId,
+      orderId: r.orderId,
+      createdAt: r.createdAt,
     }));
 
-    return res.json({ status: true, files });
+    return res.json({ status: true, files, usage });
   } catch (err: any) {
     return res.status(500).json({ status: false, message: 'Unable to fetch your uploaded files.' });
   }
@@ -211,7 +219,7 @@ router.get('/files/mine', requireAuth, async (req: AuthenticatedRequest, res: Re
 
 /**
  * GET /api/files/:id
- * Serves file binary from PostgreSQL with strict private access enforcement and safe headers.
+ * Serves file binary from storage adapter with strict private access enforcement and safe headers.
  */
 router.get('/files/:id', optionalAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
@@ -220,19 +228,12 @@ router.get('/files/:id', optionalAuth, async (req: AuthenticatedRequest, res: Re
       return res.status(404).json({ status: false, message: 'File not found.' });
     }
 
-    const result = await dbQuery(
-      `SELECT id, owner_id, purpose, original_name, mime_type, size_bytes, data_base64, is_public, conversation_id, order_id
-       FROM shopit_files
-       WHERE id = $1
-       LIMIT 1`,
-      [fileId]
-    );
-    if (result.rows.length === 0) {
+    const row = await fileStorage.getFileById(fileId);
+    if (!row) {
       return res.status(404).json({ status: false, message: 'File not found.' });
     }
 
-    const row = result.rows[0];
-    const mustBeAuthorized = !row.is_public || !PUBLIC_PURPOSES.has(row.purpose);
+    const mustBeAuthorized = !row.isPublic || !PUBLIC_PURPOSES.has(row.purpose);
 
     if (mustBeAuthorized) {
       const caller = req.user;
@@ -240,22 +241,22 @@ router.get('/files/:id', optionalAuth, async (req: AuthenticatedRequest, res: Re
         return res.status(401).json({ status: false, message: 'Sign in required to access this private file.' });
       }
 
-      let authorized = caller.role === 'admin' || row.owner_id === caller.userId;
+      let authorized = caller.role === 'admin' || row.ownerId === caller.userId;
 
-      if (!authorized && row.conversation_id) {
+      if (!authorized && row.conversationId) {
         const convRes = await dbQuery(
           'SELECT buyer_id, seller_id FROM shopit_chat_conversations WHERE id = $1 LIMIT 1',
-          [row.conversation_id]
+          [row.conversationId]
         );
         if (convRes.rows.length > 0 && isConversationParticipant(convRes.rows[0], caller.userId, caller.sellerId)) {
           authorized = true;
         }
       }
 
-      if (!authorized && row.order_id) {
+      if (!authorized && row.orderId) {
         const ordRes = await dbQuery(
           'SELECT buyer_id, items FROM shopit_orders WHERE id = $1 LIMIT 1',
-          [row.order_id]
+          [row.orderId]
         );
         if (ordRes.rows.length > 0 && isOrderParticipant(ordRes.rows[0], caller.userId, caller.sellerId)) {
           authorized = true;
@@ -267,12 +268,12 @@ router.get('/files/:id', optionalAuth, async (req: AuthenticatedRequest, res: Re
       }
     }
 
-    const buf = Buffer.from(String(row.data_base64 || ''), 'base64');
-    const isImage = String(row.mime_type || '').startsWith('image/');
+    const buf = Buffer.from(String(row.dataBase64 || ''), 'base64');
+    const isImage = String(row.mimeType || '').startsWith('image/');
     const forceDownload = req.query.download === '1' || !isImage;
-    const safeFileName = String(row.original_name || 'file').replace(/[^a-zA-Z0-9._-]/g, '_');
+    const safeFileName = String(row.originalName || 'file').replace(/[^a-zA-Z0-9._-]/g, '_');
 
-    res.setHeader('Content-Type', row.mime_type || 'application/octet-stream');
+    res.setHeader('Content-Type', row.mimeType || 'application/octet-stream');
     res.setHeader('Content-Length', String(buf.length));
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader(
@@ -308,7 +309,7 @@ router.delete('/files/:id', requireAuth, async (req: AuthenticatedRequest, res: 
       return res.status(403).json({ status: false, message: 'You can only delete files you uploaded.' });
     }
 
-    await dbQuery('DELETE FROM shopit_files WHERE id = $1', [fileId]);
+    await fileStorage.deleteFile(fileId);
     await logAuditEvent({
       action: 'FILE_DELETED',
       actor: { id: caller.userId, email: caller.email, role: caller.role },
