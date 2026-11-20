@@ -13,7 +13,7 @@ async function runTests() {
   };
   process.on('warning', warningListener);
 
-  const { buildPgPoolConfig, runMigration, verifyDatabaseSchema } = await import('../api/db/postgres.js');
+  const { buildPgPoolConfig, runMigration, verifyDatabaseSchema } = await import('../server/db/postgres.js');
 
   console.log('1. Testing Neon PostgreSQL URL parsing & zero DEP0169 / SECURITY WARNING on pg.Pool...');
   const sampleNeonUrl =
@@ -54,7 +54,7 @@ async function runTests() {
   assert.strictEqual(schemaStatus.ok, true, `Missing core tables: ${schemaStatus.missingTables.join(', ')}`);
 
   const { app } = await import('../api/index.js');
-  const { issueSignupVerificationToken } = await import('../api/db/otpStore.js');
+  const { issueSignupVerificationToken } = await import('../server/db/otpStore.js');
 
   const server = http.createServer(app);
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -435,7 +435,7 @@ async function runTests() {
     });
     assert.strictEqual(freezeRes.status, 200);
 
-    const { query: dbQuery } = await import('../api/db/postgres.js');
+    const { query: dbQuery } = await import('../server/db/postgres.js');
     const walletRow = await dbQuery('SELECT is_frozen, freeze_reason FROM shopit_wallets WHERE seller_id = $1', [userId]);
     assert.strictEqual(walletRow.rows[0].is_frozen, true);
     assert.strictEqual(walletRow.rows[0].freeze_reason, 'Verification freeze test');
@@ -503,7 +503,7 @@ async function runTests() {
     });
 
     // 5. Database audit verification: CORE_SCHEMA_TABLES coverage, index error reporting & migrate env safety
-    const { CORE_SCHEMA_TABLES, applyMigrationIndexes, getPool } = await import('../api/db/postgres.js');
+    const { CORE_SCHEMA_TABLES, applyMigrationIndexes, getPool } = await import('../server/db/postgres.js');
     const requiredCoreTables = [
       'shopit_users',
       'shopit_sellers',

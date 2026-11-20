@@ -21,7 +21,7 @@ import {
   query,
   runMigration,
   verifyDatabaseSchema,
-} from '../api/db/postgres.js';
+} from '../server/db/postgres.js';
 
 function formatSafeDbTarget(): string {
   const dbUrl = getDatabaseUrl();

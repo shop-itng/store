@@ -5,11 +5,11 @@ import path from 'path';
 import { spawnSync } from 'child_process';
 import assert from 'assert';
 import { app } from '../api/index.js';
-import { query, hashPassword, runMigration } from '../api/db/postgres.js';
-import { createSession } from '../api/auth/sessionStore.js';
-import { issueSignupVerificationToken, saveHashedOtp, hashOtp, verifyOtpHash } from '../api/db/otpStore.js';
-import { processUnshippedOrders } from '../api/lib/payments.js';
-import { getKycProvider, IKycProvider } from '../api/lib/kycProvider.js';
+import { query, hashPassword, runMigration } from '../server/db/postgres.js';
+import { createSession } from '../server/auth/sessionStore.js';
+import { issueSignupVerificationToken, saveHashedOtp, hashOtp, verifyOtpHash } from '../server/db/otpStore.js';
+import { processUnshippedOrders } from '../server/lib/payments.js';
+import { getKycProvider, IKycProvider } from '../server/lib/kycProvider.js';
 
 let passed = 0;
 let failed = 0;
@@ -1178,7 +1178,7 @@ async function main() {
         }
       };
 
-      for (const topDir of ['api', 'src', 'scripts']) {
+      for (const topDir of ['api', 'server', 'src', 'scripts']) {
         walk(path.resolve(process.cwd(), topDir));
       }
       for (const rootFile of ['.env.example', 'README.md', 'vercel.json', 'server.ts', 'package.json', 'index.html']) {

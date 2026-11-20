@@ -1,5 +1,5 @@
 import './testEnv.js';
-import { query, runMigration } from '../api/db/postgres.js';
+import { query, runMigration } from '../server/db/postgres.js';
 
 export async function runReadOnlyReconciliation(): Promise<{
   ok: boolean;

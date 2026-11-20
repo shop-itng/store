@@ -7,8 +7,8 @@ process.env.ADMIN_INITIAL_PASSWORD = process.env.ADMIN_INITIAL_PASSWORD || 'Admi
 
 async function runTests() {
   const { app } = await import('../api/index.js');
-  const { query, runMigration } = await import('../api/db/postgres.js');
-  const { issueSignupVerificationToken } = await import('../api/db/otpStore.js');
+  const { query, runMigration } = await import('../server/db/postgres.js');
+  const { issueSignupVerificationToken } = await import('../server/db/otpStore.js');
 
   console.log('=== Testing End-to-End Registration, PostgreSQL Persistence & Admin Panel Users Query ===');
 

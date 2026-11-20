@@ -3,9 +3,9 @@ import http from 'http';
 import crypto from 'crypto';
 import assert from 'assert';
 import { app } from '../api/index.js';
-import { query, hashPassword, runMigration } from '../api/db/postgres.js';
-import { createSession } from '../api/auth/sessionStore.js';
-import { issueSignupVerificationToken } from '../api/db/otpStore.js';
+import { query, hashPassword, runMigration } from '../server/db/postgres.js';
+import { createSession } from '../server/auth/sessionStore.js';
+import { issueSignupVerificationToken } from '../server/db/otpStore.js';
 
 let passed = 0;
 let failed = 0;

@@ -1,7 +1,7 @@
 import express from 'express';
 import crypto from 'crypto';
 import cookieParser from 'cookie-parser';
-import paymentsWebhookHandler from './webhooks/flutterwave.js';
+import paymentsWebhookHandler from '../server/webhooks/flutterwave.js';
 import { renderTransactionalEmail, type EmailTemplateKey } from '../src/utils/transactionalEmails.js';
 import {
   checkRateLimit as checkOtpRateLimit,
@@ -19,7 +19,7 @@ import {
   getAllReportRecords,
   updateReportStatus,
   type ReportRecord,
-} from './db/otpStore.js';
+} from '../server/db/otpStore.js';
 import {
   query as dbQuery,
   withTransaction,
@@ -36,7 +36,7 @@ import {
   DEFAULT_BROADCAST_SETTING,
   DEFAULT_EMERGENCY_CONTROLS,
   DEFAULT_FEE_SETTINGS_DB,
-} from './db/postgres.js';
+} from '../server/db/postgres.js';
 import {
   createSession,
   getSession,
@@ -47,7 +47,7 @@ import {
   clearLoginFailures,
   logAuditEvent,
   SESSION_COOKIE_NAME,
-} from './auth/sessionStore.js';
+} from '../server/auth/sessionStore.js';
 import {
   requireAuth,
   requireAdmin,
@@ -60,7 +60,7 @@ import {
   optionalAuth,
   extractToken,
   type AuthenticatedRequest,
-} from './auth/middleware.js';
+} from '../server/auth/middleware.js';
 import {
   nairaToKobo,
   koboToNaira,
@@ -76,9 +76,9 @@ import {
   processUnshippedOrders,
   runDailyReconciliationCheck,
   restoreOrderStockInTx,
-} from './lib/payments.js';
-import { validateAppSecret, deriveSubKey } from './lib/secrets.js';
-import { getKycProvider } from './lib/kycProvider.js';
+} from '../server/lib/payments.js';
+import { validateAppSecret, deriveSubKey } from '../server/lib/secrets.js';
+import { getKycProvider } from '../server/lib/kycProvider.js';
 import {
   DEFAULT_NOTIFICATION_PREFS,
   DEFAULT_PRIVACY_SETTINGS,
@@ -89,16 +89,16 @@ import {
   rejectUnknownFields,
   sanitizeNotificationPrefs,
   sanitizePrivacySettings,
-} from './lib/validation.js';
-import marketplaceRouter, { processEscrowAutoRelease } from './routes/marketplace.js';
-import profilesRouter from './routes/profiles.js';
-import filesRouter from './routes/files.js';
+} from '../server/lib/validation.js';
+import marketplaceRouter, { processEscrowAutoRelease } from '../server/routes/marketplace.js';
+import profilesRouter from '../server/routes/profiles.js';
+import filesRouter from '../server/routes/files.js';
 import {
   fileStorage,
   NEON_FREE_PLAN_LIMIT_MB,
   DB_STORAGE_ALERT_RATIO,
-} from './lib/fileStorage.js';
-import { MINIMUM_PLATFORM_AGE, isMinorAccount } from './config/minorSafety.js';
+} from '../server/lib/fileStorage.js';
+import { MINIMUM_PLATFORM_AGE, isMinorAccount } from '../server/config/minorSafety.js';
 
 // Fail-closed startup guard: refuse to boot unless APP_SECRET is valid (64+ hex chars)
 validateAppSecret();
@@ -4892,6 +4892,12 @@ app.use('/', router);
 app.use('/api', (_req, res) => {
   return res.status(404).json({ status: false, message: 'Not found' });
 });
+
+export const config = {
+  api: {
+    bodyParser: false,
+  },
+};
 
 export default function handler(req: any, res: any) {
   return app(req, res, () => {

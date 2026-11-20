@@ -1,8 +1,8 @@
 import './testEnv.js';
-import { runMigration, query as dbQuery } from '../api/db/postgres.js';
-import { processEscrowAutoRelease } from '../api/routes/marketplace.js';
-import { hashOtp, saveHashedOtp, getOtpRecord, verifyOtpHash } from '../api/db/otpStore.js';
-import flwWebhookHandler from '../api/webhooks/flutterwave.js';
+import { runMigration, query as dbQuery } from '../server/db/postgres.js';
+import { processEscrowAutoRelease } from '../server/routes/marketplace.js';
+import { hashOtp, saveHashedOtp, getOtpRecord, verifyOtpHash } from '../server/db/otpStore.js';
+import flwWebhookHandler from '../server/webhooks/flutterwave.js';
 
 interface MockResponse {
   statusCode: number;

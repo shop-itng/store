@@ -2,10 +2,10 @@ import './testEnv.js';
 import http from 'http';
 import assert from 'assert';
 import { app } from '../api/index.js';
-import { query, hashPassword, runMigration } from '../api/db/postgres.js';
-import { createSession } from '../api/auth/sessionStore.js';
-import { issueSignupVerificationToken, saveHashedOtp, hashOtp } from '../api/db/otpStore.js';
-import { expireStalePendingOrders } from '../api/lib/payments.js';
+import { query, hashPassword, runMigration } from '../server/db/postgres.js';
+import { createSession } from '../server/auth/sessionStore.js';
+import { issueSignupVerificationToken, saveHashedOtp, hashOtp } from '../server/db/otpStore.js';
+import { expireStalePendingOrders } from '../server/lib/payments.js';
 
 let passed = 0;
 let failed = 0;

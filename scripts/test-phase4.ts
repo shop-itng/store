@@ -1,4 +1,4 @@
-import { query, runMigration, hashPassword } from '../api/db/postgres';
+import { query, runMigration, hashPassword } from '../server/db/postgres';
 
 async function testPhase4() {
   console.log('--- Starting Phase 4 Verification & Product Listing Test ---');

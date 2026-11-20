@@ -4,7 +4,7 @@ import crypto from 'crypto';
 import { loadLocalEnvSafely } from './migrate.js';
 loadLocalEnvSafely();
 
-import { hashPassword, runMigration, withTransaction } from '../api/db/postgres.js';
+import { hashPassword, runMigration, withTransaction } from '../server/db/postgres.js';
 
 export interface ShopItBackupPayload {
   version?: string;

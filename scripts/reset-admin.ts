@@ -1,6 +1,6 @@
 import dotenv from 'dotenv';
-import { getPool, hashPassword } from '../api/db/postgres.js';
-import { clearLoginFailures } from '../api/auth/sessionStore.js';
+import { getPool, hashPassword } from '../server/db/postgres.js';
+import { clearLoginFailures } from '../server/auth/sessionStore.js';
 
 if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL && !process.env.CI) {
   dotenv.config({ override: false });

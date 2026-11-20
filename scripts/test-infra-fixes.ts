@@ -7,9 +7,9 @@ import {
   hashPassword,
   runMigration,
   ensureBootstrapAdminFromEnv,
-} from '../api/db/postgres.js';
-import { createSession } from '../api/auth/sessionStore.js';
-import { issueSignupVerificationToken } from '../api/db/otpStore.js';
+} from '../server/db/postgres.js';
+import { createSession } from '../server/auth/sessionStore.js';
+import { issueSignupVerificationToken } from '../server/db/otpStore.js';
 import { runReadOnlyReconciliation } from './reconcile-ledger.js';
 import { restoreBackupPayload } from './restore-backup.js';
 
