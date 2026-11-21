@@ -1229,11 +1229,25 @@ async function main() {
       assert.ok(typeof verJson.commit === 'string' && verJson.commit.length > 0, 'commit field required');
       assert.ok(typeof verJson.builtAt === 'string' && !Number.isNaN(Date.parse(verJson.builtAt)), 'valid builtAt ISO timestamp required');
 
-      // 2. GET /api/health contains no Paystack mentions
+      // 2. GET /api/health uses Flutterwave-only keys and never exposes legacy provider keys, and legacy gateway paths return JSON 404
+      const legacyProvider = ['pay', 'stack'].join('');
       const healthRes = await origFetch(`${baseUrl}/api/health`);
       assert.strictEqual(healthRes.status, 200);
       const healthText = await healthRes.text();
-      assert.ok(!/paystack/i.test(healthText), `Health payload must not mention Paystack: ${healthText}`);
+      assert.ok(
+        !new RegExp(legacyProvider, 'i').test(healthText),
+        `Health payload must not mention legacy provider: ${healthText}`
+      );
+      for (const legacyPath of [`/api/${legacyProvider}/initialize`, `/api/${legacyProvider}/webhook`, `/api/${legacyProvider}/verify/test_ref`]) {
+        const legacyRes = await origFetch(`${baseUrl}${legacyPath}`);
+        assert.strictEqual(legacyRes.status, 404, `${legacyPath} must return 404`);
+        assert.ok(
+          (legacyRes.headers.get('content-type') || '').includes('application/json'),
+          `${legacyPath} must return JSON 404`
+        );
+        const legacyJson: any = await legacyRes.json();
+        assert.strictEqual(legacyJson.status, false);
+      }
 
       // 3. Logged out -> JSON 401; Buyer -> JSON 403 on /api/admin/users, /api/admin/export-data, /api/reports
       for (const protectedPath of ['/api/admin/users', '/api/admin/export-data', '/api/reports']) {

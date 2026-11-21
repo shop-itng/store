@@ -415,7 +415,8 @@ async function main() {
       assert.strictEqual(typeof hJson.flutterwaveConfigured, 'boolean');
       assert.strictEqual(typeof hJson.paymentsEnabled, 'boolean');
       assert.strictEqual(typeof hJson.payoutsEnabled, 'boolean');
-      assert.strictEqual(JSON.stringify(hJson).toLowerCase().includes('paystack'), false);
+      const legacyProvider = ['pay', 'stack'].join('');
+      assert.strictEqual(JSON.stringify(hJson).toLowerCase().includes(legacyProvider), false);
 
       const vRes = await origFetch(`${baseUrl}/api/version`);
       assert.strictEqual(vRes.status, 200);

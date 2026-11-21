@@ -68,8 +68,7 @@ export const OrdersView: React.FC = () => {
       urlParams.get('payment_ref') ||
       urlParams.get('tx_ref') ||
       urlParams.get('ref') ||
-      urlParams.get('reference') ||
-      urlParams.get('trxref');
+      urlParams.get('reference');
     const transactionId = urlParams.get('transaction_id');
     const trackId = urlParams.get('track') || urlParams.get('trackOrder');
 
