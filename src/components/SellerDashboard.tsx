@@ -31,6 +31,7 @@ import { SellerWalletView } from './SellerWalletView';
 import { SellerVerificationModal } from './SellerVerificationModal';
 import { SellerOnboardingChecklist } from './SellerOnboardingChecklist';
 import { UserIdentityBadge } from './UserIdentityBadge';
+import { OrderProgressTracker } from './OrderProgressTracker';
 
 export const SellerDashboard: React.FC = () => {
   const {
@@ -781,6 +782,9 @@ export const SellerDashboard: React.FC = () => {
                         </div>
                       ))}
                     </div>
+
+                    {/* Visual Stage Progress Tracker */}
+                    <OrderProgressTracker order={order} viewerRole="seller" compact />
 
                     {/* Packaging Proof if uploaded */}
                     {order.packedPhotoUrl && (

@@ -13,6 +13,7 @@ import {
   AlertTriangle,
   Lock,
 } from 'lucide-react';
+import { OrderProgressTracker } from './OrderProgressTracker';
 
 interface Props {
   order: Order | null;
@@ -147,6 +148,9 @@ export const OrderTrackingModal: React.FC<Props> = ({
             <span className="block text-[10px] text-emerald-600 font-bold">Escrow Protected</span>
           </div>
         </div>
+
+        {/* Visual Stage Progress Tracker */}
+        <OrderProgressTracker order={order} viewerRole="buyer" className="border-t-0 pt-0" />
 
         {/* Packed photo preview if available */}
         {order.packedPhotoUrl && (

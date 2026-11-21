@@ -4,6 +4,7 @@
  * Implements the 15 standard platform transactional emails with exact wording,
  * dynamic placeholder interpolation, and the platform signature.
  */
+import { safeStorageGet } from './safeStorage';
 
 export type EmailTemplateKey =
   | 'signup_code'
@@ -323,10 +324,7 @@ export async function sendTransactionalEmail(
   }
 
   const rendered = renderTransactionalEmail(template, data);
-  const token = typeof localStorage !== 'undefined' ? localStorage.getItem('shopit_session_token') : null;
-  if (!token) {
-    return { success: false, error: 'Authentication required to send admin emails' };
-  }
+  const token = safeStorageGet('shopit_session_token');
 
   try {
     if (typeof fetch !== 'undefined') {
@@ -334,8 +332,7 @@ export async function sendTransactionalEmail(
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-          'x-session-token': token,
+          ...(token ? { Authorization: `Bearer ${token}`, 'x-session-token': token } : {}),
         },
         credentials: 'include',
         body: JSON.stringify({

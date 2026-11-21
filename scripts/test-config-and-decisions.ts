@@ -699,6 +699,68 @@ async function main() {
       assert.strictEqual(newPoll.messages[0].id, msg2.message.id);
     });
 
+    // -------------------------------------------------------------------------
+    // TEST 9: Logged-Out Visitor Public Routes, /api/auth/session (200) & Same-Origin CORS
+    // -------------------------------------------------------------------------
+    await test('9. Clean logged-out visitor receives 200 on /api/auth/session & all public routes; same-origin always accepted', async () => {
+      // Unauthenticated /api/auth/session returns 200 { authenticated: false, user: null } (never 401)
+      const anonSession = await origFetch(`${baseUrl}/api/auth/session`);
+      assert.strictEqual(anonSession.status, 200);
+      const anonSessionJson: any = await anonSession.json();
+      assert.strictEqual(anonSessionJson.status, true);
+      assert.strictEqual(anonSessionJson.authenticated, false);
+      assert.strictEqual(anonSessionJson.user, null);
+
+      // Unauthenticated /api/auth/me still enforces 401
+      const anonMe = await origFetch(`${baseUrl}/api/auth/me`);
+      assert.strictEqual(anonMe.status, 401);
+
+      // Same-origin Origin header matching request Host is accepted cleanly
+      const sameOriginRes = await origFetch(`${baseUrl}/api/products`, {
+        headers: { Origin: baseUrl },
+      });
+      assert.strictEqual(sameOriginRes.status, 200);
+      assert.strictEqual(sameOriginRes.headers.get('access-control-allow-origin'), baseUrl);
+
+      // Every public initial-load endpoint responds 200 with zero cookies
+      for (const ep of [
+        '/api/health',
+        '/api/version',
+        '/api/platform/config',
+        '/api/products?limit=20',
+        '/api/sellers',
+        '/api/profiles/discover/suggested?limit=8',
+        '/api/webhooks/flutterwave',
+      ]) {
+        const res = await origFetch(`${baseUrl}${ep}`);
+        assert.strictEqual(res.status, 200, `Expected 200 for ${ep}, got ${res.status}`);
+      }
+
+      // Authenticated /api/auth/session returns 200 authenticated: true + user
+      const authTestEmail = `sess_check_${ts}@shopit.ng`;
+      const regRes = await origFetch(`${baseUrl}/api/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: authTestEmail,
+          password: 'SessionUserPass123!',
+          name: 'Kemi Tester',
+          role: 'buyer',
+          age: 21,
+          signupVerificationToken: await issueSignupVerificationToken(authTestEmail),
+        }),
+      });
+      assert.strictEqual(regRes.status, 201);
+      const regData: any = await regRes.json();
+      const authSessionRes = await origFetch(`${baseUrl}/api/auth/session`, {
+        headers: { Authorization: `Bearer ${regData.sessionToken}` },
+      });
+      assert.strictEqual(authSessionRes.status, 200);
+      const authSessionJson: any = await authSessionRes.json();
+      assert.strictEqual(authSessionJson.authenticated, true);
+      assert.strictEqual(authSessionJson.user.email, authTestEmail);
+    });
+
     console.log(`\n=== CONFIG & DECISIONS TEST SUMMARY: ${passed} passed, ${failed} failed ===`);
     if (failed > 0) process.exit(1);
   } finally {

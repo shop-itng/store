@@ -124,7 +124,28 @@ const APP_URL = (
 ).replace(/\/$/, '');
 
 function normalizeOriginUrl(raw: string): string {
-  return raw.trim().replace(/\/+$/, '');
+  const trimmed = raw.trim().replace(/\/+$/, '');
+  if (!trimmed) return '';
+  try {
+    return new URL(trimmed).origin.toLowerCase();
+  } catch {
+    return trimmed.toLowerCase();
+  }
+}
+
+function getRequestHostOrigin(req?: express.Request): string {
+  if (!req) return '';
+  const hostHeader = String(req.headers['x-forwarded-host'] || req.headers.host || '')
+    .split(',')[0]
+    .trim()
+    .toLowerCase();
+  const protoHeader = String(req.headers['x-forwarded-proto'] || req.protocol || 'https')
+    .split(',')[0]
+    .trim()
+    .toLowerCase();
+  if (!hostHeader) return '';
+  const scheme = protoHeader === 'http' ? 'http' : 'https';
+  return normalizeOriginUrl(`${scheme}://${hostHeader}`);
 }
 
 function getAllowedOrigins(req?: express.Request): string[] {
@@ -139,6 +160,11 @@ function getAllowedOrigins(req?: express.Request): string[] {
     .filter(Boolean);
 
   const sameHostOrigins: string[] = [];
+  const requestHostOrigin = getRequestHostOrigin(req);
+  if (requestHostOrigin) {
+    // Same-origin browser requests to the active host must always be accepted.
+    sameHostOrigins.push(requestHostOrigin);
+  }
   if (req && (!IS_PROD || ngAllowedHosts.length > 0)) {
     const hostHeader = String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim().toLowerCase();
     const protoHeader = String(req.headers['x-forwarded-proto'] || req.protocol || 'https').split(',')[0].trim().toLowerCase();
@@ -148,7 +174,7 @@ function getAllowedOrigins(req?: express.Request): string[] {
         (!IS_PROD && (cleanHost === 'localhost' || cleanHost === '127.0.0.1')) ||
         ngAllowedHosts.includes(cleanHost);
       if (isAllowedDynamicHost) {
-        sameHostOrigins.push(`${protoHeader === 'http' ? 'http' : 'https'}://${hostHeader}`);
+        sameHostOrigins.push(normalizeOriginUrl(`${protoHeader === 'http' ? 'http' : 'https'}://${hostHeader}`));
       }
     }
   }
@@ -193,7 +219,7 @@ app.use((_req, res, next) => {
   res.setHeader('Permissions-Policy', 'camera=(self), microphone=(), geolocation=(self)');
   res.setHeader(
     'Content-Security-Policy',
-    "default-src 'self'; script-src 'self'; frame-src 'self' https://checkout.flutterwave.com https://checkout-v2.flutterwave.com https://*.flutterwave.com; connect-src 'self' https://api.flutterwave.com https://checkout.flutterwave.com https://api.brevo.com https://*.ingest.sentry.io https://*.upstash.io; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline' https:; font-src 'self' data: https:;"
+    "default-src 'self'; script-src 'self'; frame-src 'self' https://checkout.flutterwave.com https://checkout-v2.flutterwave.com https://*.flutterwave.com; connect-src 'self' https://api.flutterwave.com https://checkout.flutterwave.com https://api.brevo.com https://*.ingest.sentry.io https://*.upstash.io https://vitals.vercel-insights.com; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline' https:; font-src 'self' data: https:;"
   );
   next();
 });
@@ -244,7 +270,7 @@ app.use((req, res, next) => {
     return res.status(403).json({ status: false, error: 'CORS_ORIGIN_FORBIDDEN', message: 'Origin not allowed.' });
   }
 
-  // Cookie-based state changes must originate from allowed origins (exempt explicit Bearer/session-token callers)
+  // Cookie-based state changes must originate from allowed/same origins (exempt explicit Bearer/session-token callers)
   if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
     const hasCookieSession = Boolean(req.cookies?.[SESSION_COOKIE_NAME]);
     const hasExplicitTokenHeader = Boolean(req.headers.authorization || req.headers['x-session-token']);
@@ -256,7 +282,11 @@ app.use((req, res, next) => {
         } catch {}
       }
       const effectiveOrigin = originHeader || refererOrigin;
-      if (!effectiveOrigin || !allowedOrigins.includes(effectiveOrigin)) {
+      const secFetchSite = String(req.headers['sec-fetch-site'] || '').trim().toLowerCase();
+      const isTrustedSameOrigin =
+        Boolean(effectiveOrigin && allowedOrigins.includes(effectiveOrigin)) ||
+        (!originHeader && !refererOrigin && secFetchSite === 'same-origin');
+      if (!isTrustedSameOrigin) {
         return res.status(403).json({ status: false, error: 'CSRF_ORIGIN_FORBIDDEN', message: 'Invalid request origin.' });
       }
     }
@@ -1224,94 +1254,139 @@ router.post('/auth/change-email/confirm', requireAuth, async (req: Authenticated
   }
 });
 
+async function loadHydratedUserProfile(userId: string): Promise<{
+  sanitizedUser: any;
+  isVerifiedSeller: boolean;
+  verificationStatus: string;
+} | null> {
+  const result = await dbQuery(
+    `SELECT u.id, u.email, u.name, u.display_name, u.profile_slug, u.avatar_url, u.cover_url, u.bio,
+            u.campus, u.location_area, u.interests, u.notification_prefs, u.privacy_settings, u.last_seen_at,
+            u.role, u.sub_role, u.is_verified_email, u.must_change_password, u.is_banned, u.ban_reason,
+            u.age, u.has_guardian_consent, u.guardian_name, u.created_at, u.last_login_at, u.deleted_at,
+            s.id as seller_id, s.shop_name, s.bio as s_bio, s.campus as s_campus, s.location_area as s_area,
+            s.logo_url as s_logo_url, s.banner_url as s_banner_url, s.is_verified_seller as seller_is_verified,
+            s.verification_status as seller_verification_status,
+            s.verified_legal_name, s.verified_nin_last4, s.verified_at
+     FROM shopit_users u
+     LEFT JOIN shopit_sellers s ON (u.id = s.user_id OR u.id = s.id)
+     WHERE u.id = $1 AND u.deleted_at IS NULL`,
+    [userId]
+  );
+
+  if (result.rows.length === 0) {
+    return null;
+  }
+
+  const row = result.rows[0];
+  const isVerified = Boolean(
+    row.seller_is_verified ||
+      row.seller_verification_status === 'verified' ||
+      row.seller_verification_status === 'approved'
+  );
+  const currentStatus = isVerified ? 'verified' : row.seller_verification_status || 'not_started';
+  const isMinor = row.age !== null && row.age !== undefined && Number(row.age) < 18;
+  const displayName = row.display_name || extractFirstName(row.name || 'Member');
+
+  const sanitizedUser: any = {
+    id: row.id,
+    email: row.email,
+    name: row.name,
+    displayName,
+    profileSlug: row.profile_slug || row.id,
+    avatarUrl: row.avatar_url || row.s_logo_url || undefined,
+    coverUrl: row.cover_url || row.s_banner_url || undefined,
+    bio: row.bio || row.s_bio || '',
+    campus: row.campus || row.s_campus || undefined,
+    locationArea: row.location_area || row.s_area || undefined,
+    interests: Array.isArray(row.interests) ? row.interests : [],
+    notificationPrefs: sanitizeNotificationPrefs(row.notification_prefs, DEFAULT_NOTIFICATION_PREFS),
+    privacySettings: sanitizePrivacySettings(
+      row.privacy_settings,
+      isMinor ? UNDER_18_PRIVACY_SETTINGS : DEFAULT_PRIVACY_SETTINGS,
+      isMinor
+    ),
+    lastSeenAt: row.last_seen_at || row.last_login_at || row.created_at,
+    role: row.role,
+    subRole: row.role === 'admin' ? row.sub_role || undefined : undefined,
+    isVerifiedEmail: Boolean(row.is_verified_email),
+    mustChangePassword: Boolean(row.must_change_password),
+    isVerifiedSeller: isVerified,
+    verificationStatus: currentStatus,
+    isBanned: Boolean(row.is_banned),
+    banReason: row.ban_reason,
+    age: row.age,
+    hasGuardianConsent: Boolean(row.has_guardian_consent),
+    guardianName: row.guardian_name,
+    createdAt: row.created_at,
+    lastLoginAt: row.last_login_at,
+  };
+
+  if (row.role === 'seller' || row.seller_id) {
+    sanitizedUser.sellerProfile = {
+      id: row.seller_id || row.id,
+      shopName: row.shop_name || `${displayName}'s Shop`,
+      ownerName: displayName,
+      verificationStatus: currentStatus,
+      isVerifiedSeller: isVerified,
+      bio: row.s_bio || row.bio || '',
+      campus: row.s_campus || row.campus || 'Lagos Mainland',
+      locationArea: row.s_area || row.location_area || 'Yaba',
+      logoUrl: row.s_logo_url || row.avatar_url || undefined,
+      bannerUrl: row.s_banner_url || row.cover_url || undefined,
+      verifiedLegalName: row.verified_legal_name,
+      verifiedNinLast4: row.verified_nin_last4,
+      verifiedAt: row.verified_at,
+      badges: isVerified ? ['verified'] : [],
+    };
+  }
+
+  return {
+    sanitizedUser,
+    isVerifiedSeller: isVerified,
+    verificationStatus: currentStatus,
+  };
+}
+
+// Public-safe initial session probe (returns 200 authenticated: false for logged-out visitors instead of 401)
+router.get('/auth/session', optionalAuth, async (req: AuthenticatedRequest, res) => {
+  try {
+    if (!req.user?.userId) {
+      return res.json({ status: true, authenticated: false, user: null });
+    }
+    const hydrated = await loadHydratedUserProfile(req.user.userId);
+    if (!hydrated) {
+      return res.json({ status: true, authenticated: false, user: null });
+    }
+    await dbQuery('UPDATE shopit_users SET last_seen_at = NOW() WHERE id = $1', [req.user.userId]).catch(() => {});
+    return res.json({
+      status: true,
+      authenticated: true,
+      user: hydrated.sanitizedUser,
+      isVerifiedSeller: hydrated.isVerifiedSeller,
+      verificationStatus: hydrated.verificationStatus,
+    });
+  } catch (err: any) {
+    console.error('[Auth Session Error]:', err.message);
+    return res.status(500).json({ status: false, message: 'Database error checking session.' });
+  }
+});
+
 // Strict session-only profile hydration (no ?email or ?userId unauthenticated spoofing)
 router.get('/auth/me', requireAuth, async (req: AuthenticatedRequest, res) => {
   try {
     const sessionUser = req.user!;
-    await dbQuery('UPDATE shopit_users SET last_seen_at = NOW() WHERE id = $1', [sessionUser.userId]).catch(() => {});
-    const result = await dbQuery(
-      `SELECT u.id, u.email, u.name, u.display_name, u.profile_slug, u.avatar_url, u.cover_url, u.bio,
-              u.campus, u.location_area, u.interests, u.notification_prefs, u.privacy_settings, u.last_seen_at,
-              u.role, u.sub_role, u.is_verified_email, u.must_change_password, u.is_banned, u.ban_reason,
-              u.age, u.has_guardian_consent, u.guardian_name, u.created_at, u.last_login_at,
-              s.id as seller_id, s.shop_name, s.bio as s_bio, s.campus as s_campus, s.location_area as s_area,
-              s.logo_url as s_logo_url, s.banner_url as s_banner_url, s.is_verified_seller as seller_is_verified,
-              s.verification_status as seller_verification_status,
-              s.verified_legal_name, s.verified_nin_last4, s.verified_at
-       FROM shopit_users u
-       LEFT JOIN shopit_sellers s ON (u.id = s.user_id OR u.id = s.id)
-       WHERE u.id = $1`,
-      [sessionUser.userId]
-    );
-
-    if (result.rows.length === 0) {
+    const hydrated = await loadHydratedUserProfile(sessionUser.userId);
+    if (!hydrated) {
       return res.status(404).json({ status: false, message: 'User not found.' });
     }
-
-    const row = result.rows[0];
-    const isVerified = Boolean(
-      row.seller_is_verified ||
-      row.seller_verification_status === 'verified' ||
-      row.seller_verification_status === 'approved'
-    );
-    const currentStatus = isVerified ? 'verified' : (row.seller_verification_status || 'not_started');
-    const isMinor = row.age !== null && row.age !== undefined && Number(row.age) < 18;
-    const displayName = row.display_name || extractFirstName(row.name || 'Member');
-
-    const sanitizedUser: any = {
-      id: row.id,
-      email: row.email,
-      name: row.name,
-      displayName,
-      profileSlug: row.profile_slug || row.id,
-      avatarUrl: row.avatar_url || row.s_logo_url || undefined,
-      coverUrl: row.cover_url || row.s_banner_url || undefined,
-      bio: row.bio || row.s_bio || '',
-      campus: row.campus || row.s_campus || undefined,
-      locationArea: row.location_area || row.s_area || undefined,
-      interests: Array.isArray(row.interests) ? row.interests : [],
-      notificationPrefs: sanitizeNotificationPrefs(row.notification_prefs, DEFAULT_NOTIFICATION_PREFS),
-      privacySettings: sanitizePrivacySettings(
-        row.privacy_settings,
-        isMinor ? UNDER_18_PRIVACY_SETTINGS : DEFAULT_PRIVACY_SETTINGS,
-        isMinor
-      ),
-      lastSeenAt: row.last_seen_at || row.last_login_at || row.created_at,
-      role: row.role,
-      subRole: row.role === 'admin' ? row.sub_role || undefined : undefined,
-      isVerifiedEmail: Boolean(row.is_verified_email),
-      mustChangePassword: Boolean(row.must_change_password),
-      isVerifiedSeller: isVerified,
-      verificationStatus: currentStatus,
-      isBanned: Boolean(row.is_banned),
-      banReason: row.ban_reason,
-      age: row.age,
-      hasGuardianConsent: Boolean(row.has_guardian_consent),
-      guardianName: row.guardian_name,
-      createdAt: row.created_at,
-      lastLoginAt: row.last_login_at,
-    };
-
-    if (row.role === 'seller' || row.seller_id) {
-      sanitizedUser.sellerProfile = {
-        id: row.seller_id || row.id,
-        shopName: row.shop_name || `${displayName}'s Shop`,
-        ownerName: displayName,
-        verificationStatus: currentStatus,
-        isVerifiedSeller: isVerified,
-        bio: row.s_bio || row.bio || '',
-        campus: row.s_campus || row.campus || 'Lagos Mainland',
-        locationArea: row.s_area || row.location_area || 'Yaba',
-        logoUrl: row.s_logo_url || row.avatar_url || undefined,
-        bannerUrl: row.s_banner_url || row.cover_url || undefined,
-        verifiedLegalName: row.verified_legal_name,
-        verifiedNinLast4: row.verified_nin_last4,
-        verifiedAt: row.verified_at,
-        badges: isVerified ? ['verified'] : [],
-      };
-    }
-
-    return res.json({ status: true, user: sanitizedUser, isVerifiedSeller: isVerified, verificationStatus: currentStatus });
+    await dbQuery('UPDATE shopit_users SET last_seen_at = NOW() WHERE id = $1', [sessionUser.userId]).catch(() => {});
+    return res.json({
+      status: true,
+      user: hydrated.sanitizedUser,
+      isVerifiedSeller: hydrated.isVerifiedSeller,
+      verificationStatus: hydrated.verificationStatus,
+    });
   } catch (err: any) {
     console.error('[Auth Me Error]:', err.message);
     return res.status(500).json({ status: false, message: 'Database error fetching profile.' });

@@ -27,6 +27,7 @@ const PUBLIC_ALLOW_LIST = new Set([
   'POST /auth/send-otp',
   'POST /auth/verify-otp',
   'POST /auth/reset-password',
+  'GET /auth/session',
   'GET /products',
   'GET /products/:id',
   'GET /sellers',

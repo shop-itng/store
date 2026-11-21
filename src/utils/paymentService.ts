@@ -1,4 +1,5 @@
 import { LedgerEntry, PayoutAccount } from '../types';
+import { safeStorageGet } from './safeStorage';
 
 /**
  * Flutterwave v3 Configuration for Shop It
@@ -6,7 +7,7 @@ import { LedgerEntry, PayoutAccount } from '../types';
  * Public key is accessed via import.meta.env.VITE_FLW_PUBLIC_KEY or /api/payments/config.
  */
 function getAuthHeaders(): Record<string, string> {
-  const token = typeof localStorage !== 'undefined' ? localStorage.getItem('shopit_session_token') : null;
+  const token = safeStorageGet('shopit_session_token');
   return token ? { Authorization: `Bearer ${token}`, 'x-session-token': token } : {};
 }
 

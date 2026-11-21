@@ -1,3 +1,5 @@
+import { safeStorageGet } from './safeStorage';
+
 export type UploadPurpose =
   | 'avatar'
   | 'cover'
@@ -20,7 +22,7 @@ export interface UploadedFileResult {
 }
 
 const getUploadAuthHeaders = (): Record<string, string> => {
-  const token = typeof localStorage !== 'undefined' ? localStorage.getItem('shopit_session_token') : null;
+  const token = safeStorageGet('shopit_session_token');
   return {
     'Content-Type': 'application/json',
     ...(token ? { Authorization: `Bearer ${token}`, 'x-session-token': token } : {}),

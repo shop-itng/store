@@ -19,8 +19,11 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     app.use(express.static(path.resolve(__dirname, 'dist')));
-    app.get('*', (_req, res) => {
-      res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
+    app.get('*', (req, res) => {
+      if (req.path.startsWith('/api') || /\.[a-zA-Z0-9]+$/.test(req.path)) {
+        return res.status(404).json({ status: false, message: 'Not found' });
+      }
+      return res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
     });
   }
 

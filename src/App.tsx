@@ -58,6 +58,13 @@ const MarketplaceContent: React.FC = () => {
     selectedProductId,
     activeProfileSlug,
     isCatalogLoading,
+    catalogError,
+    sellersError,
+    isProductDetailLoading,
+    productDetailError,
+    suggestedSellersError,
+    retryMarketplaceLoad,
+    retryProductDetail,
     products,
     filteredProducts,
     searchQuery,
@@ -318,6 +325,30 @@ const MarketplaceContent: React.FC = () => {
                     </button>
                   </div>
                 )
+              ) : isCatalogLoading && products.length === 0 ? (
+                <div className="bg-white dark:bg-[#15161C] rounded-2xl border border-[#E4E4E7] dark:border-[#27272A] p-12 text-center space-y-2">
+                  <Loader2 className="w-7 h-7 animate-spin text-[#FF6B00] mx-auto" />
+                  <p className="text-xs font-bold text-[#71717A] dark:text-[#A1A1AA]">
+                    Loading marketplace crafts...
+                  </p>
+                </div>
+              ) : catalogError && products.length === 0 ? (
+                <div className="bg-white dark:bg-[#15161C] rounded-2xl border border-rose-200 dark:border-rose-900/50 p-10 text-center max-w-md mx-auto space-y-3 shadow-xs">
+                  <ShieldAlert className="w-8 h-8 text-rose-500 mx-auto" />
+                  <h3 className="text-sm font-black text-[#111111] dark:text-white">
+                    Could Not Load Marketplace
+                  </h3>
+                  <p className="text-xs text-[#71717A] dark:text-[#A1A1AA] leading-relaxed">
+                    {catalogError}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => void retryMarketplaceLoad()}
+                    className="px-4 py-2 bg-[#111111] text-[#9FE870] text-xs font-black rounded-xl border border-[#FF6B00]"
+                  >
+                    Retry
+                  </button>
+                </div>
               ) : products.length === 0 ? (
                 /* Ready-Made Fresh Marketplace Launch State (Solid, Human-Made, No gradients) */
                 <div className="bg-white dark:bg-[#15161C] rounded-3xl border-2 border-[#111111] dark:border-[#27272A] p-8 sm:p-12 text-center max-w-xl mx-auto space-y-6 shadow-[0_4px_0_#111111] dark:shadow-none transition-colors">
@@ -395,10 +426,24 @@ const MarketplaceContent: React.FC = () => {
                   </div>
                 </div>
               ) : filteredProducts.length > 0 ? (
-                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3.5 sm:gap-5">
-                  {filteredProducts.map((product, idx) => (
-                    <ProductCard key={product.id} product={product} index={idx} />
-                  ))}
+                <div className="space-y-4">
+                  {catalogError && (
+                    <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-900/50 flex items-center justify-between gap-3 text-xs">
+                      <span className="font-semibold text-rose-700 dark:text-rose-300">{catalogError}</span>
+                      <button
+                        type="button"
+                        onClick={() => void retryMarketplaceLoad()}
+                        className="px-3 py-1.5 rounded-lg bg-[#111111] text-[#9FE870] font-black shrink-0"
+                      >
+                        Retry
+                      </button>
+                    </div>
+                  )}
+                  <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3.5 sm:gap-5">
+                    {filteredProducts.map((product, idx) => (
+                      <ProductCard key={product.id} product={product} index={idx} />
+                    ))}
+                  </div>
                 </div>
               ) : (
                 <div className="bg-white dark:bg-[#15161C] rounded-2xl border border-[#E4E4E7] dark:border-[#27272A] p-10 text-center max-w-md mx-auto space-y-3 shadow-xs">
@@ -454,6 +499,23 @@ const MarketplaceContent: React.FC = () => {
                 </div>
               )}
 
+              {feedTab === 'all' && !searchQuery.trim() && suggestedSellersError && suggestedSellers.length === 0 && (
+                <div className="pt-4">
+                  <div className="p-3 rounded-xl bg-white dark:bg-[#15161C] border border-[#E4E4E7] dark:border-[#27272A] flex items-center justify-between gap-3 text-xs">
+                    <span className="text-[#71717A] dark:text-[#A1A1AA] font-semibold">
+                      {suggestedSellersError}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => void fetchSuggestedSellers(8).then(setSuggestedSellers)}
+                      className="px-3 py-1.5 rounded-lg bg-[#111111] text-[#9FE870] font-black shrink-0"
+                    >
+                      Retry
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {feedTab === 'all' && !searchQuery.trim() && suggestedSellers.length > 0 && (
                 <div className="pt-4 space-y-2.5">
                   <div className="flex items-center justify-between">
@@ -503,8 +565,21 @@ const MarketplaceContent: React.FC = () => {
               )}
             </section>
 
-            {/* Featured Sellers Section: Hides completely when empty (Rule: No fake sellers) */}
-            {sellers.length > 0 && (
+            {/* Featured Sellers Section: Hides when empty, shows retry if API fails */}
+            {sellersError && sellers.length === 0 ? (
+              <section className="pt-6 border-t border-[#E4E4E7] dark:border-[#27272A]">
+                <div className="p-4 rounded-2xl bg-white dark:bg-[#15161C] border border-[#E4E4E7] dark:border-[#27272A] flex items-center justify-between gap-3 text-xs">
+                  <span className="font-semibold text-[#71717A] dark:text-[#A1A1AA]">{sellersError}</span>
+                  <button
+                    type="button"
+                    onClick={() => void retryMarketplaceLoad()}
+                    className="px-3.5 py-1.5 rounded-xl bg-[#111111] text-[#9FE870] font-black shrink-0"
+                  >
+                    Retry
+                  </button>
+                </div>
+              </section>
+            ) : sellers.length > 0 && (
               <section className="pt-6 border-t border-[#E4E4E7] dark:border-[#27272A] space-y-4">
                 <div className="flex items-center justify-between">
                   <div>
@@ -587,8 +662,34 @@ const MarketplaceContent: React.FC = () => {
                 onBack={() => setActiveView('catalog')}
               />
             </div>
-          ) : isCatalogLoading ? (
+          ) : isCatalogLoading || isProductDetailLoading ? (
             <Loading fullPage text="Loading craft details..." />
+          ) : productDetailError && selectedProductId ? (
+            <div className="max-w-md mx-auto px-4 py-16 text-center space-y-4">
+              <div className="w-12 h-12 rounded-2xl bg-rose-50 dark:bg-rose-950/40 text-rose-600 border border-rose-200 dark:border-rose-900/50 flex items-center justify-center mx-auto">
+                <ShieldAlert className="w-6 h-6" />
+              </div>
+              <h2 className="text-lg font-black text-[#111111] dark:text-white">
+                Item Unavailable Right Now
+              </h2>
+              <p className="text-xs text-[#71717A] dark:text-[#A1A1AA]">{productDetailError}</p>
+              <div className="flex items-center justify-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void retryProductDetail(selectedProductId)}
+                  className="px-4 py-2 bg-[#111111] text-[#9FE870] text-xs font-black rounded-xl border border-[#FF6B00]"
+                >
+                  Retry
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveView('catalog')}
+                  className="px-4 py-2 rounded-xl border border-[#E4E4E7] dark:border-[#27272A] text-xs font-bold text-[#111111] dark:text-white"
+                >
+                  Back to Marketplace
+                </button>
+              </div>
+            </div>
           ) : (
             <NotFoundView
               title="Product Listing Not Found"

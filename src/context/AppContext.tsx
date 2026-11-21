@@ -55,9 +55,10 @@ import {
   getDeviceId,
 } from '../utils/emailOtpManager';
 import { sendTransactionalEmail } from '../utils/transactionalEmails';
+import { safeStorageGet, safeStorageSet, safeStorageRemove } from '../utils/safeStorage';
 
 const getAuthHeaders = (extra?: Record<string, string>): Record<string, string> => {
-  const token = typeof localStorage !== 'undefined' ? localStorage.getItem('shopit_session_token') : null;
+  const token = safeStorageGet('shopit_session_token');
   return {
     ...(token ? { Authorization: `Bearer ${token}`, 'x-session-token': token } : {}),
     ...(extra || {}),
@@ -183,10 +184,17 @@ interface AppContextType {
   setUserLocation: (loc: NigerianLocation) => void;
   getDeliveryFee: (sellerLoc?: NigerianLocation) => { fee: number; method: string };
 
-  // Navigation views
+  // Navigation views & load states
   activeView: AppView;
   setActiveView: (view: AppView) => void;
   isCatalogLoading: boolean;
+  catalogError: string | null;
+  sellersError: string | null;
+  isProductDetailLoading: boolean;
+  productDetailError: string | null;
+  suggestedSellersError: string | null;
+  retryMarketplaceLoad: () => Promise<void>;
+  retryProductDetail: (id: string) => Promise<void>;
   selectedProductId: string | null;
   activeProfileSlug: string | null;
   openProduct: (id: string) => void;
@@ -361,14 +369,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   } | null>(null);
 
   const [lowDataMode, setLowDataMode] = useState<boolean>(() => {
-    return localStorage.getItem('shopit_low_data') === 'true';
+    return safeStorageGet('shopit_low_data') === 'true';
   });
 
   const [language, setLanguage] = useState<'en' | 'pidgin'>('en');
 
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     try {
-      const saved = localStorage.getItem('shopit_theme');
+      const saved = safeStorageGet('shopit_theme');
       if (saved === 'dark' || saved === 'light') return saved;
       if (typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches) {
         return 'dark';
@@ -384,7 +392,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     } else {
       root.classList.remove('dark');
     }
-    localStorage.setItem('shopit_theme', theme);
+    safeStorageSet('shopit_theme', theme);
   }, [theme]);
 
   // Checkout & Coupon states
@@ -405,8 +413,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [selectedCity, setSelectedCity] = useState<string>('all');
   const [selectedArea, setSelectedArea] = useState<string>('all');
   const [userLocation, setUserLocation] = useState<NigerianLocation>(() => {
-    const saved = localStorage.getItem('shopit_user_location');
-    return saved ? JSON.parse(saved) : { state: 'Lagos', city: 'Lagos Mainland', area: 'Yaba' };
+    try {
+      const saved = safeStorageGet('shopit_user_location');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed && typeof parsed === 'object' && parsed.state && parsed.city && parsed.area) {
+          return parsed;
+        }
+      }
+    } catch {}
+    return { state: 'Lagos', city: 'Lagos Mainland', area: 'Yaba' };
   });
 
   const getDeliveryFee = (sellerLoc?: NigerianLocation) => {
@@ -456,6 +472,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Navigation states
   const [activeView, _setActiveView] = useState<AppView>(getInitialView);
   const [isCatalogLoading, setIsCatalogLoading] = useState<boolean>(true);
+  const [catalogError, setCatalogError] = useState<string | null>(null);
+  const [sellersError, setSellersError] = useState<string | null>(null);
+  const [isProductDetailLoading, setIsProductDetailLoading] = useState<boolean>(false);
+  const [productDetailError, setProductDetailError] = useState<string | null>(null);
+  const [suggestedSellersError, setSuggestedSellersError] = useState<string | null>(null);
+  const attemptedProductFetchRef = useRef<string | null>(null);
   const [selectedProductId, setSelectedProductId] = useState<string | null>(() => {
     if (typeof window !== 'undefined') {
       return new URLSearchParams(window.location.search).get('product');
@@ -471,15 +493,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   });
 
   const getOrCreateVisitorId = useCallback((): string => {
-    try {
-      const existing = localStorage.getItem('shopit_visitor_id');
-      if (existing) return existing;
-      const created = `vis_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-      localStorage.setItem('shopit_visitor_id', created);
-      return created;
-    } catch {
-      return 'guest';
-    }
+    const existing = safeStorageGet('shopit_visitor_id');
+    if (existing) return existing;
+    const created = `vis_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    safeStorageSet('shopit_visitor_id', created);
+    return created;
   }, []);
 
   const trackActivity = useCallback(
@@ -660,21 +678,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [dbNotifications, setDbNotifications] = useState<DbNotificationItem[]>([]);
 
-  // Hydrate authenticated user strictly from server session (/api/auth/me) on initial mount
+  // Hydrate authenticated user strictly from server session (/api/auth/session) on initial mount
+  // Uses /api/auth/session so logged-out visitors get HTTP 200 { authenticated: false } instead of a spurious 401
   useEffect(() => {
     let active = true;
-    fetch('/api/auth/me', { headers: getAuthHeaders(), credentials: 'include' })
+    fetch('/api/auth/session', { headers: getAuthHeaders(), credentials: 'include' })
       .then(async res => {
         if (!active) return;
-        if (res.status === 401) {
-          localStorage.removeItem('shopit_session_token');
-          setCurrentUser(null);
-          return;
-        }
         if (!res.ok) return;
-        const data = await res.json();
-        if (active && data.status && data.user) {
+        const data = await res.json().catch(() => null);
+        if (!active || !data) return;
+        if (data.status && data.authenticated && data.user) {
           setCurrentUser(data.user);
+        } else {
+          safeStorageRemove('shopit_session_token');
+          setCurrentUser(null);
         }
       })
       .catch(() => {});
@@ -766,6 +784,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // PostgreSQL Single Source of Truth: Fetch public marketplace products/sellers, live platform config, and (for admins) admin data
   const fetchMarketplaceData = useCallback(async () => {
+    setIsCatalogLoading(true);
     try {
       const [prodRes, sellRes] = await Promise.all([
         fetch('/api/products?limit=100', { credentials: 'include' }).catch(() => null),
@@ -774,57 +793,95 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       ]);
 
       if (prodRes && prodRes.ok) {
-        const prodData = await prodRes.json();
-        if (prodData.status && Array.isArray(prodData.products)) {
+        const prodData = await prodRes.json().catch(() => null);
+        if (prodData?.status && Array.isArray(prodData.products)) {
           setProducts(prodData.products);
+          setCatalogError(null);
+        } else {
+          setCatalogError('Unable to load marketplace items right now. Please try again.');
         }
+      } else {
+        setCatalogError('Unable to reach marketplace items right now. Please check your connection and try again.');
       }
 
       if (sellRes && sellRes.ok) {
-        const sellData = await sellRes.json();
-        if (sellData.status && Array.isArray(sellData.sellers)) {
+        const sellData = await sellRes.json().catch(() => null);
+        if (sellData?.status && Array.isArray(sellData.sellers)) {
           setSellers(sellData.sellers);
+          setSellersError(null);
+        } else {
+          setSellersError('Unable to load featured shops right now.');
         }
+      } else {
+        setSellersError('Unable to load featured shops right now.');
       }
 
       await refreshAdminData();
     } catch (err: any) {
       console.warn('[PostgreSQL Sync Warning]:', err.message);
+      setCatalogError('Network error loading marketplace. Please try again.');
     } finally {
       setIsCatalogLoading(false);
     }
   }, [fetchPlatformConfig, refreshAdminData]);
 
+  const retryMarketplaceLoad = useCallback(async () => {
+    await fetchMarketplaceData();
+  }, [fetchMarketplaceData]);
+
+  const loadSingleProduct = useCallback(async (id: string) => {
+    const cleanId = String(id || '').trim();
+    if (!cleanId) return;
+    setIsProductDetailLoading(true);
+    setProductDetailError(null);
+    try {
+      const res = await fetch(`/api/products/${encodeURIComponent(cleanId)}`, { credentials: 'include' });
+      if (res.status === 404) {
+        setProductDetailError(null);
+        return;
+      }
+      if (!res.ok) {
+        setProductDetailError('Unable to load this item right now. Please try again.');
+        return;
+      }
+      const d = await res.json().catch(() => null);
+      if (d?.status && d.product) {
+        setProducts(prev => (prev.some(p => p.id === d.product.id) ? prev : [d.product, ...prev]));
+        setProductDetailError(null);
+      } else {
+        setProductDetailError('Unable to load this item right now. Please try again.');
+      }
+    } catch {
+      setProductDetailError('Network error loading item details. Please try again.');
+    } finally {
+      setIsProductDetailLoading(false);
+    }
+  }, []);
+
+  const retryProductDetail = useCallback(
+    async (id: string) => {
+      attemptedProductFetchRef.current = id;
+      await loadSingleProduct(id);
+    },
+    [loadSingleProduct]
+  );
+
   useEffect(() => {
     fetchMarketplaceData();
   }, [fetchMarketplaceData, currentUser?.id, currentUser?.role]);
 
-  // Direct single-item/seller fetch fallback when deep-linked (?product=... or ?shop=...)
+  // Direct single-item fetch fallback when deep-linked (?product=...)
   useEffect(() => {
-    if (activeView === 'product_detail' && selectedProductId && !products.some(p => p.id === selectedProductId)) {
-      fetch(`/api/products/${encodeURIComponent(selectedProductId)}`, { credentials: 'include' })
-        .then(r => r.json())
-        .then(d => {
-          if (d.status && d.product) {
-            setProducts(prev => (prev.some(p => p.id === d.product.id) ? prev : [d.product, ...prev]));
-          }
-        })
-        .catch(() => {});
+    if (
+      activeView === 'product_detail' &&
+      selectedProductId &&
+      !products.some(p => p.id === selectedProductId) &&
+      attemptedProductFetchRef.current !== selectedProductId
+    ) {
+      attemptedProductFetchRef.current = selectedProductId;
+      void loadSingleProduct(selectedProductId);
     }
-  }, [activeView, selectedProductId, products]);
-
-  useEffect(() => {
-    if ((activeView === 'profile' || activeView === 'seller_shop') && activeProfileSlug && !sellers.some(s => s.id === activeProfileSlug)) {
-      fetch(`/api/sellers/${encodeURIComponent(activeProfileSlug)}`, { credentials: 'include' })
-        .then(r => r.json())
-        .then(d => {
-          if (d.status && d.seller) {
-            setSellers(prev => (prev.some(s => s.id === d.seller.id) ? prev : [d.seller, ...prev]));
-          }
-        })
-        .catch(() => {});
-    }
-  }, [activeView, activeProfileSlug, sellers]);
+  }, [activeView, selectedProductId, products, loadSingleProduct]);
 
   // Keep broadcast & emergency killswitches synchronized across all active visitor sessions
   useEffect(() => {
@@ -1036,7 +1093,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Keep localStorage ONLY for client UI settings
   useEffect(() => {
-    localStorage.setItem('shopit_low_data', String(lowDataMode));
+    safeStorageSet('shopit_low_data', String(lowDataMode));
   }, [lowDataMode]);
 
   // Escrow auto-release is executed authoritatively on the server via /api/cron/daily.
@@ -1110,8 +1167,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const login = (userData: Partial<User> & { sessionToken?: string }) => {
-    if (userData.sessionToken && typeof localStorage !== 'undefined') {
-      localStorage.setItem('shopit_session_token', userData.sessionToken);
+    if (userData.sessionToken) {
+      safeStorageSet('shopit_session_token', userData.sessionToken);
     }
     const newUser: User = {
       id: userData.id || `user_${Date.now()}`,
@@ -1169,7 +1226,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setActiveConversationId(null);
     setPendingChatTarget(null);
     setEditingProduct(null);
-    localStorage.removeItem('shopit_session_token');
+    safeStorageRemove('shopit_session_token');
     setActiveView('catalog');
     notify('Logged out successfully', 'info');
   };
@@ -1387,8 +1444,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return { success: false, error: msg };
       }
 
-      if (regData.sessionToken && typeof localStorage !== 'undefined') {
-        localStorage.setItem('shopit_session_token', regData.sessionToken);
+      if (regData.sessionToken) {
+        safeStorageSet('shopit_session_token', regData.sessionToken);
       }
 
       const serverUser = regData.user;
@@ -1721,7 +1778,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
       if (res.status === 401) {
         setCurrentUser(null);
-        localStorage.removeItem('shopit_session_token');
+        safeStorageRemove('shopit_session_token');
         return;
       }
       if (!res.ok) return;
@@ -3036,8 +3093,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         credentials: 'include',
       });
       const data = await res.json().catch(() => ({}));
-      return res.ok && data.status && Array.isArray(data.sellers) ? data.sellers : [];
+      if (!res.ok || !data.status) {
+        setSuggestedSellersError('Unable to load suggested shops right now.');
+        return [];
+      }
+      setSuggestedSellersError(null);
+      return Array.isArray(data.sellers) ? data.sellers : [];
     } catch {
+      setSuggestedSellersError('Unable to load suggested shops right now.');
       return [];
     }
   }, []);
@@ -3924,6 +3987,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const openProduct = (id: string) => {
     setSelectedProductId(id);
+    setProductDetailError(null);
     _setActiveView('product_detail');
     if (typeof window !== 'undefined') {
       const targetSearch = `?product=${encodeURIComponent(id)}`;
@@ -3933,14 +3997,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
     const prod = products.find(p => p.id === id);
     if (!prod) {
-      fetch(`/api/products/${encodeURIComponent(id)}`, { credentials: 'include' })
-        .then(r => r.json())
-        .then(d => {
-          if (d.status && d.product) {
-            setProducts(prev => (prev.some(p => p.id === d.product.id) ? prev : [d.product, ...prev]));
-          }
-        })
-        .catch(() => {});
+      attemptedProductFetchRef.current = id;
+      void loadSingleProduct(id);
     }
     trackActivity('PRODUCT_VIEWED', {
       targetType: 'product',
@@ -4075,8 +4133,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         notify(data.message || 'Failed to verify email change code.', 'error');
         return { status: false, message: data.message };
       }
-      if (data.sessionToken && typeof localStorage !== 'undefined') {
-        localStorage.setItem('shopit_session_token', data.sessionToken);
+      if (data.sessionToken) {
+        safeStorageSet('shopit_session_token', data.sessionToken);
       }
       if (data.email) {
         setCurrentUser(prev => (prev ? { ...prev, email: data.email } : prev));
@@ -4130,7 +4188,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         notify(data.message || 'Could not delete account.', 'error');
         return { status: false, message: data.message };
       }
-      localStorage.removeItem('shopit_session_token');
+      safeStorageRemove('shopit_session_token');
       setCurrentUser(null);
       setOrders([]);
       setCart([]);
@@ -4354,6 +4412,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         activeView,
         setActiveView,
         isCatalogLoading,
+        catalogError,
+        sellersError,
+        isProductDetailLoading,
+        productDetailError,
+        suggestedSellersError,
+        retryMarketplaceLoad,
+        retryProductDetail,
         selectedProductId,
         activeProfileSlug,
         openProduct,

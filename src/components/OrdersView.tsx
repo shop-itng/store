@@ -23,6 +23,7 @@ import {
 } from 'lucide-react';
 import { EscrowReceiptModal } from './EscrowReceiptModal';
 import { OrderTrackingModal } from './OrderTrackingModal';
+import { OrderProgressTracker } from './OrderProgressTracker';
 
 export const OrdersView: React.FC = () => {
   const {
@@ -283,96 +284,8 @@ export const OrdersView: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Tracking Progress Steps */}
-                {order.status !== 'cancelled' && order.status !== 'disputed' && (
-                  <div className="py-2">
-                    <div className="grid grid-cols-4 gap-2 text-center text-[11px]">
-                      {/* Step 1: Paid */}
-                      <div className="space-y-1">
-                        <div className="w-6 h-6 rounded-full bg-slate-900 dark:bg-stone-700 text-white flex items-center justify-center mx-auto text-xs font-bold">
-                          ✓
-                        </div>
-                        <span className="font-semibold text-slate-900 dark:text-white block">Paid</span>
-                        <span className="text-[10px] text-slate-400 dark:text-[#71717A]">Escrow held</span>
-                      </div>
-
-                      {/* Step 2: Packed */}
-                      <div className="space-y-1">
-                        <div
-                          className={`w-6 h-6 rounded-full flex items-center justify-center mx-auto text-xs font-bold ${
-                            order.status !== 'paid'
-                              ? 'bg-slate-900 dark:bg-stone-700 text-white'
-                              : 'bg-slate-100 dark:bg-[#1E2028] text-slate-400 dark:text-[#71717A]'
-                          }`}
-                        >
-                          {order.status !== 'paid' ? '✓' : '2'}
-                        </div>
-                        <span
-                          className={`block ${
-                            order.status !== 'paid' ? 'font-semibold text-slate-900 dark:text-white' : 'text-slate-400 dark:text-[#71717A]'
-                          }`}
-                        >
-                          Packed
-                        </span>
-                        <span className="text-[10px] text-slate-400 dark:text-[#71717A]">Photo verified</span>
-                      </div>
-
-                      {/* Step 3: Shipped */}
-                      <div className="space-y-1">
-                        <div
-                          className={`w-6 h-6 rounded-full flex items-center justify-center mx-auto text-xs font-bold ${
-                            order.status === 'shipped' ||
-                            order.status === 'delivered' ||
-                            order.status === 'completed'
-                              ? 'bg-slate-900 dark:bg-stone-700 text-white'
-                              : 'bg-slate-100 dark:bg-[#1E2028] text-slate-400 dark:text-[#71717A]'
-                          }`}
-                        >
-                          {order.status === 'shipped' ||
-                          order.status === 'delivered' ||
-                          order.status === 'completed'
-                            ? '✓'
-                            : '3'}
-                        </div>
-                        <span
-                          className={`block ${
-                            order.status === 'shipped' ||
-                            order.status === 'delivered' ||
-                            order.status === 'completed'
-                              ? 'font-semibold text-slate-900 dark:text-white'
-                              : 'text-slate-400 dark:text-[#71717A]'
-                          }`}
-                        >
-                          Shipped
-                        </span>
-                        <span className="text-[10px] text-slate-400 dark:text-[#71717A]">Campus rider</span>
-                      </div>
-
-                      {/* Step 4: Delivered */}
-                      <div className="space-y-1">
-                        <div
-                          className={`w-6 h-6 rounded-full flex items-center justify-center mx-auto text-xs font-bold ${
-                            order.status === 'delivered' || order.status === 'completed'
-                              ? 'bg-emerald-600 text-white'
-                              : 'bg-slate-100 dark:bg-[#1E2028] text-slate-400 dark:text-[#71717A]'
-                          }`}
-                        >
-                          {order.status === 'completed' ? '✓' : '4'}
-                        </div>
-                        <span
-                          className={`block ${
-                            order.status === 'delivered' || order.status === 'completed'
-                              ? 'font-semibold text-emerald-800 dark:text-[#9FE870]'
-                              : 'text-slate-400 dark:text-[#71717A]'
-                          }`}
-                        >
-                          Delivered
-                        </span>
-                        <span className="text-[10px] text-slate-400 dark:text-[#71717A]">Confirm craft</span>
-                      </div>
-                    </div>
-                  </div>
-                )}
+                {/* Live Order Progress Tracker (Placed -> Escrow Held -> Pickup Ready -> Completed) */}
+                <OrderProgressTracker order={order} viewerRole="buyer" />
 
                 {/* Handshake PIN for Campus Handover (Phase 4) */}
                 {order.status !== 'cancelled' && order.status !== 'completed' && (
