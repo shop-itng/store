@@ -4,7 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import { spawnSync } from 'child_process';
 import assert from 'assert';
-import { app } from '../api/index.js';
+import { app } from '../server/app.js';
 import { query, hashPassword, runMigration } from '../server/db/postgres.js';
 import { createSession } from '../server/auth/sessionStore.js';
 import { issueSignupVerificationToken, saveHashedOtp, hashOtp, verifyOtpHash } from '../server/db/otpStore.js';
@@ -983,28 +983,43 @@ async function main() {
     // Cron Idempotency (10x), Vercel Hobby Cron Limits, Zero Legacy Vars
     // -------------------------------------------------------------------------
 
-    await test('CR1: Server refuses to start without a valid 64+ hex APP_SECRET', async () => {
+    await test('CR1: Server refuses to start without a valid 64+ hex APP_SECRET and lists exact reasons without leaking value', async () => {
       const tsxBin = path.resolve(process.cwd(), 'node_modules', '.bin', 'tsx');
       const envMissing = { ...process.env };
       delete envMissing.APP_SECRET;
-      const missingRes = spawnSync(tsxBin, ['api/index.ts'], {
+      const missingRes = spawnSync(tsxBin, ['server/app.ts'], {
         env: envMissing,
         encoding: 'utf8',
         timeout: 15000,
       });
+      const missingOut = `${missingRes.stderr}${missingRes.stdout}`;
       assert.notStrictEqual(missingRes.status, 0, 'Server must exit non-zero when APP_SECRET is missing');
-      assert.ok(
-        `${missingRes.stderr}${missingRes.stdout}`.includes('APP_SECRET'),
-        'Failure output should clearly identify missing APP_SECRET'
-      );
+      assert.ok(missingOut.includes('APP_SECRET'), 'Failure output should identify APP_SECRET');
+      assert.ok(missingOut.toLowerCase().includes('not set'), 'Failure output should explain APP_SECRET is not set');
 
-      const envShort = { ...process.env, APP_SECRET: 'short_not_64_hex_chars' };
-      const shortRes = spawnSync(tsxBin, ['api/index.ts'], {
+      const shortHex = 'abcd'.repeat(8); // 32 valid hex chars (too short)
+      const envShort = { ...process.env, APP_SECRET: shortHex };
+      const shortRes = spawnSync(tsxBin, ['server/app.ts'], {
         env: envShort,
         encoding: 'utf8',
         timeout: 15000,
       });
+      const shortOut = `${shortRes.stderr}${shortRes.stdout}`;
       assert.notStrictEqual(shortRes.status, 0, 'Server must exit non-zero when APP_SECRET is < 64 hex chars');
+      assert.ok(shortOut.toLowerCase().includes('length'), 'Failure output should cite length reason');
+      assert.ok(!shortOut.includes(shortHex), 'Failure output must NEVER print APP_SECRET value');
+
+      const nonHexSecret = 'z'.repeat(64);
+      const envNonHex = { ...process.env, APP_SECRET: nonHexSecret };
+      const nonHexRes = spawnSync(tsxBin, ['server/app.ts'], {
+        env: envNonHex,
+        encoding: 'utf8',
+        timeout: 15000,
+      });
+      const nonHexOut = `${nonHexRes.stderr}${nonHexRes.stdout}`;
+      assert.notStrictEqual(nonHexRes.status, 0, 'Server must exit non-zero when APP_SECRET contains non-hex chars');
+      assert.ok(nonHexOut.toLowerCase().includes('non-hex'), 'Failure output should cite non-hex reason');
+      assert.ok(!nonHexOut.includes('zzzzzz'), 'Failure output must NEVER print APP_SECRET characters');
     });
 
     await test('CR2: Two OTPs for the same code produce different stored hashes (random per-record salt + HKDF)', async () => {

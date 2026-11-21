@@ -1,7 +1,7 @@
 import './testEnv.js';
 import http from 'http';
 import assert from 'assert';
-import { app } from '../api/index.js';
+import { app } from '../server/app.js';
 import { query, hashPassword, runMigration } from '../server/db/postgres.js';
 import { createSession } from '../server/auth/sessionStore.js';
 import { issueSignupVerificationToken, saveHashedOtp, hashOtp } from '../server/db/otpStore.js';

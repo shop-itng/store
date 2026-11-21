@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { app } from '../api/index.js';
+import { app } from '../server/app.js';
 import http from 'http';
 
 async function runTests() {

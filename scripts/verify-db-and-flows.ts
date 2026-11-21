@@ -53,7 +53,7 @@ async function runTests() {
   const schemaStatus = await verifyDatabaseSchema();
   assert.strictEqual(schemaStatus.ok, true, `Missing core tables: ${schemaStatus.missingTables.join(', ')}`);
 
-  const { app } = await import('../api/index.js');
+  const { app } = await import('../server/app.js');
   const { issueSignupVerificationToken } = await import('../server/db/otpStore.js');
 
   const server = http.createServer(app);

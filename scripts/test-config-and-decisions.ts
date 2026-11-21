@@ -2,7 +2,7 @@ import './testEnv.js';
 import http from 'http';
 import assert from 'assert';
 import sharp from 'sharp';
-import { app } from '../api/index.js';
+import { app } from '../server/app.js';
 import { query, runMigration } from '../server/db/postgres.js';
 import { fileStorage, PER_USER_STORAGE_LIMIT_BYTES } from '../server/lib/fileStorage.js';
 import { issueSignupVerificationToken } from '../server/db/otpStore.js';

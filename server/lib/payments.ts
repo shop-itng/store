@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import { query as dbQuery, withTransaction } from '../db/postgres.js';
 import { deriveSubKey } from './secrets.js';
-import { renderTransactionalEmail } from '../../src/utils/transactionalEmails.js';
+import { renderTransactionalEmail } from '../../shared/transactionalEmails.js';
 
 export function nairaToKobo(naira: number | string): number {
   const num = typeof naira === 'string' ? parseFloat(naira) : naira;

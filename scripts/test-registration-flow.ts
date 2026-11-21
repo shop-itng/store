@@ -6,7 +6,7 @@ process.env.ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'admin_reg_test@shopit.ng';
 process.env.ADMIN_INITIAL_PASSWORD = process.env.ADMIN_INITIAL_PASSWORD || 'AdminRegPass123!';
 
 async function runTests() {
-  const { app } = await import('../api/index.js');
+  const { app } = await import('../server/app.js');
   const { query, runMigration } = await import('../server/db/postgres.js');
   const { issueSignupVerificationToken } = await import('../server/db/otpStore.js');
 

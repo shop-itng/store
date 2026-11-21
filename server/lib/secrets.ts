@@ -10,12 +10,27 @@ const derivedKeyCache = new Map<string, Buffer>();
  * Refuses to start (throws) if missing or invalid. Never logs APP_SECRET or auto-generates runtime keys.
  */
 export function validateAppSecret(): void {
-  const raw = (process.env.APP_SECRET || '').trim();
-  if (!/^[0-9a-fA-F]{64,}$/.test(raw)) {
+  const envVal = process.env.APP_SECRET;
+  const raw = typeof envVal === 'string' ? envVal.trim() : '';
+  const reasons: string[] = [];
+
+  if (!raw) {
+    reasons.push('not set (or empty)');
+  } else {
+    if (raw.length < 64) {
+      reasons.push(`invalid length (${raw.length} chars; minimum 64 characters required)`);
+    }
+    if (/[^0-9a-fA-F]/.test(raw)) {
+      reasons.push('contains non-hex characters (expected only 0-9, a-f, A-F)');
+    }
+  }
+
+  if (reasons.length > 0) {
     throw new Error(
-      '[SECURITY FATAL] APP_SECRET environment variable must be configured with at least 64 hexadecimal characters (e.g. `openssl rand -hex 32`). Refusing to boot.'
+      `[SECURITY FATAL] Invalid APP_SECRET (${reasons.join('; ')}). Generate one with \`openssl rand -hex 32\`. Refusing to boot.`
     );
   }
+
   if (cachedMasterHex !== raw) {
     cachedMasterHex = raw;
     derivedKeyCache.clear();

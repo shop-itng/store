@@ -1,5 +1,5 @@
 import './testEnv.js';
-import { app } from '../api/index.js';
+import { app } from '../server/app.js';
 
 interface DiscoveredRoute {
   method: string;

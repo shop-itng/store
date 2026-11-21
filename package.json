@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "APP_SECRET=${APP_SECRET:-$(node -e \"process.stdout.write(require('crypto').randomBytes(32).toString('hex'))\")} tsx server.ts",
     "start": "tsx server.ts",
-    "build": "vite build",
+    "build": "vite build && node scripts/build-api.mjs && node scripts/smoke-test-api.mjs",
+    "build:api": "node scripts/build-api.mjs && node scripts/smoke-test-api.mjs",
     "migrate": "tsx scripts/migrate.ts",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
@@ -21,6 +22,7 @@
     "@vitejs/plugin-react": "^6.1.1",
     "cookie-parser": "^1.4.7",
     "dotenv": "^17.2.3",
+    "esbuild": "^0.28.2",
     "express": "^4.21.2",
     "lucide-react": "^0.546.0",
     "pg": "^8.23.1",
