@@ -44,6 +44,9 @@ export const SellerDashboard: React.FC = () => {
     toggleVacationMode,
     openProduct,
     orders,
+    isOrdersLoading,
+    ordersError,
+    refreshOrders,
     wallets,
     verificationRequests,
     submitVerificationRequest,
@@ -710,7 +713,28 @@ export const SellerDashboard: React.FC = () => {
             </span>
           </div>
 
-          {sellerOrders.length > 0 ? (
+          {ordersError && (
+            <div className="p-4 bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-800 rounded-xl text-xs text-rose-800 dark:text-rose-200 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+                <span>{ordersError}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => void refreshOrders()}
+                className="px-3 py-1.5 rounded-lg bg-white dark:bg-[#15161C] border border-rose-300 dark:border-rose-700 font-bold shrink-0"
+              >
+                Retry
+              </button>
+            </div>
+          )}
+
+          {isOrdersLoading && sellerOrders.length === 0 ? (
+            <div className="bg-white dark:bg-[#15161C] rounded-2xl border border-slate-200 dark:border-[#27272A] p-5 space-y-4 animate-pulse">
+              <div className="h-4 w-44 rounded bg-slate-200 dark:bg-[#27272A]" />
+              <OrderProgressTracker isLoading compact />
+            </div>
+          ) : sellerOrders.length > 0 ? (
             <div className="space-y-4">
               {sellerOrders.map(order => {
                 const myItems = order.items.filter(i => i.sellerId === currentSeller.id);

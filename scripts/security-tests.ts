@@ -994,8 +994,10 @@ async function main() {
       });
       const missingOut = `${missingRes.stderr}${missingRes.stdout}`;
       assert.notStrictEqual(missingRes.status, 0, 'Server must exit non-zero when APP_SECRET is missing');
-      assert.ok(missingOut.includes('APP_SECRET'), 'Failure output should identify APP_SECRET');
-      assert.ok(missingOut.toLowerCase().includes('not set'), 'Failure output should explain APP_SECRET is not set');
+      assert.ok(
+        missingOut.includes('APP_SECRET invalid: length 0 (need 64), non-hex: no, set: no'),
+        `Unexpected missing error: ${missingOut}`
+      );
 
       const shortHex = 'abcd'.repeat(8); // 32 valid hex chars (too short)
       const envShort = { ...process.env, APP_SECRET: shortHex };
@@ -1006,7 +1008,10 @@ async function main() {
       });
       const shortOut = `${shortRes.stderr}${shortRes.stdout}`;
       assert.notStrictEqual(shortRes.status, 0, 'Server must exit non-zero when APP_SECRET is < 64 hex chars');
-      assert.ok(shortOut.toLowerCase().includes('length'), 'Failure output should cite length reason');
+      assert.ok(
+        shortOut.includes('APP_SECRET invalid: length 32 (need 64), non-hex: no, set: yes'),
+        `Unexpected short error: ${shortOut}`
+      );
       assert.ok(!shortOut.includes(shortHex), 'Failure output must NEVER print APP_SECRET value');
 
       const nonHexSecret = 'z'.repeat(64);
@@ -1018,7 +1023,10 @@ async function main() {
       });
       const nonHexOut = `${nonHexRes.stderr}${nonHexRes.stdout}`;
       assert.notStrictEqual(nonHexRes.status, 0, 'Server must exit non-zero when APP_SECRET contains non-hex chars');
-      assert.ok(nonHexOut.toLowerCase().includes('non-hex'), 'Failure output should cite non-hex reason');
+      assert.ok(
+        nonHexOut.includes('APP_SECRET invalid: length 64 (need 64), non-hex: yes, set: yes'),
+        `Unexpected non-hex error: ${nonHexOut}`
+      );
       assert.ok(!nonHexOut.includes('zzzzzz'), 'Failure output must NEVER print APP_SECRET characters');
     });
 

@@ -12,22 +12,13 @@ const derivedKeyCache = new Map<string, Buffer>();
 export function validateAppSecret(): void {
   const envVal = process.env.APP_SECRET;
   const raw = typeof envVal === 'string' ? envVal.trim() : '';
-  const reasons: string[] = [];
+  const isSet = raw.length > 0;
+  const hasNonHex = isSet && /[^0-9a-fA-F]/.test(raw);
+  const isLengthValid = raw.length >= 64;
 
-  if (!raw) {
-    reasons.push('not set (or empty)');
-  } else {
-    if (raw.length < 64) {
-      reasons.push(`invalid length (${raw.length} chars; minimum 64 characters required)`);
-    }
-    if (/[^0-9a-fA-F]/.test(raw)) {
-      reasons.push('contains non-hex characters (expected only 0-9, a-f, A-F)');
-    }
-  }
-
-  if (reasons.length > 0) {
+  if (!isSet || !isLengthValid || hasNonHex) {
     throw new Error(
-      `[SECURITY FATAL] Invalid APP_SECRET (${reasons.join('; ')}). Generate one with \`openssl rand -hex 32\`. Refusing to boot.`
+      `[SECURITY FATAL] APP_SECRET invalid: length ${raw.length} (need 64), non-hex: ${hasNonHex ? 'yes' : 'no'}, set: ${isSet ? 'yes' : 'no'}. Refusing to boot.`
     );
   }
 

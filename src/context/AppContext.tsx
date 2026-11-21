@@ -216,6 +216,9 @@ interface AppContextType {
 
   // Orders & Escrow
   orders: Order[];
+  isOrdersLoading: boolean;
+  ordersError: string | null;
+  refreshOrders: () => Promise<void>;
   updateOrderStatus: (
     orderId: string,
     status: OrderStatus,
@@ -356,6 +359,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [wishlist, setWishlist] = useState<string[]>([]);
   const [cart, setCart] = useState<CartItem[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
+  const [isOrdersLoading, setIsOrdersLoading] = useState<boolean>(false);
+  const [ordersError, setOrdersError] = useState<string | null>(null);
   const [wallets, setWallets] = useState<Record<string, SellerWallet>>({});
   const [ledgerEntries, setLedgerEntries] = useState<LedgerEntry[]>([]);
   const [paymentWebhooks] = useState<PaymentWebhookEvent[]>([]);
@@ -900,6 +905,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const refreshFinancials = useCallback(async () => {
     if (!currentUser?.id) return;
+    setIsOrdersLoading(true);
+    setOrdersError(null);
     try {
       const headers = getAuthHeaders();
       const [ordRes, walRes] = await Promise.all([
@@ -908,14 +915,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           ? fetch('/api/wallet', { headers, credentials: 'include' }).catch(() => null)
           : Promise.resolve(null),
       ]);
-      if (ordRes && ordRes.ok) {
-        const ordData = await ordRes.json();
-        if (ordData.status && Array.isArray(ordData.orders)) {
+      if (!ordRes) {
+        setOrdersError('Could not connect to load your orders. Check your network and try again.');
+      } else {
+        const ordData = await ordRes.json().catch(() => ({}));
+        if (!ordRes.ok || !ordData.status || !Array.isArray(ordData.orders)) {
+          setOrdersError(ordData.message || `Failed to load orders (HTTP ${ordRes.status}).`);
+        } else {
           setOrders(ordData.orders);
+          setOrdersError(null);
         }
       }
       if (walRes && walRes.ok) {
-        const walData = await walRes.json();
+        const walData = await walRes.json().catch(() => ({}));
         if (walData.status && walData.wallet) {
           setWallets(prev => ({ ...prev, [currentUser.id]: walData.wallet }));
           if (Array.isArray(walData.wallet.ledger)) {
@@ -923,7 +935,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           }
         }
       }
-    } catch {}
+    } catch {
+      setOrdersError('Could not load your orders right now. Please try again.');
+    } finally {
+      setIsOrdersLoading(false);
+    }
   }, [currentUser?.id, currentUser?.role]);
 
   const refreshConversations = useCallback(async () => {
@@ -1213,6 +1229,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }).catch(() => {});
     setCurrentUser(null);
     setOrders([]);
+    setIsOrdersLoading(false);
+    setOrdersError(null);
     setCart([]);
     setWishlist([]);
     setWallets({});
@@ -4191,6 +4209,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       safeStorageRemove('shopit_session_token');
       setCurrentUser(null);
       setOrders([]);
+      setIsOrdersLoading(false);
+      setOrdersError(null);
       setCart([]);
       setWishlist([]);
       setConversations([]);
@@ -4434,6 +4454,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         clearCart,
         cartCount,
         orders,
+        isOrdersLoading,
+        ordersError,
+        refreshOrders: refreshFinancials,
         updateOrderStatus,
         confirmItemReceived,
         cancelOrder,

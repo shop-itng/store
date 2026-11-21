@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { Order, OrderStatus } from '../types';
 import { formatNaira } from '../utils/pricing';
+import { safeStorageGet } from '../utils/safeStorage';
 import {
   Package,
   Clock,
@@ -28,6 +29,9 @@ import { OrderProgressTracker } from './OrderProgressTracker';
 export const OrdersView: React.FC = () => {
   const {
     orders,
+    isOrdersLoading,
+    ordersError,
+    refreshOrders,
     confirmItemReceived,
     cancelOrder,
     openDispute,
@@ -55,6 +59,7 @@ export const OrdersView: React.FC = () => {
     amount?: number;
     orderId?: string;
   } | null>(null);
+  const [paymentVerifyError, setPaymentVerifyError] = useState<string | null>(null);
 
   React.useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -69,7 +74,7 @@ export const OrdersView: React.FC = () => {
     const trackId = urlParams.get('track') || urlParams.get('trackOrder');
 
     if (ref) {
-      const token = typeof localStorage !== 'undefined' ? localStorage.getItem('shopit_session_token') : null;
+      const token = safeStorageGet('shopit_session_token');
       const query = transactionId ? `?transaction_id=${encodeURIComponent(transactionId)}` : '';
       fetch(`/api/payments/verify/${encodeURIComponent(ref)}${query}`, {
         headers: token ? { Authorization: `Bearer ${token}`, 'x-session-token': token } : {},
@@ -78,17 +83,24 @@ export const OrdersView: React.FC = () => {
         .then(res => res.json())
         .then(data => {
           if (data.isPaid === true) {
+            setPaymentVerifyError(null);
             setVerifiedPaymentBanner({
               reference: ref,
               amount: data.amountNaira,
               orderId: data.orderId,
             });
-            notify('Payment confirmed via Flutterwave! Order verified and funds held in Escrow.', 'success');
+            void refreshOrders();
+            notify('Payment confirmed via Flutterwave! Order verified.', 'success');
           } else if (data.expired) {
+            setPaymentVerifyError('Your 30-minute checkout window expired before payment settled.');
             notify('Your 30-minute checkout window expired before payment settled. If you were debited, contact support with your reference.', 'error');
+          } else if (data.message) {
+            setPaymentVerifyError(data.message);
           }
         })
-        .catch(() => {});
+        .catch(() => {
+          setPaymentVerifyError('Could not verify payment return reference right now. Please refresh your orders.');
+        });
     }
 
     if (trackId) {
@@ -243,8 +255,80 @@ export const OrdersView: React.FC = () => {
         </div>
       )}
 
+      {paymentVerifyError && (
+        <div className="bg-amber-50 dark:bg-amber-950/30 border border-amber-300 dark:border-amber-800 rounded-2xl p-4 flex items-center justify-between gap-3 text-xs text-amber-900 dark:text-amber-200">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+            <span>{paymentVerifyError}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setPaymentVerifyError(null);
+              void refreshOrders();
+            }}
+            className="px-3 py-1.5 rounded-lg bg-white dark:bg-[#15161C] border border-amber-300 dark:border-amber-700 font-bold shrink-0"
+          >
+            Refresh Orders
+          </button>
+        </div>
+      )}
+
+      {ordersError && orders.length > 0 && (
+        <div className="bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-800 rounded-2xl p-4 flex items-center justify-between gap-3 text-xs text-rose-800 dark:text-rose-200">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+            <span>{ordersError}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => void refreshOrders()}
+            className="px-3 py-1.5 rounded-lg bg-white dark:bg-[#15161C] border border-rose-300 dark:border-rose-700 font-bold shrink-0"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
       {/* Orders List */}
-      {filteredOrders.length > 0 ? (
+      {isOrdersLoading && orders.length === 0 ? (
+        <div className="space-y-4">
+          {[0, 1].map(idx => (
+            <div
+              key={idx}
+              className="bg-white dark:bg-[#15161C] rounded-2xl border border-slate-200 dark:border-[#27272A] p-5 sm:p-6 space-y-4 animate-pulse"
+            >
+              <div className="flex items-center justify-between border-b border-slate-100 dark:border-[#27272A] pb-3">
+                <div className="h-3.5 w-36 rounded bg-slate-200 dark:bg-[#27272A]" />
+                <div className="h-5 w-24 rounded bg-slate-200 dark:bg-[#27272A]" />
+              </div>
+              <OrderProgressTracker isLoading />
+              <div className="flex items-center gap-3 pt-1">
+                <div className="w-16 h-16 rounded-xl bg-slate-200 dark:bg-[#27272A]" />
+                <div className="space-y-2 flex-1">
+                  <div className="h-3.5 w-48 rounded bg-slate-200 dark:bg-[#27272A]" />
+                  <div className="h-3 w-32 rounded bg-slate-200 dark:bg-[#27272A]" />
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : ordersError && orders.length === 0 ? (
+        <div className="bg-white dark:bg-[#15161C] rounded-2xl border border-rose-200 dark:border-rose-900/60 p-8 sm:p-10 text-center max-w-md mx-auto space-y-4">
+          <AlertTriangle className="w-10 h-10 text-rose-500 mx-auto" />
+          <div className="space-y-1">
+            <h2 className="text-base font-bold text-slate-900 dark:text-white">Could not load your orders</h2>
+            <p className="text-xs text-slate-600 dark:text-[#A1A1AA]">{ordersError}</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => void refreshOrders()}
+            className="px-5 py-2.5 bg-[#FF6B00] text-[#111111] border-2 border-[#111111] text-xs font-black rounded-xl hover:bg-[#ff7a1a] transition-colors"
+          >
+            Try Again
+          </button>
+        </div>
+      ) : filteredOrders.length > 0 ? (
         <div className="space-y-6">
           {filteredOrders.map((order, idx) => {
             const badge = getStatusBadge(order.status);
@@ -618,12 +702,15 @@ export const OrdersView: React.FC = () => {
         onClose={() => setSelectedReceiptOrder(null)}
       />
 
-      {/* Live Order Tracking Timeline Modal (Part 2 Item 6) */}
+      {/* Live Order Tracking Timeline Modal */}
       <OrderTrackingModal
-        order={trackingOrder}
+        order={trackingOrder ? (orders.find(o => o.id === trackingOrder.id) || trackingOrder) : null}
         onClose={() => setTrackingOrder(null)}
         onConfirmReceived={confirmItemReceived}
         onReportIssue={openReportProblemModal}
+        isLoading={isOrdersLoading}
+        error={ordersError}
+        onRetry={() => void refreshOrders()}
       />
     </div>
   );

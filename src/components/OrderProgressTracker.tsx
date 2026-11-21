@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 
 interface OrderProgressTrackerProps {
-  order: Pick<
+  order?: Pick<
     Order,
     | 'id'
     | 'status'
@@ -27,9 +27,12 @@ interface OrderProgressTrackerProps {
     | 'pickupPoint'
     | 'disputeReason'
     | 'packedPhotoUrl'
-  >;
+  > | null;
   viewerRole?: 'buyer' | 'seller';
   compact?: boolean;
+  isLoading?: boolean;
+  error?: string | null;
+  onRetry?: () => void;
   className?: string;
 }
 
@@ -55,7 +58,7 @@ function formatShortTime(iso?: string): string | undefined {
 
 function resolveProgressState(
   status: OrderStatus,
-  order: OrderProgressTrackerProps['order'],
+  order: NonNullable<OrderProgressTrackerProps['order']>,
   viewerRole: 'buyer' | 'seller'
 ) {
   const pickupTarget = order.safeMeetingSpotName || order.pickupPoint || order.deliveryArea || 'Safe Spot';
@@ -216,8 +219,67 @@ export const OrderProgressTracker: React.FC<OrderProgressTrackerProps> = ({
   order,
   viewerRole = 'buyer',
   compact = false,
+  isLoading = false,
+  error = null,
+  onRetry,
   className = '',
 }) => {
+  if (isLoading && !order) {
+    return (
+      <section
+        aria-label="Loading order progress"
+        className={`py-3 border-y border-slate-100 dark:border-[#27272A] space-y-3 animate-pulse ${className}`}
+      >
+        <div className="flex items-center justify-between">
+          <div className="h-3.5 w-44 rounded bg-slate-200 dark:bg-[#27272A]" />
+          <div className="h-3 w-16 rounded bg-slate-200 dark:bg-[#27272A]" />
+        </div>
+        <div className="grid grid-cols-4 gap-2 pt-1">
+          {[0, 1, 2, 3].map(idx => (
+            <div key={idx} className="flex flex-col items-center gap-2">
+              <div className="w-8 h-8 rounded-full bg-slate-200 dark:bg-[#27272A]" />
+              <div className="h-2.5 w-14 rounded bg-slate-200 dark:bg-[#27272A]" />
+            </div>
+          ))}
+        </div>
+      </section>
+    );
+  }
+
+  if (error && !order) {
+    return (
+      <section
+        aria-label="Order progress error"
+        className={`py-3 px-3 rounded-xl border border-rose-200 dark:border-rose-900/60 bg-rose-50 dark:bg-rose-950/20 flex items-center justify-between gap-3 text-xs ${className}`}
+      >
+        <div className="flex items-center gap-2 text-rose-800 dark:text-rose-300">
+          <AlertTriangle className="w-4 h-4 shrink-0" />
+          <span>{error}</span>
+        </div>
+        {onRetry && (
+          <button
+            type="button"
+            onClick={onRetry}
+            className="px-2.5 py-1 rounded-lg bg-white dark:bg-[#15161C] border border-rose-300 dark:border-rose-800 text-rose-800 dark:text-rose-300 font-bold hover:bg-rose-100 shrink-0"
+          >
+            Retry
+          </button>
+        )}
+      </section>
+    );
+  }
+
+  if (!order || !order.status) {
+    return (
+      <section
+        aria-label="Order progress unavailable"
+        className={`py-3 border-y border-slate-100 dark:border-[#27272A] text-xs text-slate-500 dark:text-[#A1A1AA] ${className}`}
+      >
+        No order status available from the server yet.
+      </section>
+    );
+  }
+
   const state = resolveProgressState(order.status, order, viewerRole);
   const { stages, completedThroughIndex, activeIndex, progressPercent, headline, detail, isHalted } =
     state;

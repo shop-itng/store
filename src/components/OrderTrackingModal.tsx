@@ -20,6 +20,9 @@ interface Props {
   onClose: () => void;
   onConfirmReceived?: (orderId: string) => void;
   onReportIssue?: (orderId: string) => void;
+  isLoading?: boolean;
+  error?: string | null;
+  onRetry?: () => void;
 }
 
 export const OrderTrackingModal: React.FC<Props> = ({
@@ -27,6 +30,9 @@ export const OrderTrackingModal: React.FC<Props> = ({
   onClose,
   onConfirmReceived,
   onReportIssue,
+  isLoading = false,
+  error = null,
+  onRetry,
 }) => {
   if (!order) return null;
 
@@ -150,7 +156,14 @@ export const OrderTrackingModal: React.FC<Props> = ({
         </div>
 
         {/* Visual Stage Progress Tracker */}
-        <OrderProgressTracker order={order} viewerRole="buyer" className="border-t-0 pt-0" />
+        <OrderProgressTracker
+          order={order}
+          viewerRole="buyer"
+          isLoading={isLoading}
+          error={error}
+          onRetry={onRetry}
+          className="border-t-0 pt-0"
+        />
 
         {/* Packed photo preview if available */}
         {order.packedPhotoUrl && (
