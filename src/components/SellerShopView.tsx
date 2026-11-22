@@ -5,6 +5,7 @@ import { ProductCard } from './ProductCard';
 import { ShareButtons } from './ShareButtons';
 import { ReportModal, ReportTarget } from './ReportModal';
 import { EditProfileModal } from './EditProfileModal';
+import { ProfileQrCode } from './ProfileQrCode';
 import { UserIdentityBadge } from './UserIdentityBadge';
 import { getProfileUrl, formatMemberSince, formatLastSeen } from '../utils/profileConstants';
 import { formatNaira } from '../utils/pricing';
@@ -42,6 +43,8 @@ import {
   Bell,
   BellOff,
   Search,
+  QrCode,
+  Truck,
 } from 'lucide-react';
 import { FollowRequestItem, FollowListUser } from '../types';
 
@@ -85,6 +88,8 @@ export const SellerShopView: React.FC<SellerShopViewProps> = ({ slugOrId, onBack
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<ProfileTab>('products');
   const [isEditOpen, setIsEditOpen] = useState(false);
+  const [editFocusField, setEditFocusField] = useState<string | null>(null);
+  const [qrModalOpen, setQrModalOpen] = useState(false);
   const [reportTarget, setReportTarget] = useState<ReportTarget | null>(null);
   const [coverError, setCoverError] = useState(false);
   const [avatarError, setAvatarError] = useState(false);
@@ -133,6 +138,13 @@ export const SellerShopView: React.FC<SellerShopViewProps> = ({ slugOrId, onBack
       setProfile(data.profile);
       setIsOwner(Boolean(data.isOwner));
       setIsRestricted(Boolean(data.isRestricted));
+      if (data.redirectedFromSlug && data.profile.profileSlug && typeof window !== 'undefined') {
+        window.history.replaceState(
+          { view: 'profile', profileSlug: data.profile.profileSlug },
+          '',
+          `/?profile=${encodeURIComponent(data.profile.profileSlug)}`
+        );
+      }
       if (!data.isOwner) {
         setActiveTab(prev =>
           prev === 'drafts' || prev === 'saved' || prev === 'orders' ? 'products' : prev
@@ -546,6 +558,12 @@ export const SellerShopView: React.FC<SellerShopViewProps> = ({ slugOrId, onBack
                   ))}
                 </div>
 
+                {profile.tagline && (
+                  <p className="text-xs sm:text-sm font-medium text-[#52525B] dark:text-[#D4D4D8] mt-1">
+                    {profile.tagline}
+                  </p>
+                )}
+
                 {subtitleShop && (
                   <p className="text-xs font-bold text-[#FF6B00] mt-0.5 flex items-center gap-1">
                     <Store className="w-3.5 h-3.5" />
@@ -553,22 +571,38 @@ export const SellerShopView: React.FC<SellerShopViewProps> = ({ slugOrId, onBack
                   </p>
                 )}
 
-                <div className="flex flex-wrap items-center gap-2 text-xs text-[#71717A] dark:text-[#A1A1AA] mt-1.5">
-                  {(profile.campus || profile.locationArea) && (
-                    <span className="flex items-center gap-1 font-semibold text-[#111111] dark:text-slate-200">
-                      <MapPin className="w-3.5 h-3.5 text-[#FF6B00]" />
-                      <span>{[profile.campus, profile.locationArea].filter(Boolean).join(' · ')}</span>
-                    </span>
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-[#71717A] dark:text-[#A1A1AA] mt-1.5">
+                  {(profile.locationState || profile.campus || profile.locationArea) && (
+                    <>
+                      <span className="flex items-center gap-1 font-semibold text-[#111111] dark:text-slate-200">
+                        <MapPin className="w-3.5 h-3.5 text-[#FF6B00]" />
+                        <span>
+                          {[profile.locationState, profile.campus, profile.locationArea]
+                            .filter(Boolean)
+                            .join(' · ')}
+                        </span>
+                      </span>
+                      <span aria-hidden="true">·</span>
+                    </>
                   )}
                   <span className="flex items-center gap-1">
                     <Calendar className="w-3.5 h-3.5" />
                     <span>Member since {formatMemberSince(profile.memberSince)}</span>
                   </span>
+                  {profile.languages && profile.languages.length > 0 && (
+                    <>
+                      <span aria-hidden="true">·</span>
+                      <span>Speaks {profile.languages.join(', ')}</span>
+                    </>
+                  )}
                   {lastSeenLabel && (
-                    <span className="flex items-center gap-1 text-emerald-700 dark:text-[#9FE870] font-medium">
-                      <Clock className="w-3.5 h-3.5" />
-                      <span>{lastSeenLabel}</span>
-                    </span>
+                    <>
+                      <span aria-hidden="true">·</span>
+                      <span className="flex items-center gap-1 text-emerald-700 dark:text-[#9FE870] font-medium">
+                        <Clock className="w-3.5 h-3.5" />
+                        <span>{lastSeenLabel}</span>
+                      </span>
+                    </>
                   )}
                 </div>
               </div>
@@ -580,8 +614,11 @@ export const SellerShopView: React.FC<SellerShopViewProps> = ({ slugOrId, onBack
                 <>
                   <button
                     type="button"
-                    onClick={() => setIsEditOpen(true)}
-                    className="px-3.5 py-2 rounded-xl bg-[#FF6B00] hover:bg-[#E55E00] text-[#111111] border-2 border-[#111111] font-black text-xs flex items-center gap-1.5 shadow-[0_2px_0_#111111]"
+                    onClick={() => {
+                      setEditFocusField(null);
+                      setIsEditOpen(true);
+                    }}
+                    className="min-h-[44px] px-3.5 py-2 rounded-xl bg-[#FF6B00] hover:bg-[#E55E00] text-[#111111] border-2 border-[#111111] font-black text-xs flex items-center gap-1.5 shadow-[0_2px_0_#111111]"
                   >
                     <Edit3 className="w-3.5 h-3.5" />
                     <span>Edit Profile</span>
@@ -772,13 +809,23 @@ export const SellerShopView: React.FC<SellerShopViewProps> = ({ slugOrId, onBack
 
           {/* Share & Report Row */}
           <div className="mt-5 pt-4 border-t border-[#E4E4E7] dark:border-[#27272A] flex flex-wrap items-center justify-between gap-3">
-            <ShareButtons
-              title={`${primaryTitle} on Shop It`}
-              sellerShopName={subtitleShop || primaryTitle}
-              campus={profile.campus}
-              imageUrl={coverSrc || avatarSrc || undefined}
-              url={canonicalUrl}
-            />
+            <div className="flex flex-wrap items-center gap-2.5">
+              <ShareButtons
+                title={`${primaryTitle} on Shop It`}
+                sellerShopName={subtitleShop || primaryTitle}
+                campus={profile.campus}
+                imageUrl={coverSrc || avatarSrc || undefined}
+                url={canonicalUrl}
+              />
+              <button
+                type="button"
+                onClick={() => setQrModalOpen(true)}
+                className="min-h-[44px] px-3.5 py-2 rounded-xl bg-[#FAFAFA] dark:bg-[#1E2028] hover:border-[#FF6B00] border border-[#E4E4E7] dark:border-[#27272A] text-xs font-bold text-[#111111] dark:text-white inline-flex items-center gap-1.5 transition-colors whitespace-nowrap"
+              >
+                <QrCode className="w-3.5 h-3.5 text-[#FF6B00]" />
+                <span>QR Code</span>
+              </button>
+            </div>
 
             {!isOwner && (
               <div className="flex items-center gap-4 ml-auto">
@@ -826,8 +873,11 @@ export const SellerShopView: React.FC<SellerShopViewProps> = ({ slugOrId, onBack
             </div>
             <button
               type="button"
-              onClick={() => setIsEditOpen(true)}
-              className="text-xs font-black text-[#FF6B00] hover:underline shrink-0"
+              onClick={() => {
+                setEditFocusField(null);
+                setIsEditOpen(true);
+              }}
+              className="min-h-[44px] text-xs font-black text-[#FF6B00] hover:underline shrink-0"
             >
               Finish Profile &rarr;
             </button>
@@ -844,8 +894,15 @@ export const SellerShopView: React.FC<SellerShopViewProps> = ({ slugOrId, onBack
                 key={item.key}
                 type="button"
                 disabled={item.done}
-                onClick={() => setIsEditOpen(true)}
-                className={`flex items-center gap-2 px-3 py-2 rounded-xl border text-left text-xs ${
+                onClick={() => {
+                  if (item.targetField === 'firstProduct') {
+                    openQuickListModal();
+                  } else {
+                    setEditFocusField(item.targetField || null);
+                    setIsEditOpen(true);
+                  }
+                }}
+                className={`min-h-[44px] flex items-center gap-2 px-3 py-2 rounded-xl border text-left text-xs ${
                   item.done
                     ? 'border-emerald-200 dark:border-emerald-900/50 bg-emerald-50/50 dark:bg-emerald-950/20 text-emerald-800 dark:text-emerald-300'
                     : 'border-[#E4E4E7] dark:border-[#27272A] bg-[#FAFAFA] dark:bg-[#1E2028] text-[#111111] dark:text-white hover:border-[#FF6B00]'
@@ -984,40 +1041,121 @@ export const SellerShopView: React.FC<SellerShopViewProps> = ({ slugOrId, onBack
           {/* Tab 2: About */}
           {activeTab === 'about' && (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-              <div className="bg-white dark:bg-[#15161C] rounded-2xl border border-[#E4E4E7] dark:border-[#27272A] p-5 space-y-3">
-                <h3 className="text-sm font-black text-[#111111] dark:text-white">About {primaryTitle}</h3>
-                <p className="text-xs text-[#52525B] dark:text-[#D4D4D8] leading-relaxed">
-                  {profile.bio || profile.seller?.bio || 'No bio added yet.'}
-                </p>
+              <div className="bg-white dark:bg-[#15161C] rounded-2xl border border-[#E4E4E7] dark:border-[#27272A] p-5 space-y-4">
+                <div>
+                  <h3 className="text-sm font-black text-[#111111] dark:text-white">About {primaryTitle}</h3>
+                  {profile.tagline && (
+                    <p className="text-xs font-semibold text-[#FF6B00] mt-0.5">{profile.tagline}</p>
+                  )}
+                  <p className="text-xs text-[#52525B] dark:text-[#D4D4D8] leading-relaxed mt-2">
+                    {profile.bio || profile.seller?.bio || 'No bio added yet.'}
+                  </p>
+                </div>
+
                 {profile.seller?.bio && profile.bio && profile.seller.bio !== profile.bio && (
                   <div className="pt-3 border-t border-[#E4E4E7] dark:border-[#27272A]">
-                    <span className="text-[11px] font-bold text-[#71717A] uppercase block mb-1">Shop Description</span>
-                    <p className="text-xs text-[#52525B] dark:text-[#D4D4D8]">{profile.seller.bio}</p>
+                    <span className="text-xs font-bold text-[#111111] dark:text-white block mb-1">
+                      Shop Summary
+                    </span>
+                    <p className="text-xs text-[#52525B] dark:text-[#D4D4D8] leading-relaxed">
+                      {profile.seller.bio}
+                    </p>
+                  </div>
+                )}
+
+                {profile.seller?.shopStory && (
+                  <div className="pt-3 border-t border-[#E4E4E7] dark:border-[#27272A]">
+                    <span className="text-xs font-bold text-[#111111] dark:text-white block mb-1">
+                      Shop Story · About My Craft
+                    </span>
+                    <p className="text-xs text-[#52525B] dark:text-[#D4D4D8] leading-relaxed whitespace-pre-line">
+                      {profile.seller.shopStory}
+                    </p>
+                  </div>
+                )}
+
+                {profile.seller?.craftMaterials && (
+                  <div className="pt-3 border-t border-[#E4E4E7] dark:border-[#27272A]">
+                    <span className="text-xs font-bold text-[#111111] dark:text-white block mb-1">
+                      What I Make &amp; Materials Used
+                    </span>
+                    <p className="text-xs text-[#52525B] dark:text-[#D4D4D8] leading-relaxed">
+                      {profile.seller.craftMaterials}
+                    </p>
                   </div>
                 )}
               </div>
 
-              <div className="bg-white dark:bg-[#15161C] rounded-2xl border border-[#E4E4E7] dark:border-[#27272A] p-5 space-y-3">
-                <h3 className="text-sm font-black text-[#111111] dark:text-white">Craft Interests & Details</h3>
-                {profile.interests && profile.interests.length > 0 ? (
-                  <div className="flex flex-wrap gap-2">
-                    {profile.interests.map(tag => (
-                      <span
-                        key={tag}
-                        className="px-3 py-1 rounded-xl bg-[#111111] text-[#9FE870] border border-[#FF6B00] text-[11px] font-bold"
-                      >
-                        {tag}
-                      </span>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="text-xs text-[#71717A] dark:text-[#A1A1AA]">No craft interests selected yet.</p>
-                )}
-                <div className="pt-3 border-t border-[#E4E4E7] dark:border-[#27272A] text-xs space-y-1 text-[#52525B] dark:text-[#A1A1AA]">
-                  <div><strong>Campus:</strong> {profile.campus || 'Not set'}</div>
-                  <div><strong>Public Area:</strong> {profile.locationArea || 'Not set'}</div>
-                  <div><strong>Joined:</strong> {formatMemberSince(profile.memberSince)}</div>
+              <div className="bg-white dark:bg-[#15161C] rounded-2xl border border-[#E4E4E7] dark:border-[#27272A] p-5 space-y-4">
+                <div>
+                  <h3 className="text-sm font-black text-[#111111] dark:text-white">
+                    Interests, Languages &amp; Details
+                  </h3>
+                  {profile.interests && profile.interests.length > 0 ? (
+                    <p className="text-xs font-medium text-[#111111] dark:text-slate-200 mt-2">
+                      {profile.interests.join(' · ')}
+                    </p>
+                  ) : (
+                    <p className="text-xs text-[#71717A] dark:text-[#A1A1AA] mt-2">
+                      No craft interests selected yet.
+                    </p>
+                  )}
                 </div>
+
+                <div className="pt-3 border-t border-[#E4E4E7] dark:border-[#27272A] text-xs space-y-1.5 text-[#52525B] dark:text-[#A1A1AA]">
+                  <div>
+                    <strong className="text-[#111111] dark:text-white">Location: </strong>
+                    {[profile.locationState, profile.campus, profile.locationArea]
+                      .filter(Boolean)
+                      .join(' · ') || 'Not set'}
+                  </div>
+                  <div>
+                    <strong className="text-[#111111] dark:text-white">Languages: </strong>
+                    {profile.languages && profile.languages.length > 0
+                      ? profile.languages.join(' · ')
+                      : 'English'}
+                  </div>
+                  <div>
+                    <strong className="text-[#111111] dark:text-white">Joined: </strong>
+                    {formatMemberSince(profile.memberSince)}
+                  </div>
+                </div>
+
+                {profile.seller && (
+                  <div className="pt-3 border-t border-[#E4E4E7] dark:border-[#27272A] text-xs space-y-2 text-[#52525B] dark:text-[#A1A1AA]">
+                    <div className="flex items-center gap-1.5 font-bold text-[#111111] dark:text-white">
+                      <Truck className="w-3.5 h-3.5 text-[#FF6B00]" />
+                      <span>Fulfillment &amp; Processing</span>
+                    </div>
+                    {profile.seller.processingTime && (
+                      <div>
+                        <strong className="text-[#111111] dark:text-white">Processing time: </strong>
+                        {profile.seller.processingTime}
+                      </div>
+                    )}
+                    <div>
+                      <strong className="text-[#111111] dark:text-white">Options: </strong>
+                      {[
+                        profile.seller.deliveryOptions?.allowsPickup !== false
+                          ? 'Campus / public pickup'
+                          : null,
+                        profile.seller.deliveryOptions?.allowsLocalDelivery
+                          ? 'Local delivery'
+                          : null,
+                      ]
+                        .filter(Boolean)
+                        .join(' · ') || 'Arrange directly in Shop It chat'}
+                    </div>
+                    {profile.seller.deliveryOptions?.allowsPickup !== false &&
+                      profile.seller.deliveryOptions?.pickupSpots &&
+                      profile.seller.deliveryOptions.pickupSpots.length > 0 && (
+                        <div>
+                          <strong className="text-[#111111] dark:text-white">Pickup spots: </strong>
+                          {profile.seller.deliveryOptions.pickupSpots.join(' · ')}
+                        </div>
+                      )}
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -1199,13 +1337,13 @@ export const SellerShopView: React.FC<SellerShopViewProps> = ({ slugOrId, onBack
           {isOwner && activeTab === 'orders' && (
             <div className="space-y-3">
               <div className="flex items-center justify-between">
-                <h3 className="text-sm font-black text-[#111111] dark:text-white">Recent Escrow Orders</h3>
+                <h3 className="text-sm font-black text-[#111111] dark:text-white">Recent Orders</h3>
                 <button
                   type="button"
                   onClick={() => setActiveView('orders')}
                   className="text-xs font-black text-[#FF6B00] hover:underline"
                 >
-                  Open Full Orders &amp; Escrow &rarr;
+                  Open Full Orders &amp; Tracking &rarr;
                 </button>
               </div>
               {orders.length > 0 ? (
@@ -1249,10 +1387,48 @@ export const SellerShopView: React.FC<SellerShopViewProps> = ({ slugOrId, onBack
       {/* Edit Profile Modal */}
       <EditProfileModal
         isOpen={isEditOpen}
-        onClose={() => setIsEditOpen(false)}
+        onClose={() => {
+          setIsEditOpen(false);
+          setEditFocusField(null);
+        }}
         initialProfile={profile}
+        initialFocusField={editFocusField}
         onSaved={() => void loadProfile()}
       />
+
+      {/* Profile QR Code Modal */}
+      {qrModalOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/65 backdrop-blur-xs animate-backdrop"
+          onClick={e => {
+            if (e.target === e.currentTarget) setQrModalOpen(false);
+          }}
+        >
+          <div className="bg-white dark:bg-[#15161C] rounded-2xl max-w-sm w-full border border-[#E4E4E7] dark:border-[#27272A] shadow-2xl overflow-hidden animate-modal-enter">
+            <div className="px-5 py-4 border-b border-[#E4E4E7] dark:border-[#27272A] flex items-center justify-between">
+              <h3 className="text-sm font-black text-[#111111] dark:text-white flex items-center gap-1.5">
+                <QrCode className="w-4 h-4 text-[#FF6B00]" />
+                <span>Share Profile QR Code</span>
+              </h3>
+              <button
+                type="button"
+                onClick={() => setQrModalOpen(false)}
+                aria-label="Close QR modal"
+                className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-lg text-[#71717A] hover:text-[#111111] dark:hover:text-white"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-5">
+              <ProfileQrCode
+                url={canonicalUrl}
+                label={`${primaryTitle} on Shop It`}
+                slug={profile.canonicalSlug || profile.profileSlug || profile.id}
+              />
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Safety Report Modal */}
       <ReportModal

@@ -14,12 +14,14 @@ loadLocalEnvSafely();
 
 import {
   CORE_SCHEMA_TABLES,
+  EXPECTED_SCHEMA_VERSION,
   getDatabaseUrl,
   getDatabaseUrlSource,
   getPool,
   pingPostgres,
   query,
   runMigration,
+  setMigrationRunnerMode,
   verifyDatabaseSchema,
 } from '../server/db/postgres.js';
 
@@ -39,10 +41,23 @@ function formatSafeDbTarget(): string {
 }
 
 async function main() {
+  setMigrationRunnerMode(true);
   console.log('=== Shop It Database Migration & Table Verification ===');
   console.log(`Target Database: ${formatSafeDbTarget()}`);
 
-  await runMigration();
+  const migResult = await runMigration();
+  console.log(`Applied Schema Version: ${migResult.schemaVersion}`);
+  console.log(
+    `Quarantined Orphans (preserved in shopit_migration_quarantine): payments=${migResult.quarantined.payments}, wallets=${migResult.quarantined.wallets}, ledgerEntries=${migResult.quarantined.ledgerEntries}, disputes=${migResult.quarantined.disputes}`
+  );
+  console.log(`Orphan Orders Preserved (buyer_id set NULL): ${migResult.orphanOrdersNullified}`);
+  console.log(
+    `Deleted Orphan Products: ${migResult.deletedOrphanProducts}${
+      migResult.deletedOrphanProductIds.length > 0
+        ? ` [${migResult.deletedOrphanProductIds.join(', ')}]`
+        : ''
+    }`
+  );
 
   const ping = await pingPostgres();
   console.log(`Database Status: ${ping.ok ? 'ONLINE' : 'OFFLINE'} (${ping.provider})`);
@@ -52,10 +67,13 @@ async function main() {
   }
 
   const schemaStatus = await verifyDatabaseSchema();
-  if (!schemaStatus.ok) {
-    console.error(`Missing core schema tables: ${schemaStatus.missingTables.join(', ')}`);
+  if (!schemaStatus.ok || schemaStatus.schemaVersion !== EXPECTED_SCHEMA_VERSION) {
+    console.error(
+      `Schema verification failed: ${schemaStatus.migrationError || `missing=[${schemaStatus.missingTables.join(', ')}], version=${schemaStatus.schemaVersion}`}`
+    );
     process.exit(1);
   }
+  console.log(`Schema Version Verified: ${schemaStatus.schemaVersion} (expected ${EXPECTED_SCHEMA_VERSION})`);
 
   let hasFailures = false;
 

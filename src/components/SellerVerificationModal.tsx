@@ -262,7 +262,7 @@ export const SellerVerificationModal: React.FC<SellerVerificationModalProps> = (
     }
 
     if (!ndpaConsentSigned) {
-      notify('Please accept the NDPA 2023 Data Protection consent.', 'error');
+      notify('Please accept the Data Protection & Identity Check consent.', 'error');
       return;
     }
 
@@ -367,7 +367,7 @@ export const SellerVerificationModal: React.FC<SellerVerificationModalProps> = (
                 Real Seller Identity Verification
               </h2>
               <p className="text-[11px] text-[#71717A] dark:text-[#A1A1AA]">
-                NIMC NIN &amp; Biometric Liveness Check (NDPA 2023 Compliant)
+                NIMC NIN &amp; Biometric Liveness Check
               </p>
             </div>
           </div>
@@ -460,7 +460,7 @@ export const SellerVerificationModal: React.FC<SellerVerificationModalProps> = (
               <span>VERIFICATION TEMPORARILY LOCKED</span>
             </div>
             <p>
-              You have exceeded the maximum of 3 failed verification attempts. For anti-fraud security under the Nigeria Data Protection Act, this account is locked from submitting further NINs for 24 hours. Contact Moderator Support for assistance.
+              You have exceeded the maximum of 3 failed verification attempts. For anti-fraud security, this account is locked from submitting further NINs for 24 hours. Contact Moderator Support for assistance.
             </p>
           </div>
         )}
@@ -534,7 +534,7 @@ export const SellerVerificationModal: React.FC<SellerVerificationModalProps> = (
                   : 'border-transparent text-[#71717A] dark:text-[#A1A1AA]'
               }`}
             >
-              {isUnder18 ? '4. NDPA Consent' : '3. NDPA Consent'}
+              {isUnder18 ? '4. Consent & Review' : '3. Consent & Review'}
             </button>
           </div>
         )}
@@ -619,7 +619,7 @@ export const SellerVerificationModal: React.FC<SellerVerificationModalProps> = (
                 className="w-full h-11 px-3.5 rounded-xl border border-[#E4E4E7] dark:border-[#27272A] bg-white dark:bg-[#1E2028] text-xs sm:text-sm font-mono tracking-widest text-[#111111] dark:text-white focus:outline-none focus:border-[#FF6B00]"
               />
               <span className="text-[10px] text-[#71717A] dark:text-[#A1A1AA] mt-1 block">
-                Encrypted at rest. Under NDPA rules, only the last 4 digits are stored in viewable ledgers. One NIN per account.
+                Encrypted at rest. Only the last 4 digits are retained in viewable logs after review. One NIN per account.
               </span>
             </div>
 
@@ -709,7 +709,7 @@ export const SellerVerificationModal: React.FC<SellerVerificationModalProps> = (
             <div className="p-3 bg-[#FFF4EC] dark:bg-[#1E2028] rounded-xl border border-[#FED7AA] dark:border-[#27272A] text-[#111111] dark:text-white">
               <span className="font-black block text-xs mb-0.5">Parent / Legal Guardian Co-Verification</span>
               <p className="text-[11px] text-[#71717A] dark:text-[#A1A1AA] leading-relaxed">
-                To comply with the Child Rights Act and NDPA guidelines, withdrawals for minor artisans can only be settled to a guardian-verified Nigerian bank account.
+                For minor seller oversight and payout safety, withdrawals for makers under 18 are settled to a guardian-verified Nigerian bank account.
               </p>
             </div>
 
@@ -1012,7 +1012,7 @@ export const SellerVerificationModal: React.FC<SellerVerificationModalProps> = (
                   className="w-4 h-4 rounded text-[#FF6B00] mt-0.5"
                 />
                 <span className="text-[11px] text-[#111111] dark:text-white leading-relaxed">
-                  <strong>Nigeria Data Protection Act (NDPA 2023) Consent:</strong> I hereby give explicit consent to Shop It and its verified identity verification partners to verify my National Identification Number (NIN) against the National Identity Management Commission (NIMC) database and process my live selfie solely for merchant safety, anti-fraud, and escrow compliance. I understand my data is encrypted and can be deleted upon my written request.
+                  <strong>Data Protection &amp; Identity Check Consent:</strong> I consent to Shop It reviewing my National Identification Number (NIN), ID image, and live selfie for seller verification, anti-fraud checks, and payout eligibility. I understand verification images are deleted after review and my data can be deleted upon request.
                 </span>
               </label>
             </div>

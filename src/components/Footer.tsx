@@ -1,19 +1,15 @@
 import React, { useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { NIGERIAN_STATES } from '../data/nigerianLocations';
+import { OPERATOR_INFO, getTrustCopy } from '../../shared/trustAndLegalCopy';
 import {
-  ShieldCheck,
-  MapPin,
-  Lock,
   ChevronDown,
-  Sparkles,
-  CheckCircle2,
-  AlertTriangle,
 } from 'lucide-react';
 
 export const Footer: React.FC = () => {
-  const { setSelectedState, setSelectedCategory, setActiveView, openAuthModal, openProfile, openAccountSettings, currentUser } = useApp();
+  const { setSelectedState, setSelectedCategory, setActiveView, openAuthModal, openProfile, openAccountSettings, currentUser, paymentsEnabled } = useApp();
   const [showAllStates, setShowAllStates] = useState(false);
+  const trustCopy = getTrustCopy(paymentsEnabled);
 
   // Group Nigerian states by zones
   const zones = Array.from(new Set(NIGERIAN_STATES.map(s => s.zone || 'Other')));
@@ -42,18 +38,18 @@ export const Footer: React.FC = () => {
                   Shop It
                 </span>
                 <span className="text-[11px] font-semibold text-[#71717A] dark:text-[#A1A1AA] block mt-0.5">
-                  Operated by TEEDS
+                  {OPERATOR_INFO.operatedByLine}
                 </span>
               </div>
             </div>
 
             <p className="text-xs text-[#52525B] dark:text-[#A1A1AA] leading-relaxed">
-              Safe Nigerian youth marketplace where students and teenagers sell what they make with escrow payment protection.
+              {trustCopy.footerSummary}
             </p>
 
             <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-[#FAFAFA] dark:bg-[#15161C] border border-[#E4E4E7] dark:border-[#27272A] text-[11px] text-[#111111] dark:text-white font-semibold">
               <span className="w-2 h-2 rounded-full bg-[#9FE870] border border-[#111111]" />
-              <span>Direct Peer-to-Peer Youth Commerce</span>
+              <span>{trustCopy.footerTagline}</span>
             </div>
           </div>
 
@@ -112,7 +108,7 @@ export const Footer: React.FC = () => {
                   }}
                   className="hover:text-[#FF6B00] dark:hover:text-[#FF6B00] font-medium"
                 >
-                  Safe Pickup Spots
+                  Campus Pickup Spots
                 </button>
               </li>
               <li>
@@ -123,7 +119,7 @@ export const Footer: React.FC = () => {
                   }}
                   className="hover:text-[#FF6B00] dark:hover:text-[#FF6B00] font-medium"
                 >
-                  Track Escrow Orders
+                  {trustCopy.footerOrdersLinkLabel}
                 </button>
               </li>
               <li>
@@ -192,7 +188,7 @@ export const Footer: React.FC = () => {
                   }}
                   className="hover:text-[#FF6B00] dark:hover:text-[#FF6B00] font-medium"
                 >
-                  Privacy Policy (NDPA)
+                  {trustCopy.footerPrivacyLinkLabel}
                 </button>
               </li>
               <li>
@@ -236,7 +232,7 @@ export const Footer: React.FC = () => {
                   }}
                   className="hover:text-[#FF6B00] dark:hover:text-[#FF6B00] font-medium"
                 >
-                  Buyer Protection &amp; Escrow
+                  {trustCopy.footerProtectionLinkLabel}
                 </button>
               </li>
             </ul>
@@ -277,10 +273,10 @@ export const Footer: React.FC = () => {
                 Direct Support
               </span>
               <p className="text-[#71717A] dark:text-[#A1A1AA] break-all">
-                shopitverified@gmail.com
+                {OPERATOR_INFO.supportEmail}
               </p>
               <p className="text-[10px] text-[#FF6B00] font-semibold">
-                Replies within 3 working days
+                {OPERATOR_INFO.supportSlaLine}
               </p>
             </div>
           </div>
@@ -399,13 +395,13 @@ export const Footer: React.FC = () => {
 
           <div className="flex items-center gap-4 text-[11px]">
             <div className="font-semibold text-[#111111] dark:text-white">
-              © 2026 Shop It. Made by TEEDS.
+              {OPERATOR_INFO.copyrightLine}
             </div>
             <span>·</span>
             <span>Currency: Nigerian Naira (₦)</span>
             <span>·</span>
             <span className="text-[#166534] dark:text-[#9FE870] font-bold bg-[#DCFCE7] dark:bg-[#1E2028] border dark:border-[#27272A] px-2 py-0.5 rounded">
-              Escrow Secured
+              {trustCopy.footerStatusPill}
             </span>
           </div>
         </div>

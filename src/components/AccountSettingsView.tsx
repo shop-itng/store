@@ -414,8 +414,8 @@ export const AccountSettingsView: React.FC = () => {
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
           {[
-            { key: 'emailOrders' as const, label: 'Order & Escrow Updates', desc: 'Confirmations, dispatch & PIN release alerts' },
-            { key: 'emailMessages' as const, label: 'Escrow Chat Messages', desc: 'Alerts when a buyer or seller replies' },
+            { key: 'emailOrders' as const, label: 'Order Updates', desc: 'Confirmations, dispatch & delivery alerts' },
+            { key: 'emailMessages' as const, label: 'Order Chat Messages', desc: 'Alerts when a buyer or seller replies' },
             { key: 'emailFollowers' as const, label: 'New Followers & Requests', desc: 'Updates when members follow your shop/profile' },
             { key: 'emailRestock' as const, label: 'Restock Alerts', desc: 'Notifications when saved sold-out items return' },
           ].map(item => (
@@ -575,7 +575,7 @@ export const AccountSettingsView: React.FC = () => {
           <div>
             <h2 className="text-sm font-black text-[#111111] dark:text-white">Blocked Accounts</h2>
             <p className="text-[11px] text-[#71717A] dark:text-[#A1A1AA]">
-              Blocked members cannot follow you, see your profile, or message you in escrow chat.
+              Blocked members cannot follow you, see your profile, or message you in order chat.
             </p>
           </div>
         </div>
@@ -636,7 +636,7 @@ export const AccountSettingsView: React.FC = () => {
               <span>Download My Data</span>
             </h2>
             <p className="text-xs text-[#71717A] dark:text-[#A1A1AA] leading-relaxed">
-              Download a sanitized JSON copy of your profile, listings, orders, wishlist, and account history (NDPA 2023 portability right).
+              Download a sanitized JSON copy of your profile, listings, orders, wishlist, and account history.
             </p>
           </div>
           <button

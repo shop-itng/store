@@ -40,6 +40,7 @@ export const SellerWalletView: React.FC = () => {
     activeWithdrawalOtp,
     notify,
     payoutsEnabled,
+    paymentsEnabled,
   } = useApp();
 
   const [isWithdrawModalOpen, setIsWithdrawModalOpen] = useState(false);
@@ -319,20 +320,20 @@ export const SellerWalletView: React.FC = () => {
           <div>
             <div className="flex items-center gap-2">
               <span className="text-xs font-black text-[#9FE870] uppercase tracking-wider">
-                Flutterwave Escrow &amp; Bank Payouts
+                {paymentsEnabled ? 'Flutterwave Payouts & Order Balances' : 'Seller Wallet & Payout Settings'}
               </span>
               <span className="text-[10px] bg-[#27272A] px-2 py-0.5 rounded text-white font-mono">
                 Verified Bank Payouts
               </span>
             </div>
             <p className="text-[11px] text-[#A1A1AA] mt-0.5">
-              Append-only double-entry ledger. Two balances: Pending (held in escrow) and Available (withdrawable to supported Nigerian Banks).
+              Append-only double-entry ledger. Two balances: Pending (held until delivery confirmation) and Available (withdrawable to supported Nigerian Banks).
             </p>
           </div>
         </div>
 
         <div className="text-[11px] font-bold text-[#9FE870] bg-[#18181B] px-3 py-1 rounded-lg border border-[#27272A] shrink-0">
-          No Buyer Wallet · Flutterwave Direct Checkout
+          {paymentsEnabled ? 'No Buyer Wallet · Flutterwave Checkout' : 'Online Payments Off · Direct Mode'}
         </div>
       </div>
 
@@ -400,7 +401,7 @@ export const SellerWalletView: React.FC = () => {
             <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-[#27272A]">
               <div className="flex items-center gap-2">
                 <Clock className="w-4 h-4 text-[#FF6B00]" />
-                <span className="text-xs font-bold text-slate-900 dark:text-white">Pending in Escrow</span>
+                <span className="text-xs font-bold text-slate-900 dark:text-white">Pending Delivery Balance</span>
               </div>
               <span className="text-[11px] font-bold text-[#111111] dark:text-[#FF6B00] bg-[#FF6B00]/20 px-2.5 py-0.5 rounded-md border border-[#FF6B00]">
                 Awaiting Buyer Confirmation
@@ -412,7 +413,7 @@ export const SellerWalletView: React.FC = () => {
                 {formatNaira(currentWallet.pendingBalance)}
               </div>
               <p className="text-xs text-slate-500 dark:text-[#A1A1AA] mt-1">
-                Held safely until the buyer taps <strong>"Item received"</strong> or 5 days elapse without an open dispute.
+                Held until the buyer taps <strong>"Item received"</strong> or 5 days elapse after dispatch without an open dispute.
               </p>
             </div>
           </div>
@@ -514,8 +515,8 @@ export const SellerWalletView: React.FC = () => {
           <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl text-xs overflow-x-auto">
             {[
               { id: 'all', label: 'All' },
-              { id: 'sale_pending', label: 'Escrow Deposits' },
-              { id: 'escrow_release', label: 'Releases' },
+              { id: 'sale_pending', label: 'Pending Deposits' },
+              { id: 'escrow_release', label: 'Payment Releases' },
               { id: 'withdrawal', label: 'Withdrawals' },
               { id: 'refund', label: 'Refunds' },
             ].map(tab => (
@@ -591,7 +592,7 @@ export const SellerWalletView: React.FC = () => {
                       {formatNaira(entry.amount)}
                     </div>
                     <span className="text-[10px] text-slate-400 block font-mono">
-                      {entry.balanceType === 'pending' ? 'Pending Escrow' : 'Available Bal'}
+                      {entry.balanceType === 'pending' ? 'Pending Balance' : 'Available Bal'}
                     </span>
                   </div>
                 </div>

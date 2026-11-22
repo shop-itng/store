@@ -53,7 +53,7 @@ export const ReportModal: React.FC<Props> = ({
     chat: [
       'Soliciting off-platform payment (anti-bypass)',
       'Threatening, aggressive or unsafe messages',
-      'Sharing contact numbers to evade escrow',
+      'Sharing contact details to move deals off-platform',
       'Spam or advertising unrelated links',
     ],
   };

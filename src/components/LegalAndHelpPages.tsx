@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useApp } from '../context/AppContext';
+import { OPERATOR_INFO, getLegalAndHelpCopy } from '../../shared/trustAndLegalCopy';
 import {
   ShieldCheck,
   Lock,
@@ -11,13 +12,10 @@ import {
   Store,
   CheckCircle2,
   Clock,
-  Building2,
   ArrowLeft,
   ChevronDown,
   ChevronUp,
   Send,
-  Sparkles,
-  ExternalLink,
 } from 'lucide-react';
 
 export type LegalPageSlug =
@@ -42,7 +40,8 @@ export function getSiteUrl(): string {
 }
 
 export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'terms' }) => {
-  const { activeView, setActiveView, notify } = useApp();
+  const { activeView, setActiveView, notify, paymentsEnabled } = useApp();
+  const legalCopy = getLegalAndHelpCopy(paymentsEnabled);
   const currentSlug: LegalPageSlug = (
     activeView === 'terms' ||
     activeView === 'privacy' ||
@@ -57,7 +56,7 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
   ) as LegalPageSlug;
 
   const siteUrl = getSiteUrl();
-  const lastUpdated = '3 November 2026';
+  const lastUpdated = legalCopy.lastUpdated;
 
   // Contact form state
   const [contactName, setContactName] = useState('');
@@ -96,11 +95,11 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
 
       setIsSubmittingContact(false);
       setContactSubmitted(true);
-      notify('Message sent! Our support team will reply to your email within 3 working days.', 'success');
+      notify(`Message sent! ${OPERATOR_INFO.supportSlaLine}`, 'success');
     } catch (err: any) {
       setIsSubmittingContact(false);
       setContactSubmitted(false);
-      notify(err?.message || 'Unable to send message right now. Please email shopitverified@gmail.com.', 'error');
+      notify(err?.message || `Unable to send message right now. Please email ${OPERATOR_INFO.supportEmail}.`, 'error');
     }
   };
 
@@ -110,7 +109,7 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
     { slug: 'refunds', label: 'Refunds & Disputes', icon: ShieldCheck },
     { slug: 'prohibited-items', label: 'Prohibited Items', icon: AlertTriangle },
     { slug: 'seller-guide', label: 'Seller Guide', icon: Store },
-    { slug: 'buyer-protection', label: 'Buyer Protection', icon: ShoppingBag },
+    { slug: 'buyer-protection', label: legalCopy.buyerProtection.title, icon: ShoppingBag },
     { slug: 'faq', label: 'FAQ', icon: HelpCircle },
     { slug: 'contact', label: 'Contact Us', icon: Mail },
   ];
@@ -157,10 +156,10 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
           <div className="space-y-6">
             <div className="border-b border-slate-200 dark:border-stone-800 pb-4">
               <span className="text-[11px] font-black uppercase tracking-wider text-[#FF6B00]">
-                Official Agreement
+                {legalCopy.terms.eyebrow}
               </span>
               <h1 className="text-2xl sm:text-3xl font-black text-[#111111] dark:text-white mt-1">
-                Terms of Service
+                {legalCopy.terms.title}
               </h1>
               <p className="text-xs text-slate-500 dark:text-stone-400 mt-1">
                 Last updated: <strong>{lastUpdated}</strong> · Website: <strong>{siteUrl}</strong>
@@ -169,15 +168,9 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
 
             <section className="space-y-2">
               <h2 className="text-base font-black text-[#111111] dark:text-white">1. Who We Are</h2>
-              <p>
-                Shop It is an online marketplace created for Nigerian students, teenagers, and young creators to buy and sell handmade crafts, beads, fashion, scent oils, crochet wear, and bespoke goods safely.
-              </p>
-              <p>
-                Shop It is operated by TEEDS. TEEDS is an independent student enterprise and is not yet a registered company. We do not claim any Corporate Affairs Commission (CAC) registration.
-              </p>
-              <p>
-                You can reach our team anytime by emailing <strong>shopitverified@gmail.com</strong>. We reply to all messages within 3 working days.
-              </p>
+              {legalCopy.terms.whoWeAreParagraphs.map((paragraph, i) => (
+                <p key={i}>{paragraph}</p>
+              ))}
             </section>
 
             <section className="space-y-2">
@@ -203,66 +196,34 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
             <section className="space-y-2">
               <h2 className="text-base font-black text-[#111111] dark:text-white">4. Buyer and Seller Duties</h2>
               <p>
-                <strong>Sellers must:</strong> List items honestly, provide real photos, state accurate descriptions, pack items securely, upload a photo of the packed order, and ship within reasonable time.
+                <strong>Sellers must:</strong> List items honestly, provide real photos, state accurate descriptions, pack items securely, upload a packing photo when dispatching orders, and ship within reasonable time.
               </p>
               <p>
-                <strong>Buyers must:</strong> Pay through Shop It escrow, provide clear delivery or pickup area instructions, inspect their item upon delivery, and tap &quot;Item received&quot; in the app once satisfied.
+                <strong>Buyers must:</strong> {legalCopy.terms.buyerDuty}
               </p>
             </section>
 
             <section className="space-y-2">
               <h2 className="text-base font-black text-[#111111] dark:text-white">5. Pricing, Service Fees, and Delivery</h2>
-              <p>
-                Sellers set their own item prices. Shop It adds a service fee to each order.
-              </p>
-              <p>
-                The tiered service fee is calculated automatically by the website and is displayed clearly at checkout before you make any payment. Your total checkout price is always: <em>Item Price + Service Fee + Delivery Fee = Total</em>, with <strong>₦0 extra payment gateway surcharge</strong> for buyers and <strong>₦0 withdrawal transfer fee</strong> for sellers (Shop It absorbs Flutterwave processing fees out of its service fee).
-              </p>
-              <p>
-                We do not use a single fixed fee for everything. Any change to fee formulas will never affect an order that has already been paid for.
-              </p>
-              <p>
-                Sellers choose their delivery options: campus pickup spot, local delivery, or buyer-arranged rider. The delivery cost is shown before payment.
-              </p>
+              {legalCopy.terms.pricingParagraphs.map((paragraph, i) => (
+                <p key={i}>{paragraph}</p>
+              ))}
             </section>
 
             <section className="space-y-2">
-              <h2 className="text-base font-black text-[#111111] dark:text-white">6. How Escrow Protection Works</h2>
-              <p>
-                All payments on Shop It are processed securely through Flutterwave. We never see or store your debit card details or banking PINs.
-              </p>
-              <p>
-                When a buyer pays, the money is held safely in escrow. The seller cannot withdraw it yet.
-              </p>
-              <p>
-                Once the buyer receives the item and taps &quot;Item received&quot;, the payment is released into the seller&apos;s Available balance.
-              </p>
-              <p>
-                <strong>5-Day Auto-Release &amp; Unshipped Order Rule:</strong> Once an order is dispatched (shipped or delivered) and 5 days pass after payment without an open dispute or buyer confirmation, the funds are automatically released to the seller. If a paid order has not been shipped after <strong>3 days</strong>, we remind the seller; if still unshipped after <strong>5 days</strong> (with no open dispute or admin hold), the order is automatically cancelled and 100% refunded to the buyer.
-              </p>
+              <h2 className="text-base font-black text-[#111111] dark:text-white">
+                {legalCopy.terms.paymentHandlingTitle}
+              </h2>
+              {legalCopy.terms.paymentHandlingParagraphs.map((paragraph, i) => (
+                <p key={i}>{paragraph}</p>
+              ))}
             </section>
 
             <section className="space-y-2">
               <h2 className="text-base font-black text-[#111111] dark:text-white">7. Seller Wallets and Withdrawals</h2>
-              <p>
-                Every seller has two balances:
-              </p>
-              <ul className="list-disc pl-5 space-y-1">
-                <li><strong>Pending Balance:</strong> Money held in escrow while orders are being made or delivered.</li>
-                <li><strong>Available Balance:</strong> Earnings ready for withdrawal after buyer confirmation or 5-day auto-release.</li>
-              </ul>
-              <p>
-                The minimum withdrawal amount is <strong>₦1,000</strong>. Withdrawals are sent to any supported Nigerian bank account listed by our payment partner.
-              </p>
-              <p>
-                For safety, every withdrawal requires a 6-digit confirmation code sent to your registered email.
-              </p>
-              <p>
-                <strong>24-Hour Payout Cooling Period:</strong> When you add or change a payout account, you must wait 24 hours before you can withdraw to it. This security measure prevents unauthorized fund drainage if your account is ever compromised.
-              </p>
-              <p>
-                The legal name on your payout bank account must match your verified seller identity—or, for under-18 sellers, your parent or guardian&apos;s verified identity (approved once by Admin, with a ₦25,000 daily withdrawal limit for under-18 sellers).
-              </p>
+              {legalCopy.terms.walletParagraphs.map((paragraph, i) => (
+                <p key={i}>{paragraph}</p>
+              ))}
             </section>
 
             <section className="space-y-2">
@@ -271,21 +232,16 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
                 To sell products and withdraw earnings, sellers must complete identity verification. This requires submitting a National Identification Number (NIN), a photo of your valid ID slip/card, and a live selfie.
               </p>
               <p>
-                If the seller is under 18, a parent or guardian must provide consent and their verified ID, and all withdrawals must go to a bank account belonging to that parent/guardian after a one-time Admin approval (capped at ₦25,000 per day).
+                If the seller is under 18, a parent or guardian must provide consent and their verified ID, and any withdrawals must go to a bank account belonging to that parent/guardian after a one-time Admin approval (capped at ₦25,000 per day).
               </p>
               <p>
-                Your ID photos and selfie are permanently deleted <strong>immediately after the admin verification decision</strong>. We retain only the last 4 digits of the NIN, a cryptographic hash, the decision status, and the review date.
+                Your ID photos and selfie are permanently deleted immediately after the admin verification decision. We retain only the last 4 digits of the NIN, a cryptographic hash, the decision status, and the review date.
               </p>
             </section>
 
             <section className="space-y-2">
-              <h2 className="text-base font-black text-[#111111] dark:text-white">9. Banned Behaviour and Safety</h2>
-              <p>
-                Chat is strictly inside Shop It. Our safety system automatically blocks phone numbers, number words, emails, and external contact links in messages.
-              </p>
-              <p>
-                <strong>Never pay or chat outside Shop It.</strong> Doing deals outside the app removes all buyer and seller escrow protection and can result in immediate account termination.
-              </p>
+              <h2 className="text-base font-black text-[#111111] dark:text-white">9. Banned Behaviour and Chat Rules</h2>
+              <p>{legalCopy.terms.bannedRuleParagraph}</p>
             </section>
 
             <section className="space-y-2">
@@ -297,20 +253,18 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
 
             <section className="space-y-2">
               <h2 className="text-base font-black text-[#111111] dark:text-white">11. Limits of Liability</h2>
-              <p>
-                We provide the Shop It marketplace and escrow technology in good faith to support student and teen makers. We are not responsible for courier delays or damages if you deal outside the app. Our total liability is limited to the amount held in escrow for the specific transaction in dispute.
-              </p>
+              <p>{legalCopy.terms.liabilityParagraph}</p>
             </section>
 
             <section className="space-y-2">
               <h2 className="text-base font-black text-[#111111] dark:text-white">12. Governing Law and Disputes</h2>
               <p>
-                These terms are governed by the laws of the Federal Republic of Nigeria. Any dispute that cannot be resolved amicably through our support team will be settled exclusively by the courts of Nigeria.
+                These terms are governed by the laws of the Federal Republic of Nigeria. Any dispute that cannot be resolved through our support team will be handled by the courts of Nigeria.
               </p>
             </section>
 
             <div className="p-4 rounded-2xl bg-slate-50 dark:bg-stone-900 border border-slate-200 dark:border-stone-800 text-xs">
-              <strong>Need help or have questions?</strong> Email us at <strong>shopitverified@gmail.com</strong>. We reply within 3 working days.
+              <strong>Need help or have questions?</strong> Email us at <strong>{OPERATOR_INFO.supportEmail}</strong>. {OPERATOR_INFO.supportSlaLine}
             </div>
           </div>
         )}
@@ -322,63 +276,61 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
           <div className="space-y-6">
             <div className="border-b border-slate-200 dark:border-stone-800 pb-4">
               <span className="text-[11px] font-black uppercase tracking-wider text-[#16A34A] dark:text-[#9FE870]">
-                NDPA 2023 Compliant
+                {legalCopy.privacy.eyebrow}
               </span>
               <h1 className="text-2xl sm:text-3xl font-black text-[#111111] dark:text-white mt-1">
                 Privacy Policy
               </h1>
               <p className="text-xs text-slate-500 dark:text-stone-400 mt-1">
-                Last updated: <strong>{lastUpdated}</strong> · Governed by the <strong>Nigeria Data Protection Act 2023 (NDPA)</strong>
+                Last updated: <strong>{lastUpdated}</strong> · {legalCopy.privacy.subtitleSuffix}
               </p>
             </div>
 
             <section className="space-y-2">
-              <h2 className="text-base font-black text-[#111111] dark:text-white">1. Our Commitment to Your Privacy</h2>
+              <h2 className="text-base font-black text-[#111111] dark:text-white">1. Our Privacy Practices</h2>
+              <p>{legalCopy.privacy.intro}</p>
               <p>
-                Shop It (operated by TEEDS, an emerging student enterprise not yet registered with CAC) respects your personal privacy. We comply strictly with the Nigeria Data Protection Act 2023 (NDPA).
-              </p>
-              <p>
-                This policy explains what information we collect, why we need it, how long we keep it, and how your rights are protected.
+                This notice explains what information we collect, why we need it, how long we keep it, and how to contact us about your data.
               </p>
             </section>
 
             <section className="space-y-2">
               <h2 className="text-base font-black text-[#111111] dark:text-white">2. What We Collect</h2>
-              <p>We only collect the minimum information needed to operate a safe marketplace:</p>
+              <p>We collect the minimum information needed to run the marketplace:</p>
               <ul className="list-disc pl-5 space-y-1">
-                <li><strong>Account details:</strong> Your email address, full name, and chosen password.</li>
+                <li><strong>Account details:</strong> Your email address, display name, and hashed password.</li>
                 <li><strong>Location area:</strong> Your campus, town, or local government area to show relevant items and delivery options.</li>
-                <li><strong>Order &amp; transaction records:</strong> What you bought or sold, order reference numbers, and timestamps.</li>
-                <li><strong>In-app chat messages:</strong> Messages sent between buyers and sellers to verify transaction details.</li>
-                <li><strong>Seller verification data:</strong> National Identification Number (NIN), ID slip/card photo, live selfie, and parent/guardian co-verification (legal name and NIN) for sellers under 18.</li>
+                <li><strong>Order &amp; transaction records:</strong> What you listed, ordered, order reference numbers, and timestamps.</li>
+                <li><strong>In-app chat messages:</strong> Messages sent between buyers and sellers inside Shop It.</li>
+                <li><strong>Seller verification data:</strong> National Identification Number (NIN), ID slip/card photo, live selfie, and parent/guardian consent details for sellers under 18.</li>
               </ul>
               <div className="p-3 bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-300 dark:border-emerald-800 rounded-xl text-xs text-emerald-900 dark:text-emerald-200">
-                <strong>What we NEVER collect:</strong> We do NOT collect your phone number. We do NOT store your bank card numbers, CVV codes, or card PINs (these are handled directly by Flutterwave).
+                <strong>What we do NOT collect:</strong> We do not collect your phone number, and we do not store debit card numbers, CVV codes, or banking PINs on Shop It servers.
               </div>
             </section>
 
             <section className="space-y-2">
               <h2 className="text-base font-black text-[#111111] dark:text-white">3. Who Sees Your Information</h2>
               <p>
-                <strong>Between users:</strong> Members see each other&apos;s public display name, avatar, campus/area, and profile information. Your real email address and personal contact details are never shown publicly.
+                <strong>Between users:</strong> Members see each other&apos;s public display name, avatar, campus/area (subject to your privacy settings), and shop profile. Your email address is never shown publicly.
               </p>
               <p>
-                <strong>Delivery information:</strong> Your delivery spot or landmark is shared only with the seller or delivery courier for the purpose of getting your order to you.
+                <strong>Delivery information:</strong> Your pickup landmark or delivery area is shared only with the seller or courier handling your order.
               </p>
               <p>
-                <strong>Admin access:</strong> Real identities and verification records are visible only to authorized Shop It administrators to handle disputes, prevent fraud, or satisfy lawful government requests.
+                <strong>Admin access:</strong> Verification records are accessible only to authorized Shop It administrators to review disputes, prevent fraud, or respond to lawful requests.
               </p>
             </section>
 
             <section className="space-y-2">
-              <h2 className="text-base font-black text-[#111111] dark:text-white">4. Trusted Service Providers We Use</h2>
-              <p>We use reputable industry services to run Shop It smoothly:</p>
+              <h2 className="text-base font-black text-[#111111] dark:text-white">4. Third-Party Infrastructure Providers</h2>
+              <p>We use infrastructure providers to host and operate Shop It:</p>
               <ul className="list-disc pl-5 space-y-1">
-                <li><strong>Vercel:</strong> Secure web hosting and serverless application delivery.</li>
-                <li><strong>Neon:</strong> Secure cloud database storage.</li>
-                <li><strong>Upstash:</strong> Temporary rate limiting and cache management.</li>
-                <li><strong>Brevo:</strong> Transactional email dispatch for OTP codes and order receipts.</li>
-                <li><strong>Payment Gateway Partner:</strong> Licensed third-party Nigerian payment processor for cards and bank transfers.</li>
+                <li><strong>Vercel:</strong> Web hosting and serverless application runtime.</li>
+                <li><strong>Neon:</strong> Cloud database storage.</li>
+                <li><strong>Upstash:</strong> Rate limiting and temporary security state.</li>
+                <li><strong>Brevo:</strong> Transactional email dispatch for verification codes and order notices.</li>
+                <li><strong>{legalCopy.privacy.providersBulletPayment}</strong></li>
               </ul>
             </section>
 
@@ -386,19 +338,19 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
               <h2 className="text-base font-black text-[#111111] dark:text-white">5. How Long We Keep Your Data</h2>
               <ul className="list-disc pl-5 space-y-1.5">
                 <li>
-                  <strong>ID photos and live selfies:</strong> Permanently deleted <strong>immediately</strong> after your verification decision is completed. Only the last 4 NIN digits, an encrypted hash, the decision, and the date are kept.
+                  <strong>ID photos and live selfies:</strong> Permanently deleted immediately after your verification decision is completed. Only the last 4 NIN digits, a cryptographic hash, the decision, and the date are kept.
                 </li>
                 <li>
-                  <strong>Full NIN:</strong> Your full NIN is never displayed to anyone and is only processed to verify identity.
+                  <strong>Full NIN:</strong> Your full NIN is never displayed publicly and is processed only for identity verification.
                 </li>
                 <li>
-                  <strong>Account information:</strong> Kept while your account is active. When you request account deletion, your profile, listings, and personal details are deleted within <strong>14 days</strong>, except financial transaction records we must retain under Nigerian financial law.
+                  <strong>Account information:</strong> Kept while your account is active. When you request account deletion, your profile, listings, and personal details are removed within <strong>14 days</strong>, except records required for financial audit or legal obligations.
                 </li>
               </ul>
             </section>
 
             <section className="space-y-2">
-              <h2 className="text-base font-black text-[#111111] dark:text-white">6. Children and Teen Data Protection</h2>
+              <h2 className="text-base font-black text-[#111111] dark:text-white">6. Children and Teen Data</h2>
               <p>
                 Shop It is built for youth aged <strong>10 and older</strong>. We do not knowingly allow anyone under 10 to register.
               </p>
@@ -408,17 +360,16 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
             </section>
 
             <section className="space-y-2">
-              <h2 className="text-base font-black text-[#111111] dark:text-white">7. Your Rights Under the NDPA 2023</h2>
-              <p>Under the Nigeria Data Protection Act 2023, you have the right to:</p>
+              <h2 className="text-base font-black text-[#111111] dark:text-white">7. Your Data Requests</h2>
+              <p>You can ask us to:</p>
               <ul className="list-disc pl-5 space-y-1">
-                <li><strong>Access:</strong> Ask for a copy of the personal data we hold about you.</li>
-                <li><strong>Correction:</strong> Ask us to update or fix any inaccurate information.</li>
-                <li><strong>Deletion:</strong> Ask us to erase your personal data (we process deletion requests within 14 days).</li>
-                <li><strong>Withdraw Consent:</strong> Stop using the service and revoke permission for future processing.</li>
-                <li><strong>Lodge a Complaint:</strong> File a complaint with the Nigeria Data Protection Commission (NDPC) if you believe your data has been handled improperly.</li>
+                <li><strong>Access:</strong> Download a JSON copy of your profile and account data from Account Settings.</li>
+                <li><strong>Correction:</strong> Update or fix inaccurate profile details.</li>
+                <li><strong>Deletion:</strong> Delete your account in Account Settings or email us (processed within 14 days).</li>
+                <li><strong>Lodge a Complaint:</strong> Contact us first, or reach the Nigeria Data Protection Commission (NDPC) regarding data concerns.</li>
               </ul>
               <p>
-                To exercise any of these rights, email us at <strong>shopitverified@gmail.com</strong>.
+                To submit a request, email <strong>{OPERATOR_INFO.supportEmail}</strong>.
               </p>
             </section>
           </div>
@@ -431,7 +382,7 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
           <div className="space-y-6">
             <div className="border-b border-slate-200 dark:border-stone-800 pb-4">
               <span className="text-[11px] font-black uppercase tracking-wider text-[#FF6B00]">
-                Escrow Rules
+                {legalCopy.refunds.eyebrow}
               </span>
               <h1 className="text-2xl sm:text-3xl font-black text-[#111111] dark:text-white mt-1">
                 Refund and Dispute Policy
@@ -441,58 +392,71 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
               </p>
             </div>
 
+            <div className="p-4 rounded-2xl bg-[#FFF4EC] dark:bg-[#1E1B18] border border-[#FF6B00] text-xs font-semibold text-[#111111] dark:text-[#F4F4F5]">
+              {legalCopy.refunds.bodyBanner}
+            </div>
+
+            {paymentsEnabled ? (
+              <>
+                <section className="space-y-2">
+                  <h2 className="text-base font-black text-[#111111] dark:text-white">1. When You Can Request a Refund</h2>
+                  <p>You can request a refund for a Shop It checkout order if:</p>
+                  <ul className="list-disc pl-5 space-y-1">
+                    <li><strong>Your item never arrived:</strong> The seller did not deliver your order.</li>
+                    <li><strong>Item not as described:</strong> The item you received differs clearly in material, color, size, or quality from the listing photos.</li>
+                    <li><strong>Item arrived damaged:</strong> The item arrived broken or damaged during transit.</li>
+                  </ul>
+                </section>
+
+                <section className="space-y-2">
+                  <h2 className="text-base font-black text-[#111111] dark:text-white">2. The 3-Day Reporting Window</h2>
+                  <p>
+                    You must report any issue within <strong>3 days</strong> after your item is marked delivered.
+                  </p>
+                  <p>
+                    To report a problem, go to your <strong>Orders</strong> page in the app and tap <strong>&quot;Report Problem&quot;</strong>.
+                  </p>
+                </section>
+
+                <section className="space-y-2">
+                  <h2 className="text-base font-black text-[#111111] dark:text-white">3. Evidence to Upload</h2>
+                  <p>To help moderation review your dispute fairly, please upload:</p>
+                  <ul className="list-disc pl-5 space-y-1">
+                    <li>Clear photos of the package and item received.</li>
+                    <li>A short explanation of what is wrong.</li>
+                  </ul>
+                  <p>
+                    Sellers may also provide their packing photo and dispatch proof for review.
+                  </p>
+                </section>
+
+                <section className="space-y-2">
+                  <h2 className="text-base font-black text-[#111111] dark:text-white">4. How Disputes Are Reviewed</h2>
+                  <p>
+                    Our moderation team reviews evidence from both buyer and seller within <strong>5 working days</strong>.
+                  </p>
+                  <p>
+                    While a dispute is open, held order funds do not release to the seller. Depending on the review outcome, moderation may refund the buyer in full, split partially, or release the order amount to the seller.
+                  </p>
+                </section>
+              </>
+            ) : (
+              <section className="space-y-2">
+                <h2 className="text-base font-black text-[#111111] dark:text-white">How Ordering Works While Online Payments Are Off</h2>
+                <p>
+                  Online payments are currently turned off on Shop It. Buyers and sellers arrange directly with each other via Shop It chat, meet at public campus pickup spots, and inspect items carefully before completing a purchase.
+                </p>
+                <p>
+                  You can report suspicious listings, harassment, or policy violations anytime using the Report button on any listing or conversation.
+                </p>
+              </section>
+            )}
+
             <section className="space-y-2">
-              <h2 className="text-base font-black text-[#111111] dark:text-white">1. When You Can Get a Refund</h2>
-              <p>You can request a full refund if:</p>
+              <h2 className="text-base font-black text-[#111111] dark:text-white">Important Notes</h2>
               <ul className="list-disc pl-5 space-y-1">
-                <li><strong>Your item never arrived:</strong> The seller did not deliver your order.</li>
-                <li><strong>Item not as described:</strong> The item you received is clearly different in material, color, size, or quality from the listing photos.</li>
-                <li><strong>Item arrived damaged:</strong> The item was broken or ruined during packaging or transit.</li>
-              </ul>
-            </section>
-
-            <section className="space-y-2">
-              <h2 className="text-base font-black text-[#111111] dark:text-white">2. The 3-Day Reporting Window</h2>
-              <p>
-                You must report any issue within <strong>3 days</strong> after your item is marked delivered.
-              </p>
-              <p>
-                To report a problem, go to your <strong>Orders</strong> page in the app and tap <strong>&quot;Report Problem&quot;</strong>.
-              </p>
-            </section>
-
-            <section className="space-y-2">
-              <h2 className="text-base font-black text-[#111111] dark:text-white">3. What Evidence to Upload</h2>
-              <p>To help us resolve your issue fairly, please upload:</p>
-              <ul className="list-disc pl-5 space-y-1">
-                <li>Clear photos of the package and item received.</li>
-                <li>A short explanation of what is wrong.</li>
-                <li>Any unboxing photos or videos if available.</li>
-              </ul>
-              <p>
-                Sellers are also asked to provide their packing photo (taken before shipping) and proof of dispatch.
-              </p>
-            </section>
-
-            <section className="space-y-2">
-              <h2 className="text-base font-black text-[#111111] dark:text-white">4. How Shop It Decides Disputes</h2>
-              <p>
-                Our safety moderation team reviews the evidence from both the buyer and the seller within <strong>5 working days</strong>.
-              </p>
-              <p>
-                While a dispute is open, the money remains safely frozen in escrow. The seller cannot withdraw it, and it will not auto-release.
-              </p>
-              <p>
-                If the dispute is decided in the buyer&apos;s favour, <strong>100% of the payment</strong> is refunded to the buyer. If the dispute is resolved in the seller&apos;s favour (for example, proof of complete and intact delivery), the money is released to the seller&apos;s Available balance.
-              </p>
-            </section>
-
-            <section className="space-y-2">
-              <h2 className="text-base font-black text-[#111111] dark:text-white">5. What is NOT Covered</h2>
-              <ul className="list-disc pl-5 space-y-1">
-                <li><strong>Change of mind:</strong> We do not offer refunds if you simply changed your mind on custom-made, personalized, or made-to-order crafts.</li>
-                <li><strong>Off-platform payments:</strong> If you paid a seller directly outside the app (via cash, bank transfer, WhatsApp, or phone call), Shop It cannot protect your money or issue a refund.</li>
-                <li><strong>Reports made after the 3-day window:</strong> Once the 3-day window closes and funds have auto-released after 5 days, transactions are final.</li>
+                <li><strong>Custom-made items:</strong> Change of mind on personalized or custom-beaded items is not covered once production matches your request.</li>
+                <li><strong>Platform boundaries:</strong> {legalCopy.refunds.offPlatformRule}</li>
               </ul>
             </section>
           </div>
@@ -505,7 +469,7 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
           <div className="space-y-6">
             <div className="border-b border-slate-200 dark:border-stone-800 pb-4">
               <span className="text-[11px] font-black uppercase tracking-wider text-rose-600">
-                Safety First
+                Marketplace Rules
               </span>
               <h1 className="text-2xl sm:text-3xl font-black text-[#111111] dark:text-white mt-1">
                 Prohibited Items Policy
@@ -515,20 +479,18 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
               </p>
             </div>
 
-            <p>
-              Shop It is a safe marketplace for young artisans, students, and teen makers. To protect all members of our community, the following items are strictly banned from being listed, sold, or promoted:
-            </p>
+            <p>{legalCopy.prohibited.intro}</p>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="p-4 rounded-2xl bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-900 space-y-1.5">
-                <h3 className="font-bold text-rose-900 dark:text-rose-200 text-xs">Illegal &amp; Regulated Goods</h3>
+                <h3 className="font-bold text-rose-900 dark:text-rose-200 text-xs">Illegal &amp; Hazardous Goods</h3>
                 <p className="text-xs text-rose-800 dark:text-rose-300">
-                  Any product that breaks the laws of Nigeria. Weapons, firearms, knives, ammunition, explosives, fireworks, or hazardous chemicals.
+                  Any product that breaks the laws of Nigeria, including weapons, knives, ammunition, explosives, fireworks, or hazardous chemicals.
                 </p>
               </div>
 
               <div className="p-4 rounded-2xl bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-900 space-y-1.5">
-                <h3 className="font-bold text-rose-900 dark:text-rose-200 text-xs">Counterfeit &amp; Fake Brands</h3>
+                <h3 className="font-bold text-rose-900 dark:text-rose-200 text-xs">Counterfeit &amp; Replica Goods</h3>
                 <p className="text-xs text-rose-800 dark:text-rose-300">
                   Knock-off designer wear, replica shoes, fake branded perfumes, unauthorized logos, or pirated media.
                 </p>
@@ -537,28 +499,28 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
               <div className="p-4 rounded-2xl bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-900 space-y-1.5">
                 <h3 className="font-bold text-rose-900 dark:text-rose-200 text-xs">Adult &amp; Explicit Content</h3>
                 <p className="text-xs text-rose-800 dark:text-rose-300">
-                  Pornography, adult toys, sexual services, or any sexually suggestive materials. Shop It is a youth marketplace with members starting at age 10.
+                  Pornography, adult items, sexual services, or sexually explicit material. Shop It is a youth marketplace with members starting at age 10.
                 </p>
               </div>
 
               <div className="p-4 rounded-2xl bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-900 space-y-1.5">
-                <h3 className="font-bold text-rose-900 dark:text-rose-200 text-xs">Drugs &amp; Medicines</h3>
+                <h3 className="font-bold text-rose-900 dark:text-rose-200 text-xs">Drugs, Alcohol &amp; Medicines</h3>
                 <p className="text-xs text-rose-800 dark:text-rose-300">
-                  Illegal drugs, prescription medicines, regulated herbs, cannabis, tobacco, cigarettes, vapes, and alcoholic drinks.
+                  Illegal drugs, prescription medicines, cannabis, tobacco, cigarettes, vapes, and alcoholic drinks.
                 </p>
               </div>
 
               <div className="p-4 rounded-2xl bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-900 space-y-1.5">
                 <h3 className="font-bold text-rose-900 dark:text-rose-200 text-xs">Stolen Property</h3>
                 <p className="text-xs text-rose-800 dark:text-rose-300">
-                  Goods you do not own or have authorization to sell. Stolen phones, gadgets, or campus property.
+                  Goods you do not own or have authorization to sell, including stolen phones, gadgets, or campus property.
                 </p>
               </div>
 
               <div className="p-4 rounded-2xl bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-900 space-y-1.5">
                 <h3 className="font-bold text-rose-900 dark:text-rose-200 text-xs">Contact Details in Listings</h3>
                 <p className="text-xs text-rose-800 dark:text-rose-300">
-                  Phone numbers, WhatsApp links, social media handles, email addresses, or external payment links in product titles, descriptions, or listing photos.
+                  Phone numbers, WhatsApp links, social media handles, email addresses, or external payment links in titles, descriptions, or listing photos.
                 </p>
               </div>
             </div>
@@ -566,10 +528,7 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
             <section className="space-y-2 pt-2">
               <h2 className="text-base font-black text-[#111111] dark:text-white">Listing Review &amp; Removal</h2>
               <p>
-                Listings on Shop It are monitored and reviewed by our moderation system.
-              </p>
-              <p>
-                Any listing found violating these rules will be removed immediately without prior warning. Sellers who repeatedly post prohibited items will have their accounts permanently banned and remaining balances reviewed for fraud.
+                Listings on Shop It may be reviewed by moderation. Items violating these rules are removed, and repeat violators face account suspension or termination.
               </p>
             </section>
           </div>
@@ -588,7 +547,7 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
                 Seller Guide
               </h1>
               <p className="text-xs text-slate-500 dark:text-stone-400 mt-1">
-                Simple, actionable advice for young makers and students · Last updated: <strong>{lastUpdated}</strong>
+                Simple advice for young makers and students · Last updated: <strong>{lastUpdated}</strong>
               </p>
             </div>
 
@@ -600,7 +559,7 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
                 <div className="space-y-1">
                   <h3 className="font-bold text-[#111111] dark:text-white text-base">Take Clear, Honest Photos</h3>
                   <p className="text-xs">
-                    Snap photos in bright natural daylight. Show the front, back, and details of your item. Never use pictures downloaded from the internet—buyers want to see the real handmade item you made.
+                    Snap photos in bright natural daylight showing the real handmade item you crafted. Avoid stock photos from the internet.
                   </p>
                 </div>
               </div>
@@ -611,9 +570,7 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
                 </span>
                 <div className="space-y-1">
                   <h3 className="font-bold text-[#111111] dark:text-white text-base">Price Your Item Fairly</h3>
-                  <p className="text-xs">
-                    Calculate your cost of materials plus your time. You set your item price. Shop It adds the service fee automatically at checkout, so you always receive your full listed seller price upon delivery.
-                  </p>
+                  <p className="text-xs">{legalCopy.sellerGuide.priceDesc}</p>
                 </div>
               </div>
 
@@ -622,9 +579,9 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
                   3
                 </span>
                 <div className="space-y-1">
-                  <h3 className="font-bold text-[#111111] dark:text-white text-base">Pack Securely</h3>
+                  <h3 className="font-bold text-[#111111] dark:text-white text-base">Pack Carefully</h3>
                   <p className="text-xs">
-                    Wrap beads, bottles, or crochet items in bubble wrap or clean pouches so they survive campus transit and rainy weather. Good packaging prevents damage disputes!
+                    Wrap beads, bottles, or crochet items in clean pouches or protective wrapping so they arrive undamaged.
                   </p>
                 </div>
               </div>
@@ -636,7 +593,7 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
                 <div className="space-y-1">
                   <h3 className="font-bold text-[#111111] dark:text-white text-base">Upload Your Packing Photo</h3>
                   <p className="text-xs">
-                    Before marking an order as shipped, take a photo of the packed item. Uploading this photo protects you against false damage claims if a buyer opens a dispute later.
+                    When dispatching an order in the app, take a clear photo of the packed item to document condition before handover.
                   </p>
                 </div>
               </div>
@@ -646,9 +603,9 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
                   5
                 </span>
                 <div className="space-y-1">
-                  <h3 className="font-bold text-[#111111] dark:text-white text-base">Deliver Safely</h3>
+                  <h3 className="font-bold text-[#111111] dark:text-white text-base">Meet at Public Campus Pickup Spots</h3>
                   <p className="text-xs">
-                    For campus handoffs, meet at public, well-lit safe pickup spots (such as your hall porter desk or campus student union building). If sending via a rider, keep the waybill receipt.
+                    For campus handovers, meet in public, well-lit daytime locations such as a hall porter desk or student union building.
                   </p>
                 </div>
               </div>
@@ -658,10 +615,8 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
                   6
                 </span>
                 <div className="space-y-1">
-                  <h3 className="font-bold text-[#111111] dark:text-white text-base">Get Paid in Your Wallet</h3>
-                  <p className="text-xs">
-                    When the buyer confirms receipt (or after 5 days once dispatched if they do not reply), your earnings move to your Available balance. You can withdraw anytime to any verified Nigerian bank account listed in your Wallet (minimum ₦1,000, ₦0 withdrawal transfer fee).
-                  </p>
+                  <h3 className="font-bold text-[#111111] dark:text-white text-base">{legalCopy.sellerGuide.step6Title}</h3>
+                  <p className="text-xs">{legalCopy.sellerGuide.step6Desc}</p>
                 </div>
               </div>
 
@@ -670,10 +625,8 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
                   7
                 </span>
                 <div className="space-y-1">
-                  <h3 className="font-bold text-[#111111] dark:text-white text-base">Avoid Scams</h3>
-                  <p className="text-xs">
-                    Never accept payments or chat outside Shop It. If a buyer says &quot;let me transfer to your Opay directly&quot; or asks for your phone number, refuse and report them. Payments made outside the app cannot be protected.
-                  </p>
+                  <h3 className="font-bold text-[#111111] dark:text-white text-base">Stay Inside Shop It Chat</h3>
+                  <p className="text-xs">{legalCopy.sellerGuide.step7Desc}</p>
                 </div>
               </div>
             </div>
@@ -681,80 +634,72 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
         )}
 
         {/* ========================================================= */}
-        {/* 6. BUYER PROTECTION EXPLAINER */}
+        {/* 6. BUYER PROTECTION / ORDERING GUIDE */}
         {/* ========================================================= */}
         {currentSlug === 'buyer-protection' && (
           <div className="space-y-6">
             <div className="border-b border-slate-200 dark:border-stone-800 pb-4">
               <span className="text-[11px] font-black uppercase tracking-wider text-[#16A34A] dark:text-[#9FE870]">
-                100% Escrow Guarantee
+                {legalCopy.buyerProtection.eyebrow}
               </span>
               <h1 className="text-2xl sm:text-3xl font-black text-[#111111] dark:text-white mt-1">
-                Buyer Protection
+                {legalCopy.buyerProtection.title}
               </h1>
               <p className="text-xs text-slate-500 dark:text-stone-400 mt-1">
-                How Shop It keeps your money safe until your craft arrives · Last updated: <strong>{lastUpdated}</strong>
+                {legalCopy.buyerProtection.subtitle} · Last updated: <strong>{lastUpdated}</strong>
               </p>
             </div>
 
             <div className="p-4 rounded-2xl bg-[#FFF4EC] dark:bg-[#1E1B18] border-2 border-[#FF6B00] flex items-center gap-3">
               <ShieldCheck className="w-6 h-6 text-[#FF6B00] shrink-0" />
               <p className="text-xs font-bold text-[#111111] dark:text-[#F4F4F5]">
-                Your money is held safely until you confirm your item arrived. Never pay outside Shop It.
+                {legalCopy.buyerProtection.bannerText}
               </p>
             </div>
 
             <section className="space-y-3">
-              <h2 className="text-base font-black text-[#111111] dark:text-white">How the Escrow Process Works</h2>
+              <h2 className="text-base font-black text-[#111111] dark:text-white">
+                {legalCopy.buyerProtection.processTitle}
+              </h2>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
-                <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-stone-900 border border-slate-200 dark:border-stone-800 space-y-1">
-                  <span className="font-bold text-[#FF6B00] block text-sm">Step 1: Pay Securely</span>
-                  <p className="text-slate-600 dark:text-stone-300">
-                    You pay online through Flutterwave. Your money is logged in escrow protection—the seller cannot withdraw it yet.
-                  </p>
-                </div>
-                <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-stone-900 border border-slate-200 dark:border-stone-800 space-y-1">
-                  <span className="font-bold text-[#FF6B00] block text-sm">Step 2: Maker Delivers</span>
-                  <p className="text-slate-600 dark:text-stone-300">
-                    The artisan makes and packages your item, uploads proof, and delivers it to your campus spot or area.
-                  </p>
-                </div>
-                <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-stone-900 border border-slate-200 dark:border-stone-800 space-y-1">
-                  <span className="font-bold text-[#FF6B00] block text-sm">Step 3: You Confirm</span>
-                  <p className="text-slate-600 dark:text-stone-300">
-                    You inspect your item. Once you tap &quot;Item received&quot;, the funds are released to the maker.
-                  </p>
-                </div>
+                {legalCopy.buyerProtection.steps.map((step, idx) => (
+                  <div
+                    key={idx}
+                    className="p-3.5 rounded-xl bg-slate-50 dark:bg-stone-900 border border-slate-200 dark:border-stone-800 space-y-1"
+                  >
+                    <span className="font-bold text-[#FF6B00] block text-sm">{step.title}</span>
+                    <p className="text-slate-600 dark:text-stone-300">{step.body}</p>
+                  </div>
+                ))}
               </div>
             </section>
 
-            <section className="space-y-2">
-              <h2 className="text-base font-black text-[#111111] dark:text-white">What is Covered</h2>
-              <ul className="list-disc pl-5 space-y-1 text-xs">
-                <li>Items that never arrive.</li>
-                <li>Items that arrive broken or damaged.</li>
-                <li>Items that are significantly different from what was shown.</li>
-              </ul>
-            </section>
+            {paymentsEnabled && (
+              <>
+                <section className="space-y-2">
+                  <h2 className="text-base font-black text-[#111111] dark:text-white">Eligible Order Issues</h2>
+                  <ul className="list-disc pl-5 space-y-1 text-xs">
+                    <li>Items that never arrive.</li>
+                    <li>Items that arrive broken or damaged.</li>
+                    <li>Items that are significantly different from what was shown.</li>
+                  </ul>
+                </section>
+
+                <section className="space-y-2">
+                  <h2 className="text-base font-black text-[#111111] dark:text-white">How to Report an Issue</h2>
+                  <ol className="list-decimal pl-5 space-y-1 text-xs">
+                    <li>Open your <strong>Orders</strong> tab in Shop It within <strong>3 days</strong> of delivery.</li>
+                    <li>Tap <strong>&quot;Report Problem&quot;</strong> on the order.</li>
+                    <li>Upload photos and describe what went wrong.</li>
+                    <li>Our moderation team reviews both sides within 5 working days before any payout or refund decision.</li>
+                  </ol>
+                </section>
+              </>
+            )}
 
             <section className="space-y-2">
-              <h2 className="text-base font-black text-[#111111] dark:text-white">How to Claim</h2>
-              <p className="text-xs">
-                If there is an issue with your order:
-              </p>
-              <ol className="list-decimal pl-5 space-y-1 text-xs">
-                <li>Open your <strong>Orders</strong> tab in Shop It within <strong>3 days</strong> of delivery.</li>
-                <li>Tap <strong>&quot;Report Problem&quot;</strong> on the order.</li>
-                <li>Upload photos and write what went wrong.</li>
-                <li>Our moderation team reviews and decides within 5 working days. If approved, you receive a 100% refund.</li>
-              </ol>
-            </section>
-
-            <section className="space-y-2">
-              <h2 className="text-base font-black text-[#111111] dark:text-white">The Golden Rule</h2>
-              <p className="text-xs">
-                <strong>Always pay inside Shop It.</strong> If a seller asks you to pay into their personal bank account, Opay, or send airtime, refuse and report them. We cannot refund payments made outside the platform.
-              </p>
+              <h2 className="text-base font-black text-[#111111] dark:text-white">Reminder</h2>
+              <p className="text-xs">{legalCopy.buyerProtection.goldenRule}</p>
             </section>
           </div>
         )}
@@ -772,69 +717,12 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
                 Frequently Asked Questions
               </h1>
               <p className="text-xs text-slate-500 dark:text-stone-400 mt-1">
-                Real, straightforward answers in plain English · Last updated: <strong>{lastUpdated}</strong>
+                Plain answers about how Shop It works · Last updated: <strong>{lastUpdated}</strong>
               </p>
             </div>
 
             <div className="space-y-3">
-              {[
-                {
-                  q: 'How old do I need to be to use Shop It?',
-                  a: 'You must be at least 10 years old. If you are under 18, you need permission from a parent or guardian. Users under 10 are not permitted to register.',
-                },
-                {
-                  q: 'How is the service fee worked out?',
-                  a: 'Sellers set their own craft price. Shop It adds a service fee, which is calculated automatically by the website and shown clearly before you pay (Item Price + Service Fee + Delivery Fee = Total). We do not have a single fixed fee amount. A fee change never affects an order you have already paid for.',
-                },
-                {
-                  q: 'Do you collect my phone number?',
-                  a: 'No. Shop It uses email only. You sign up, log in, and verify all actions with 6-digit codes sent to your inbox. No phone numbers are collected.',
-                },
-                {
-                  q: 'How does escrow keep my money safe?',
-                  a: 'When you make a payment via Flutterwave, your order funds remain in escrow hold inside the platform ledger until you receive your order and tap "Item received" in the app.',
-                },
-                {
-                  q: 'What happens if I forget to tap "Item received" or the seller never ships?',
-                  a: 'Once the seller marks your order shipped or delivered and 5 days pass after payment with no open dispute, the escrow automatically releases to the seller. If a paid order is never marked shipped, we remind the seller at day 3, and at day 5 we automatically cancel and issue a 100% refund to you (unless there is an open dispute or an admin hold).',
-                },
-                {
-                  q: 'How do I get verified as a seller?',
-                  a: 'To sell and withdraw money, go to your seller profile and upload your National Identification Number (NIN), a photo of your ID slip or card, and a live selfie. Sellers under 18 also provide parent/guardian details.',
-                },
-                {
-                  q: 'What happens to my ID photo and selfie after verification?',
-                  a: 'Your ID photo and selfie are permanently deleted immediately after the admin verification decision. Only the last 4 NIN digits, a cryptographic hash, the decision, and the review date are kept.',
-                },
-                {
-                  q: 'How do sellers withdraw their earnings?',
-                  a: 'Sellers withdraw from their Available balance directly to any supported Nigerian bank account. The minimum withdrawal is ₦1,000, confirmed by an email code (₦0 transfer fee). For sellers under 18, the bank account must belong to the verified parent/guardian, requires a one-time Admin approval, and has a ₦25,000 daily withdrawal cap.',
-                },
-                {
-                  q: 'Why is there a 24-hour wait on a new payout account?',
-                  a: 'For your security, when you add or change a payout account, you must wait 24 hours before you can withdraw to it. This stops hackers from draining funds if your account is ever compromised.',
-                },
-                {
-                  q: 'How long do I have to report a problem with an order?',
-                  a: 'You have 3 days after the item is marked delivered to tap "Report Problem" and upload evidence in the app.',
-                },
-                {
-                  q: 'Why are phone numbers and digits blocked in chat?',
-                  a: 'All transactions must stay inside Shop It so escrow protection can protect you. Blocking phone numbers, number words, and contact links prevents off-platform scammers.',
-                },
-                {
-                  q: 'How do I delete my account and data?',
-                  a: 'You can request account deletion by emailing support at shopitverified@gmail.com. We complete account and data deletion within 14 days in compliance with the Nigeria Data Protection Act 2023 (NDPA).',
-                },
-                {
-                  q: 'Is Shop It a registered company?',
-                  a: 'Shop It is operated by TEEDS, an emerging student enterprise. TEEDS is not yet a registered company, and we do not claim any CAC registration.',
-                },
-                {
-                  q: 'How fast does customer support respond?',
-                  a: 'Our support team replies to all emails sent to shopitverified@gmail.com within 3 working days.',
-                },
-              ].map((item, idx) => {
+              {legalCopy.faqs.map((item, idx) => {
                 const isOpen = expandedFaq === idx;
                 return (
                   <div
@@ -877,7 +765,7 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
                 Contact Shop It Support
               </h1>
               <p className="text-xs text-slate-500 dark:text-stone-400 mt-1">
-                Last updated: <strong>{lastUpdated}</strong> · Official Support Channel
+                Last updated: <strong>{lastUpdated}</strong> · Support Channel
               </p>
             </div>
 
@@ -887,33 +775,30 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
                 <div className="p-4 rounded-2xl bg-slate-50 dark:bg-stone-900 border border-slate-200 dark:border-stone-800 space-y-2">
                   <div className="flex items-center gap-2">
                     <Mail className="w-4 h-4 text-[#FF6B00]" />
-                    <span className="font-bold text-xs text-[#111111] dark:text-white">Official Support Email</span>
+                    <span className="font-bold text-xs text-[#111111] dark:text-white">Support Email</span>
                   </div>
                   <a
-                    href="mailto:shopitverified@gmail.com"
+                    href={`mailto:${OPERATOR_INFO.supportEmail}`}
                     className="text-sm sm:text-base font-black text-[#FF6B00] hover:underline block"
                   >
-                    shopitverified@gmail.com
+                    {OPERATOR_INFO.supportEmail}
                   </a>
                   <p className="text-xs text-slate-500 dark:text-stone-400 flex items-center gap-1.5 pt-1">
                     <Clock className="w-3.5 h-3.5 text-slate-400" />
-                    <span>Response time: <strong>We reply within 3 working days.</strong></span>
+                    <span>{OPERATOR_INFO.supportSlaLine}</span>
                   </p>
                 </div>
 
                 <div className="p-4 rounded-2xl bg-slate-50 dark:bg-stone-900 border border-slate-200 dark:border-stone-800 space-y-2 text-xs">
                   <span className="font-bold text-[#111111] dark:text-white block">Operator Details</span>
                   <p>
-                    <strong>Operator:</strong> TEEDS (Independent Student Venture)
+                    <strong>Operator:</strong> {legalCopy.contact.operatorLine}
                   </p>
                   <p>
-                    <strong>Status:</strong> Not yet registered with CAC. Never claim CAC registration.
+                    <strong>Status:</strong> {legalCopy.contact.statusLine}
                   </p>
                   <p>
                     <strong>Jurisdiction:</strong> Federal Republic of Nigeria (disputes handled in Nigerian courts).
-                  </p>
-                  <p>
-                    <strong>Privacy Compliance:</strong> Nigeria Data Protection Act 2023 (NDPA).
                   </p>
                 </div>
 
@@ -933,7 +818,7 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
                     </div>
                     <h4 className="font-black text-sm text-[#111111] dark:text-white">Message Received!</h4>
                     <p className="text-xs text-slate-600 dark:text-stone-300 max-w-xs mx-auto">
-                      Thank you for reaching out. A confirmation has been logged, and our support team will reply to <strong>{contactEmail}</strong> within 3 working days.
+                      Thank you for reaching out. Our team will reply to <strong>{contactEmail}</strong> within 3 working days.
                     </p>
                     <button
                       onClick={() => {
@@ -985,10 +870,10 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
                         className="w-full h-10 px-3 rounded-xl border border-slate-300 dark:border-stone-700 bg-white dark:bg-[#15161C] text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-[#FF6B00]"
                       >
                         <option value="General Question">General Question</option>
-                        <option value="Order & Escrow Support">Order &amp; Escrow Support</option>
+                        <option value={legalCopy.contact.supportOptionLabel}>{legalCopy.contact.supportOptionLabel}</option>
                         <option value="Seller Verification & KYC">Seller Verification &amp; KYC</option>
-                        <option value="NDPA Data Deletion Request">NDPA Data Deletion Request (14 Days)</option>
-                        <option value="Report Scam or Off-Platform Bypass">Report Scam or Off-Platform Bypass</option>
+                        <option value="Data Deletion Request">Account &amp; Data Deletion Request (14 Days)</option>
+                        <option value="Report Scam or Off-Platform Bypass">Report Scam or Policy Violation</option>
                       </select>
                     </div>
 
@@ -1015,7 +900,7 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
                       <span>{isSubmittingContact ? 'Sending Message...' : 'Send Message to Support'}</span>
                     </button>
                     <span className="text-[10px] text-slate-500 block text-center">
-                      Guaranteed response within 3 working days to your email.
+                      {legalCopy.contact.submitNote}
                     </span>
                   </form>
                 )}
@@ -1027,3 +912,4 @@ export const LegalAndHelpPages: React.FC<LegalPagesProps> = ({ initialSlug = 'te
     </div>
   );
 };
+

@@ -17,6 +17,12 @@ import {
 } from '../auth/sessionStore.js';
 import {
   PROFILE_INTERESTS,
+  ALLOWED_LANGUAGES,
+  PROCESSING_TIME_OPTIONS,
+  MAX_TAGLINE_LENGTH,
+  MAX_BIO_LENGTH,
+  MAX_SHOP_STORY_LENGTH,
+  MAX_CRAFT_MATERIALS_LENGTH,
   DEFAULT_NOTIFICATION_PREFS,
   DEFAULT_PRIVACY_SETTINGS,
   UNDER_18_PRIVACY_SETTINGS,
@@ -25,6 +31,7 @@ import {
   extractFirstName,
   generateUniqueProfileSlug,
   validateAndSanitizeImageInput,
+  sanitizeDeliveryOptions,
   sanitizeNotificationPrefs,
   sanitizePrivacySettings,
 } from '../lib/validation.js';
@@ -88,7 +95,7 @@ function mapProductRow(row: any, sellerDisplayName?: string, sellerAvatarUrl?: s
     reviews: Array.isArray(row.reviews) ? row.reviews : parseJsonSafe(row.reviews, []),
     delivery: {
       allowsPickup: true,
-      pickupLocation: `${row.location_area || 'Hub'} Safe Handoff Spot`,
+      pickupLocation: `${row.location_area || 'Hub'} Campus Pickup Spot`,
       pickupFee: Math.round(Number(row.delivery_pickup_fee_kobo || 0)) / 100,
       allowsLocalDelivery: true,
       localDeliveryFee: row.delivery_local_fee_kobo !== undefined && row.delivery_local_fee_kobo !== null
@@ -108,33 +115,52 @@ function mapProductRow(row: any, sellerDisplayName?: string, sellerAvatarUrl?: s
 
 function computeProfileCompleteness(params: {
   avatarUrl?: string | null;
-  coverUrl?: string | null;
+  tagline?: string | null;
   bio?: string | null;
+  locationState?: string | null;
   campus?: string | null;
   locationArea?: string | null;
   interests: string[];
   isVerifiedEmail: boolean;
   isSeller: boolean;
   shopName?: string | null;
+  shopStory?: string | null;
   activeProductsCount: number;
 }) {
-  const items = [
-    { key: 'avatar', label: 'Add a profile photo', done: Boolean(params.avatarUrl) },
-    { key: 'bio', label: 'Write a short bio', done: Boolean(params.bio && params.bio.trim().length >= 10) },
-    { key: 'location', label: 'Set your campus & area', done: Boolean(params.campus || params.locationArea) },
-    { key: 'interests', label: 'Pick at least 1 craft interest', done: params.interests.length > 0 },
-    { key: 'email', label: 'Verify your email address', done: Boolean(params.isVerifiedEmail) },
+  const items: Array<{ key: string; label: string; done: boolean; targetField: string }> = [
+    { key: 'avatar', label: 'Add a profile photo', done: Boolean(params.avatarUrl), targetField: 'avatar' },
+    {
+      key: 'tagline',
+      label: 'Add a short tagline',
+      done: Boolean(params.tagline && params.tagline.trim().length >= 5),
+      targetField: 'tagline',
+    },
+    { key: 'bio', label: 'Write a short bio', done: Boolean(params.bio && params.bio.trim().length >= 10), targetField: 'bio' },
+    {
+      key: 'location',
+      label: 'Set your state & area',
+      done: Boolean(params.locationState || params.campus || params.locationArea),
+      targetField: 'location',
+    },
+    {
+      key: 'interests',
+      label: 'Pick at least 1 craft interest',
+      done: params.interests.length > 0,
+      targetField: 'interests',
+    },
   ];
   if (params.isSeller) {
     items.push({
-      key: 'shop_name',
-      label: 'Name your shop',
-      done: Boolean(params.shopName && params.shopName.trim().length >= 2),
+      key: 'shop_story',
+      label: 'Share your shop story',
+      done: Boolean(params.shopStory && params.shopStory.trim().length >= 15),
+      targetField: 'shopStory',
     });
     items.push({
-      key: 'listing',
+      key: 'first_product',
       label: 'Publish at least 1 craft listing',
       done: params.activeProductsCount > 0,
+      targetField: 'firstProduct',
     });
   }
   const doneCount = items.filter(i => i.done).length;
@@ -292,7 +318,8 @@ router.get('/profiles/me', requireAuth, async (req: AuthenticatedRequest, res: R
   try {
     const userId = req.user!.userId;
     const uRes = await dbQuery(
-      `SELECT u.*, s.id as s_id, s.shop_name, s.bio as s_bio, s.campus as s_campus, s.location_area as s_area,
+      `SELECT u.*, s.id as s_id, s.shop_name, s.bio as s_bio, s.shop_story, s.craft_materials,
+              s.processing_time, s.delivery_options, s.campus as s_campus, s.location_area as s_area,
               s.location_state as s_state, s.location_city as s_city,
               s.logo_url as s_logo_url, s.banner_url as s_banner_url,
               s.is_verified_seller, s.verification_status, s.under_18 as s_under_18,
@@ -311,6 +338,12 @@ router.get('/profiles/me', requireAuth, async (req: AuthenticatedRequest, res: R
     const displayName = row.display_name || extractFirstName(row.name || 'Member');
     const isUnder18 = (row.age !== null && row.age !== undefined && Number(row.age) < 18) || Boolean(row.s_under_18);
     const interests = parseJsonSafe<string[]>(row.interests, []);
+    const languages = parseJsonSafe<string[]>(row.languages, []);
+    const deliveryOptions = parseJsonSafe<{
+      allowsPickup?: boolean;
+      allowsLocalDelivery?: boolean;
+      pickupSpots?: string[];
+    }>(row.delivery_options, { allowsPickup: true, allowsLocalDelivery: true, pickupSpots: [] });
     const notificationPrefs = sanitizeNotificationPrefs(parseJsonSafe(row.notification_prefs, DEFAULT_NOTIFICATION_PREFS));
     const privacySettings = sanitizePrivacySettings(
       parseJsonSafe(row.privacy_settings, isUnder18 ? UNDER_18_PRIVACY_SETTINGS : DEFAULT_PRIVACY_SETTINGS),
@@ -323,6 +356,14 @@ router.get('/profiles/me', requireAuth, async (req: AuthenticatedRequest, res: R
           id: row.s_id,
           shop_name: row.shop_name,
           bio: row.s_bio,
+          shop_story: row.shop_story,
+          craft_materials: row.craft_materials,
+          processing_time: row.processing_time,
+          delivery_options: {
+            allowsPickup: deliveryOptions?.allowsPickup !== false,
+            allowsLocalDelivery: deliveryOptions?.allowsLocalDelivery !== false,
+            pickupSpots: Array.isArray(deliveryOptions?.pickupSpots) ? deliveryOptions.pickupSpots : [],
+          },
           campus: row.s_campus,
           location_area: row.s_area,
           location_state: row.s_state,
@@ -356,14 +397,16 @@ router.get('/profiles/me', requireAuth, async (req: AuthenticatedRequest, res: R
     const pendingFollowRequestsCount = parseInt(String(pendingReqRes.rows[0]?.total || '0'), 10);
     const completeness = computeProfileCompleteness({
       avatarUrl: row.avatar_url || sellerRow?.logo_url,
-      coverUrl: row.cover_url || sellerRow?.banner_url,
+      tagline: row.tagline,
       bio: row.bio || sellerRow?.bio,
+      locationState: row.location_state || sellerRow?.location_state,
       campus: row.campus || sellerRow?.campus,
       locationArea: row.location_area || sellerRow?.location_area,
       interests,
       isVerifiedEmail: Boolean(row.is_verified_email),
       isSeller: Boolean(sellerRow),
       shopName: sellerRow?.shop_name,
+      shopStory: sellerRow?.shop_story,
       activeProductsCount: activeProds.length,
     });
 
@@ -375,13 +418,17 @@ router.get('/profiles/me', requireAuth, async (req: AuthenticatedRequest, res: R
         fullName: row.name,
         displayName,
         profileSlug: row.profile_slug,
+        canonicalSlug: row.profile_slug,
+        tagline: row.tagline || '',
         role: row.role,
         avatarUrl: row.avatar_url || sellerRow?.logo_url || null,
         coverUrl: row.cover_url || sellerRow?.banner_url || null,
         bio: row.bio || '',
+        locationState: row.location_state || sellerRow?.location_state || '',
         campus: row.campus || sellerRow?.campus || '',
         locationArea: row.location_area || sellerRow?.location_area || '',
         interests,
+        languages,
         isVerifiedEmail: Boolean(row.is_verified_email),
         isUnder18,
         memberSince: row.created_at,
@@ -399,6 +446,11 @@ router.get('/profiles/me', requireAuth, async (req: AuthenticatedRequest, res: R
               id: sellerRow.id,
               shopName: sellerRow.shop_name,
               bio: sellerRow.bio || '',
+              shopStory: sellerRow.shop_story || '',
+              craftMaterials: sellerRow.craft_materials || '',
+              processingTime: sellerRow.processing_time || '',
+              deliveryOptions: sellerRow.delivery_options,
+              locationState: sellerRow.location_state || row.location_state || 'Lagos',
               campus: sellerRow.campus || 'Lagos Mainland',
               locationArea: sellerRow.location_area || 'Yaba',
               logoUrl: sellerRow.logo_url || row.avatar_url || null,
@@ -423,16 +475,25 @@ router.patch('/profiles/me', requireAuth, async (req: AuthenticatedRequest, res:
   try {
     const check = rejectUnknownFields(req.body, [
       'displayName',
+      'tagline',
       'avatarUrl',
       'coverUrl',
       'bio',
+      'locationState',
       'campus',
       'locationArea',
       'interests',
+      'languages',
       'shopName',
       'shopBio',
+      'shopStory',
+      'craftMaterials',
+      'processingTime',
+      'deliveryOptions',
+      'vacationMode',
       'logoUrl',
       'bannerUrl',
+      'privacySettings',
     ]);
     if (!check.ok) {
       return res.status(400).json({ status: false, message: check.message });
@@ -453,11 +514,30 @@ router.patch('/profiles/me', requireAuth, async (req: AuthenticatedRequest, res:
       nextDisplayName = cleaned;
     }
 
+    let nextTagline: string | undefined;
+    if ('tagline' in body) {
+      const cleaned = String(body.tagline || '').trim().replace(/\s+/g, ' ');
+      if (cleaned.length > MAX_TAGLINE_LENGTH) {
+        return res.status(400).json({
+          status: false,
+          message: `Tagline must be ${MAX_TAGLINE_LENGTH} characters or fewer.`,
+        });
+      }
+      const contactCheck = containsForbiddenContactInfo(cleaned);
+      if (contactCheck.blocked) {
+        return res.status(400).json({ status: false, message: `Tagline: ${contactCheck.reason}` });
+      }
+      nextTagline = cleaned;
+    }
+
     let nextBio: string | undefined;
     if ('bio' in body) {
       const cleaned = String(body.bio || '').trim();
-      if (cleaned.length > 200) {
-        return res.status(400).json({ status: false, message: 'Bio must be 200 characters or fewer.' });
+      if (cleaned.length > MAX_BIO_LENGTH) {
+        return res.status(400).json({
+          status: false,
+          message: `Bio must be ${MAX_BIO_LENGTH} characters or fewer.`,
+        });
       }
       const contactCheck = containsForbiddenContactInfo(cleaned);
       if (contactCheck.blocked) {
@@ -492,9 +572,82 @@ router.patch('/profiles/me', requireAuth, async (req: AuthenticatedRequest, res:
       nextShopBio = cleaned;
     }
 
+    let nextShopStory: string | undefined;
+    if ('shopStory' in body && body.shopStory !== undefined && body.shopStory !== null) {
+      const cleaned = String(body.shopStory).trim();
+      if (cleaned.length > MAX_SHOP_STORY_LENGTH) {
+        return res.status(400).json({
+          status: false,
+          message: `Shop story must be ${MAX_SHOP_STORY_LENGTH} characters or fewer.`,
+        });
+      }
+      const contactCheck = containsForbiddenContactInfo(cleaned);
+      if (contactCheck.blocked) {
+        return res.status(400).json({ status: false, message: `Shop story: ${contactCheck.reason}` });
+      }
+      nextShopStory = cleaned;
+    }
+
+    let nextCraftMaterials: string | undefined;
+    if ('craftMaterials' in body && body.craftMaterials !== undefined && body.craftMaterials !== null) {
+      const cleaned = String(body.craftMaterials).trim();
+      if (cleaned.length > MAX_CRAFT_MATERIALS_LENGTH) {
+        return res.status(400).json({
+          status: false,
+          message: `Craft & materials must be ${MAX_CRAFT_MATERIALS_LENGTH} characters or fewer.`,
+        });
+      }
+      const contactCheck = containsForbiddenContactInfo(cleaned);
+      if (contactCheck.blocked) {
+        return res.status(400).json({ status: false, message: `Craft & materials: ${contactCheck.reason}` });
+      }
+      nextCraftMaterials = cleaned;
+    }
+
+    let nextProcessingTime: string | undefined;
+    if ('processingTime' in body && body.processingTime !== undefined && body.processingTime !== null) {
+      const cleaned = String(body.processingTime).trim();
+      const allowedProcSet = new Set<string>(PROCESSING_TIME_OPTIONS);
+      if (cleaned !== '' && !allowedProcSet.has(cleaned)) {
+        return res.status(400).json({ status: false, message: 'Invalid processing time selection.' });
+      }
+      nextProcessingTime = cleaned;
+    }
+
+    let nextDeliveryOptions:
+      | { allowsPickup: boolean; allowsLocalDelivery: boolean; pickupSpots: string[] }
+      | undefined;
+    if ('deliveryOptions' in body && body.deliveryOptions !== undefined && body.deliveryOptions !== null) {
+      const dCheck = sanitizeDeliveryOptions(body.deliveryOptions);
+      if (!dCheck.valid) {
+        return res.status(400).json({ status: false, message: dCheck.message });
+      }
+      nextDeliveryOptions = dCheck.value;
+    }
+
+    let nextVacationMode: boolean | undefined;
+    if ('vacationMode' in body && body.vacationMode !== undefined) {
+      nextVacationMode = Boolean(body.vacationMode);
+    }
+
+    let nextLocationState: string | undefined;
+    if ('locationState' in body) {
+      const cleaned = String(body.locationState || '').trim().slice(0, 60);
+      const contactCheck = containsForbiddenContactInfo(cleaned);
+      if (contactCheck.blocked) {
+        return res.status(400).json({ status: false, message: `State: ${contactCheck.reason}` });
+      }
+      nextLocationState = cleaned;
+    }
+
     let nextCampus: string | undefined;
     if ('campus' in body) {
-      nextCampus = String(body.campus || '').trim().slice(0, 120);
+      const cleaned = String(body.campus || '').trim().slice(0, 120);
+      const contactCheck = containsForbiddenContactInfo(cleaned);
+      if (contactCheck.blocked) {
+        return res.status(400).json({ status: false, message: `Campus: ${contactCheck.reason}` });
+      }
+      nextCampus = cleaned;
     }
 
     let nextArea: string | undefined;
@@ -522,6 +675,23 @@ router.patch('/profiles/me', requireAuth, async (req: AuthenticatedRequest, res:
         if (!deduped.includes(s)) deduped.push(s);
       }
       nextInterests = deduped.slice(0, 10);
+    }
+
+    let nextLanguages: string[] | undefined;
+    if ('languages' in body) {
+      if (!Array.isArray(body.languages)) {
+        return res.status(400).json({ status: false, message: 'Languages must be a list of allowed options.' });
+      }
+      const allowedLangSet = new Set<string>(ALLOWED_LANGUAGES);
+      const dedupedLangs: string[] = [];
+      for (const item of body.languages) {
+        const s = String(item || '').trim();
+        if (!allowedLangSet.has(s)) {
+          return res.status(400).json({ status: false, message: `Invalid language option: "${s}".` });
+        }
+        if (!dedupedLangs.includes(s)) dedupedLangs.push(s);
+      }
+      nextLanguages = dedupedLangs.slice(0, 6);
     }
 
     let nextAvatarUrl: string | null | undefined;
@@ -556,90 +726,166 @@ router.patch('/profiles/me', requireAuth, async (req: AuthenticatedRequest, res:
       const uRes = await client.query('SELECT * FROM shopit_users WHERE id = $1 FOR UPDATE', [userId]);
       if (uRes.rows.length === 0) return null;
       const current = uRes.rows[0];
+      const sRes = await client.query('SELECT * FROM shopit_sellers WHERE user_id = $1 OR id = $1 LIMIT 1', [userId]);
+      const sRow = sRes.rows[0] || null;
 
       let nextSlug = current.profile_slug;
+      let previousSlug: string | undefined;
       if (nextDisplayName && nextDisplayName !== current.display_name) {
         nextSlug = await generateUniqueProfileSlug(
           (sql: string, p?: any[]) => client.query(sql, p),
           nextDisplayName,
           userId
         );
+        if (current.profile_slug && nextSlug.toLowerCase() !== String(current.profile_slug).toLowerCase()) {
+          previousSlug = String(current.profile_slug).toLowerCase();
+          await client.query(
+            `INSERT INTO shopit_profile_slug_history (slug, user_id, created_at)
+             VALUES ($1, $2, NOW())
+             ON CONFLICT (slug) DO UPDATE SET user_id = EXCLUDED.user_id, created_at = NOW()`,
+            [previousSlug, userId]
+          );
+          await client.query('DELETE FROM shopit_profile_slug_history WHERE LOWER(slug) = LOWER($1)', [nextSlug]);
+        }
       }
 
+      const isUnder18 =
+        (current.age !== null && current.age !== undefined && Number(current.age) < 18) || Boolean(sRow?.under_18);
+      const basePrivacy = isUnder18 ? UNDER_18_PRIVACY_SETTINGS : DEFAULT_PRIVACY_SETTINGS;
+      const currentPrivacy = sanitizePrivacySettings(
+        parseJsonSafe(current.privacy_settings, basePrivacy),
+        basePrivacy,
+        isUnder18
+      );
+      const finalPrivacy =
+        'privacySettings' in body && body.privacySettings
+          ? sanitizePrivacySettings(body.privacySettings, currentPrivacy, isUnder18)
+          : currentPrivacy;
+
       const finalDisplayName = nextDisplayName ?? current.display_name ?? extractFirstName(current.name || 'Member');
+      const finalTagline = nextTagline ?? current.tagline ?? '';
       const finalAvatar = 'avatarUrl' in body ? nextAvatarUrl : current.avatar_url;
       const finalCover = 'coverUrl' in body ? nextCoverUrl : current.cover_url;
       const finalBio = nextBio ?? current.bio ?? '';
+      const finalState = nextLocationState ?? current.location_state ?? '';
       const finalCampus = nextCampus ?? current.campus ?? '';
       const finalArea = nextArea ?? current.location_area ?? '';
       const finalInterests = nextInterests ?? parseJsonSafe<string[]>(current.interests, []);
+      const finalLanguages = nextLanguages ?? parseJsonSafe<string[]>(current.languages, []);
 
       await client.query(
         `UPDATE shopit_users
-         SET display_name = $1, profile_slug = $2, avatar_url = $3, cover_url = $4,
-             bio = $5, campus = $6, location_area = $7, interests = $8::jsonb, updated_at = NOW()
-         WHERE id = $9`,
+         SET display_name = $1, profile_slug = $2, tagline = $3, avatar_url = $4, cover_url = $5,
+             bio = $6, location_state = $7, campus = $8, location_area = $9,
+             interests = $10::jsonb, languages = $11::jsonb, privacy_settings = $12::jsonb, updated_at = NOW()
+         WHERE id = $13`,
         [
           finalDisplayName,
           nextSlug,
+          finalTagline,
           finalAvatar ?? null,
           finalCover ?? null,
           finalBio,
+          finalState,
           finalCampus,
           finalArea,
           JSON.stringify(finalInterests),
+          JSON.stringify(finalLanguages),
+          JSON.stringify(finalPrivacy),
           userId,
         ]
       );
 
-      const sRes = await client.query('SELECT * FROM shopit_sellers WHERE user_id = $1 OR id = $1 LIMIT 1', [userId]);
-      if (sRes.rows.length > 0) {
-        const sRow = sRes.rows[0];
+      let sellerUpdated: any = null;
+      if (sRow) {
         const finalShopName = nextShopName ?? sRow.shop_name;
         const finalShopBio = nextShopBio ?? (nextBio !== undefined && !sRow.bio ? nextBio : sRow.bio) ?? '';
+        const finalShopStory = nextShopStory ?? sRow.shop_story ?? '';
+        const finalCraftMaterials = nextCraftMaterials ?? sRow.craft_materials ?? '';
+        const finalProcessingTime = nextProcessingTime ?? sRow.processing_time ?? '';
+        const currentDeliv = parseJsonSafe<{
+          allowsPickup?: boolean;
+          allowsLocalDelivery?: boolean;
+          pickupSpots?: string[];
+        }>(sRow.delivery_options, { allowsPickup: true, allowsLocalDelivery: true, pickupSpots: [] });
+        const finalDeliv = nextDeliveryOptions ?? {
+          allowsPickup: currentDeliv?.allowsPickup !== false,
+          allowsLocalDelivery: currentDeliv?.allowsLocalDelivery !== false,
+          pickupSpots: Array.isArray(currentDeliv?.pickupSpots) ? currentDeliv.pickupSpots : [],
+        };
+        const finalSellerState = nextLocationState || sRow.location_state || 'Lagos';
         const finalSellerCampus = nextCampus || sRow.campus;
         const finalSellerArea = nextArea || sRow.location_area;
+        const finalVacationMode = nextVacationMode !== undefined ? nextVacationMode : Boolean(sRow.vacation_mode);
         const finalLogo = 'logoUrl' in body ? nextLogoUrl : ('avatarUrl' in body ? finalAvatar : sRow.logo_url);
         const finalBanner = 'bannerUrl' in body ? nextBannerUrl : ('coverUrl' in body ? finalCover : sRow.banner_url);
 
         await client.query(
           `UPDATE shopit_sellers
-           SET shop_name = $1, bio = $2, campus = $3, location_area = $4,
-               logo_url = $5, banner_url = $6, updated_at = NOW()
-           WHERE id = $7`,
+           SET shop_name = $1, bio = $2, shop_story = $3, craft_materials = $4, processing_time = $5,
+               delivery_options = $6::jsonb, location_state = $7, campus = $8, location_area = $9,
+               vacation_mode = $10, logo_url = $11, banner_url = $12, updated_at = NOW()
+           WHERE id = $13`,
           [
             finalShopName,
             finalShopBio,
+            finalShopStory,
+            finalCraftMaterials,
+            finalProcessingTime,
+            JSON.stringify(finalDeliv),
+            finalSellerState,
             finalSellerCampus,
             finalSellerArea,
+            finalVacationMode,
             finalLogo ?? null,
             finalBanner ?? null,
             sRow.id,
           ]
         );
 
-        if (nextShopName || nextCampus || nextArea) {
+        if (nextShopName || nextLocationState || nextCampus || nextArea) {
           await client.query(
             `UPDATE shopit_products
              SET seller_shop_name = COALESCE($1, seller_shop_name),
-                 seller_campus = COALESCE($2, seller_campus),
-                 location_area = COALESCE($3, location_area),
+                 location_state = COALESCE($2, location_state),
+                 seller_campus = COALESCE($3, seller_campus),
+                 location_area = COALESCE($4, location_area),
                  updated_at = NOW()
-             WHERE seller_id = $4 OR seller_id = $5`,
-            [nextShopName || null, nextCampus || null, nextArea || null, userId, sRow.id]
+             WHERE seller_id = $5 OR seller_id = $6`,
+            [nextShopName || null, nextLocationState || null, nextCampus || null, nextArea || null, userId, sRow.id]
           );
         }
+
+        sellerUpdated = {
+          shopName: finalShopName,
+          bio: finalShopBio,
+          shopStory: finalShopStory,
+          craftMaterials: finalCraftMaterials,
+          processingTime: finalProcessingTime,
+          deliveryOptions: finalDeliv,
+          locationState: finalSellerState,
+          campus: finalSellerCampus,
+          locationArea: finalSellerArea,
+          vacationMode: finalVacationMode,
+        };
       }
 
       return {
         displayName: finalDisplayName,
         profileSlug: nextSlug,
+        canonicalSlug: nextSlug,
+        ...(previousSlug ? { previousSlug } : {}),
+        tagline: finalTagline,
         avatarUrl: finalAvatar || null,
         coverUrl: finalCover || null,
         bio: finalBio,
+        locationState: finalState,
         campus: finalCampus,
         locationArea: finalArea,
         interests: finalInterests,
+        languages: finalLanguages,
+        privacySettings: finalPrivacy,
+        ...(sellerUpdated ? { seller: sellerUpdated } : {}),
       };
     });
 
@@ -889,6 +1135,7 @@ router.delete('/profiles/me', requireAuth, async (req: AuthenticatedRequest, res
         [anonEmail, anonSlug, userId]
       );
 
+      await client.query('DELETE FROM shopit_profile_slug_history WHERE user_id = $1', [userId]);
       await client.query('DELETE FROM shopit_sessions WHERE user_id = $1', [userId]);
     });
 
@@ -925,7 +1172,24 @@ async function resolveTargetUserRecord(rawTarget: string) {
      LIMIT 1`,
     [clean]
   );
-  return res.rows[0] || null;
+  if (res.rows[0]) return res.rows[0];
+  const histRes = await dbQuery(
+    'SELECT user_id FROM shopit_profile_slug_history WHERE LOWER(slug) = LOWER($1) LIMIT 1',
+    [clean]
+  );
+  if (histRes.rows.length > 0 && histRes.rows[0].user_id) {
+    const byIdRes = await dbQuery(
+      `SELECT u.id, u.name, u.display_name, u.profile_slug, u.avatar_url, u.age, u.privacy_settings,
+              u.notification_prefs, u.is_banned, u.deleted_at, s.id as s_id, s.under_18 as s_under_18
+       FROM shopit_users u
+       LEFT JOIN shopit_sellers s ON (u.id = s.user_id OR u.id = s.id)
+       WHERE u.id = $1
+       LIMIT 1`,
+      [histRes.rows[0].user_id]
+    );
+    return byIdRes.rows[0] || null;
+  }
+  return null;
 }
 
 async function getAcceptedFollowersCount(targetUserId: string): Promise<number> {
@@ -1901,8 +2165,9 @@ router.get('/profiles/:slug', optionalAuth, async (req: AuthenticatedRequest, re
 
     const viewer = req.user;
 
-    const uRes = await dbQuery(
-      `SELECT u.*, s.id as s_id, s.shop_name, s.bio as s_bio, s.campus as s_campus,
+    let uRes = await dbQuery(
+      `SELECT u.*, s.id as s_id, s.shop_name, s.bio as s_bio, s.shop_story, s.craft_materials,
+              s.processing_time, s.delivery_options, s.campus as s_campus,
               s.location_area as s_area, s.location_state as s_state, s.location_city as s_city,
               s.logo_url as s_logo_url, s.banner_url as s_banner_url,
               s.is_verified_seller, s.verification_status, s.under_18 as s_under_18,
@@ -1913,6 +2178,32 @@ router.get('/profiles/:slug', optionalAuth, async (req: AuthenticatedRequest, re
        LIMIT 1`,
       [rawSlug]
     );
+
+    let redirectedFromSlug: string | undefined;
+    if (uRes.rows.length === 0) {
+      const histRes = await dbQuery(
+        'SELECT user_id, slug FROM shopit_profile_slug_history WHERE LOWER(slug) = LOWER($1) LIMIT 1',
+        [rawSlug]
+      );
+      if (histRes.rows.length > 0 && histRes.rows[0].user_id) {
+        uRes = await dbQuery(
+          `SELECT u.*, s.id as s_id, s.shop_name, s.bio as s_bio, s.shop_story, s.craft_materials,
+                  s.processing_time, s.delivery_options, s.campus as s_campus,
+                  s.location_area as s_area, s.location_state as s_state, s.location_city as s_city,
+                  s.logo_url as s_logo_url, s.banner_url as s_banner_url,
+                  s.is_verified_seller, s.verification_status, s.under_18 as s_under_18,
+                  s.vacation_mode, s.created_at as s_created_at, s.rating as s_rating
+           FROM shopit_users u
+           LEFT JOIN shopit_sellers s ON (u.id = s.user_id OR u.id = s.id)
+           WHERE u.id = $1
+           LIMIT 1`,
+          [histRes.rows[0].user_id]
+        );
+        if (uRes.rows.length > 0) {
+          redirectedFromSlug = rawSlug;
+        }
+      }
+    }
 
     if (uRes.rows.length === 0) {
       return res.status(404).json({ status: false, message: 'Profile not found.' });
@@ -1974,11 +2265,25 @@ router.get('/profiles/:slug', optionalAuth, async (req: AuthenticatedRequest, re
       isMuted = mRes.rows.length > 0;
     }
 
+    const sellerDelivery = parseJsonSafe<{
+      allowsPickup?: boolean;
+      allowsLocalDelivery?: boolean;
+      pickupSpots?: string[];
+    }>(row.delivery_options, { allowsPickup: true, allowsLocalDelivery: true, pickupSpots: [] });
+
     const sellerRow = row.s_id
       ? {
           id: row.s_id,
           shop_name: row.shop_name,
           bio: row.s_bio,
+          shop_story: row.shop_story,
+          craft_materials: row.craft_materials,
+          processing_time: row.processing_time,
+          delivery_options: {
+            allowsPickup: sellerDelivery?.allowsPickup !== false,
+            allowsLocalDelivery: sellerDelivery?.allowsLocalDelivery !== false,
+            pickupSpots: Array.isArray(sellerDelivery?.pickupSpots) ? sellerDelivery.pickupSpots : [],
+          },
           campus: row.s_campus,
           location_area: row.s_area,
           location_state: row.s_state,
@@ -2003,13 +2308,18 @@ router.get('/profiles/:slug', optionalAuth, async (req: AuthenticatedRequest, re
         status: true,
         isRestricted: true,
         isOwner: false,
+        ...(redirectedFromSlug ? { redirectedFromSlug, canonicalSlug: row.profile_slug } : { canonicalSlug: row.profile_slug }),
         profile: {
           id: row.id,
           displayName,
           profileSlug: row.profile_slug,
+          canonicalSlug: row.profile_slug,
+          ...(redirectedFromSlug ? { redirectedFromSlug } : {}),
+          tagline: row.tagline || '',
           role: row.role,
           avatarUrl: row.avatar_url || sellerRow?.logo_url || null,
           coverUrl: row.cover_url || sellerRow?.banner_url || null,
+          locationState: row.location_state || sellerRow?.location_state || '',
           campus: row.campus || sellerRow?.campus || '',
           followersCount: parseInt(String(followersRes.rows[0]?.total || '0'), 10),
           followingCount: parseInt(String(followingRes.rows[0]?.total || '0'), 10),
@@ -2023,6 +2333,7 @@ router.get('/profiles/:slug', optionalAuth, async (req: AuthenticatedRequest, re
           reviews: [],
           badges: [],
           interests: [],
+          languages: [],
         },
       });
     }
@@ -2038,6 +2349,7 @@ router.get('/profiles/:slug', optionalAuth, async (req: AuthenticatedRequest, re
 
     const stats = await computeComputedSellerStats(row, sellerRow, activeProds, pRes.rows);
     const interests = parseJsonSafe<string[]>(row.interests, []);
+    const languages = parseJsonSafe<string[]>(row.languages, []);
 
     const avatarUrl = row.avatar_url || sellerRow?.logo_url || null;
     const coverUrl = row.cover_url || sellerRow?.banner_url || null;
@@ -2075,14 +2387,16 @@ router.get('/profiles/:slug', optionalAuth, async (req: AuthenticatedRequest, re
     const completeness = isOwner
       ? computeProfileCompleteness({
           avatarUrl,
-          coverUrl,
+          tagline: row.tagline,
           bio: row.bio || sellerRow?.bio,
+          locationState: row.location_state || sellerRow?.location_state,
           campus: row.campus || sellerRow?.campus,
           locationArea: row.location_area || sellerRow?.location_area,
           interests,
           isVerifiedEmail: Boolean(row.is_verified_email),
           isSeller: Boolean(sellerRow),
           shopName: sellerRow?.shop_name,
+          shopStory: sellerRow?.shop_story,
           activeProductsCount: activeProds.length,
         })
       : undefined;
@@ -2091,17 +2405,23 @@ router.get('/profiles/:slug', optionalAuth, async (req: AuthenticatedRequest, re
       status: true,
       isRestricted: false,
       isOwner,
+      ...(redirectedFromSlug ? { redirectedFromSlug, canonicalSlug: row.profile_slug } : { canonicalSlug: row.profile_slug }),
       profile: {
         id: row.id,
         displayName,
         profileSlug: row.profile_slug,
+        canonicalSlug: row.profile_slug,
+        ...(redirectedFromSlug ? { redirectedFromSlug } : {}),
+        tagline: row.tagline || '',
         role: row.role,
         avatarUrl,
         coverUrl,
         bio: row.bio || sellerRow?.bio || '',
+        locationState: row.location_state || sellerRow?.location_state || '',
         campus: row.campus || sellerRow?.campus || '',
         locationArea: row.location_area || sellerRow?.location_area || '',
         interests,
+        languages,
         memberSince: row.created_at,
         lastSeenAt:
           privacySettings.showLastSeen || isOwner || isAdmin
@@ -2115,6 +2435,7 @@ router.get('/profiles/:slug', optionalAuth, async (req: AuthenticatedRequest, re
         whoCanMessage: privacySettings.whoCanMessage,
         showFollowersList: privacySettings.showFollowersList,
         showFollowingList: privacySettings.showFollowingList,
+        ...(isOwner ? { privacySettings } : {}),
         completeness,
         ...stats,
         products: mappedProducts,
@@ -2124,6 +2445,11 @@ router.get('/profiles/:slug', optionalAuth, async (req: AuthenticatedRequest, re
               id: sellerRow.id,
               shopName: sellerRow.shop_name,
               bio: sellerRow.bio || '',
+              shopStory: sellerRow.shop_story || '',
+              craftMaterials: sellerRow.craft_materials || '',
+              processingTime: sellerRow.processing_time || '',
+              deliveryOptions: sellerRow.delivery_options,
+              locationState: sellerRow.location_state || row.location_state || 'Lagos',
               campus: sellerRow.campus || 'Lagos Mainland',
               locationArea: sellerRow.location_area || 'Yaba',
               isVerifiedSeller: stats.isVerifiedSeller,

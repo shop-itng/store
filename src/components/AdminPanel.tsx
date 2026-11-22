@@ -108,6 +108,7 @@ export const AdminPanel: React.FC = () => {
     openChat,
     notify,
     // Moderator Super-Powers & Account Governance (from server DB)
+    refreshCurrentUser,
     refreshAdminData,
     deleteUserAccount,
     banUserAccount,
@@ -476,6 +477,7 @@ export const AdminPanel: React.FC = () => {
   const [adminErrorCode, setAdminErrorCode] = useState<string | null>(null);
   const [initialNewPw, setInitialNewPw] = useState('');
   const [initialConfirmPw, setInitialConfirmPw] = useState('');
+  const [initialPwError, setInitialPwError] = useState<string | null>(null);
   const [savingInitialPw, setSavingInitialPw] = useState(false);
 
   const fetchNewUsersFeed = async (page = 1) => {
@@ -703,7 +705,7 @@ export const AdminPanel: React.FC = () => {
   };
 
   React.useEffect(() => {
-    if (currentUser?.role !== 'admin') {
+    if (currentUser?.role !== 'admin' || currentUser?.mustChangePassword) {
       setDbUsers([]);
       setDbUsersTotal(0);
       setMetricsData(null);
@@ -721,10 +723,10 @@ export const AdminPanel: React.FC = () => {
     fetchDbUsers(1);
     fetchActivityLogs(1);
     fetchPendingGuardianPayouts();
-  }, [currentUser?.id, currentUser?.role, refreshAdminData]);
+  }, [currentUser?.id, currentUser?.role, currentUser?.mustChangePassword, refreshAdminData]);
 
   React.useEffect(() => {
-    if (currentUser?.role !== 'admin' || !livePolling) return;
+    if (currentUser?.role !== 'admin' || currentUser?.mustChangePassword || !livePolling) return;
     const interval = setInterval(() => {
       fetchMetrics();
       fetchNewUsersFeed(newUsersPage);
@@ -735,6 +737,7 @@ export const AdminPanel: React.FC = () => {
     return () => clearInterval(interval);
   }, [
     currentUser?.role,
+    currentUser?.mustChangePassword,
     livePolling,
     newUsersPage,
     activityPage,
@@ -750,6 +753,132 @@ export const AdminPanel: React.FC = () => {
 
   if (currentUser?.role !== 'admin') {
     return null;
+  }
+
+  if (currentUser?.mustChangePassword || adminErrorCode === 'PASSWORD_CHANGE_REQUIRED') {
+    return (
+      <div className="max-w-xl mx-auto px-4 py-10">
+        <div className="bg-white border-2 border-[#111111] rounded-3xl p-6 sm:p-8 space-y-5 shadow-[0_6px_0_#111111]">
+          <div className="flex items-start gap-3">
+            <div className="w-12 h-12 rounded-2xl bg-amber-100 border-2 border-[#111111] flex items-center justify-center shrink-0">
+              <Key className="w-6 h-6 text-[#FF6B00]" />
+            </div>
+            <div>
+              <span className="inline-block text-[11px] font-black uppercase tracking-wider text-[#FF6B00]">
+                Initial Admin Setup Required
+              </span>
+              <h1 className="text-xl sm:text-2xl font-black text-[#111111] mt-0.5">
+                Set Permanent Administrator Password
+              </h1>
+              <p className="text-xs sm:text-sm text-stone-600 mt-1">
+                Signed in as <strong className="text-[#111111]">{currentUser.email}</strong>. Your account currently has{' '}
+                <code className="text-[11px] bg-stone-100 px-1.5 py-0.5 rounded">must_change_password = true</code>, so
+                admin records stay locked until you choose a permanent password below.
+              </p>
+            </div>
+          </div>
+
+          {initialPwError && (
+            <div className="bg-red-50 border border-red-300 text-red-900 rounded-xl p-3 text-xs font-bold flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+              <span>{initialPwError}</span>
+            </div>
+          )}
+
+          <form
+            onSubmit={async e => {
+              e.preventDefault();
+              setInitialPwError(null);
+              if (initialNewPw.trim().length < 8) {
+                const msg = 'New password must be at least 8 characters long.';
+                setInitialPwError(msg);
+                notify(msg, 'error');
+                return;
+              }
+              if (initialNewPw.trim() !== initialConfirmPw.trim()) {
+                const msg = 'Passwords do not match.';
+                setInitialPwError(msg);
+                notify(msg, 'error');
+                return;
+              }
+              setSavingInitialPw(true);
+              try {
+                const res = await fetch('/api/auth/change-password', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+                  credentials: 'include',
+                  body: JSON.stringify({ newPassword: initialNewPw.trim() }),
+                });
+                const data = await res.json();
+                if (!res.ok || !data.status) {
+                  const msg = data.message || 'Could not update password.';
+                  setInitialPwError(msg);
+                  notify(msg, 'error');
+                  return;
+                }
+                if (data.sessionToken) {
+                  try {
+                    localStorage.setItem('shopit_session_token', data.sessionToken);
+                  } catch {}
+                }
+                setAdminError(null);
+                setAdminErrorCode(null);
+                setInitialNewPw('');
+                setInitialConfirmPw('');
+                await refreshCurrentUser();
+                notify('Permanent password saved! Admin Panel unlocked.', 'success');
+              } catch {
+                const msg = 'Network error updating password. Please try again.';
+                setInitialPwError(msg);
+                notify(msg, 'error');
+              } finally {
+                setSavingInitialPw(false);
+              }
+            }}
+            className="space-y-4"
+          >
+            <div>
+              <label className="block text-xs font-bold text-stone-800 mb-1.5">
+                New Permanent Password (min 8 characters)
+              </label>
+              <input
+                type="password"
+                required
+                minLength={8}
+                autoFocus
+                value={initialNewPw}
+                onChange={e => setInitialNewPw(e.target.value)}
+                placeholder="Enter a strong password (at least 8 characters)"
+                className="w-full h-12 px-3.5 rounded-xl border-2 border-stone-300 bg-white text-sm text-stone-900 focus:outline-none focus:border-[#111111]"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-stone-800 mb-1.5">
+                Confirm New Password
+              </label>
+              <input
+                type="password"
+                required
+                minLength={8}
+                value={initialConfirmPw}
+                onChange={e => setInitialConfirmPw(e.target.value)}
+                placeholder="Re-enter your new password"
+                className="w-full h-12 px-3.5 rounded-xl border-2 border-stone-300 bg-white text-sm text-stone-900 focus:outline-none focus:border-[#111111]"
+              />
+            </div>
+
+            <button
+              type="submit"
+              disabled={savingInitialPw}
+              className="w-full h-12 px-4 rounded-xl bg-[#9FE870] hover:bg-[#AEF083] text-[#111111] font-black text-sm border-2 border-[#111111] shadow-[0_3px_0_#111111] active:translate-y-0.5 cursor-pointer disabled:opacity-60 transition-all"
+            >
+              {savingInitialPw ? 'Saving Password & Unlocking...' : 'Save Permanent Password & Enter Admin Panel'}
+            </button>
+          </form>
+        </div>
+      </div>
+    );
   }
 
   // Calculate live financial figures
@@ -777,10 +906,10 @@ export const AdminPanel: React.FC = () => {
             </span>
           </div>
           <h1 className="text-xl sm:text-2xl font-black text-white mt-2">
-            Shop It Trust, Escrow & Governance
+            Shop It Trust, Payments & Governance
           </h1>
           <p className="text-xs sm:text-sm text-stone-300 mt-1">
-            Oversee Nigerian youth seller approvals, chat safety, escrow transactions, and dispute resolutions.
+            Oversee Nigerian youth seller approvals, chat safety, held order payments, and dispute resolutions.
           </p>
         </div>
 
@@ -793,7 +922,7 @@ export const AdminPanel: React.FC = () => {
               { id: 'payments', label: 'Payments & Gateway', icon: CreditCard, badge: undefined },
               { id: 'reports', label: 'Reports Queue', icon: Flag, badge: reportsList.filter(r => r.status === 'open').length },
               { id: 'accounts', label: 'All Accounts & Powers', icon: Users, badge: metricsData?.metrics?.totalUsers ?? dbUsersTotal },
-              { id: 'finance', label: 'Finance & Escrow', icon: DollarSign, badge: undefined },
+              { id: 'finance', label: 'Finance & Balances', icon: DollarSign, badge: undefined },
               { id: 'support', label: 'Support & Disputes', icon: Headphones, badge: disputes.filter(d => d.status === 'open').length },
               { id: 'emergency', label: 'Broadcast & Killswitches', icon: Megaphone, badge: broadcastAnnouncement.isActive ? 1 : undefined },
             ].map(tab => {
@@ -843,7 +972,7 @@ export const AdminPanel: React.FC = () => {
               onClick={handleExportData}
               disabled={isExportingData}
               className="px-3.5 py-2.5 rounded-xl bg-stone-800 hover:bg-stone-700 text-white text-xs font-black transition-all flex items-center justify-center gap-1.5 border border-stone-700 shadow-md shrink-0 active:scale-95 disabled:opacity-50"
-              title="Download sanitized data backup JSON (NDPA compliant)"
+              title="Download sanitized data backup JSON"
             >
               <Download className={`w-4 h-4 ${isExportingData ? 'animate-bounce' : ''}`} />
               <span>{isExportingData ? 'Exporting...' : 'Export Data'}</span>
@@ -851,87 +980,6 @@ export const AdminPanel: React.FC = () => {
           </div>
         </div>
       </div>
-
-      {(currentUser?.mustChangePassword || adminErrorCode === 'PASSWORD_CHANGE_REQUIRED') && (
-        <div className="bg-amber-50 border-2 border-amber-400 rounded-2xl p-5 space-y-3 shadow-xs">
-          <div className="flex items-start gap-2.5">
-            <Key className="w-5 h-5 text-[#FF6B00] shrink-0 mt-0.5" />
-            <div>
-              <h3 className="text-sm font-black text-stone-900">Action Required: Change Initial Administrator Password</h3>
-              <p className="text-xs text-stone-700 mt-0.5">
-                For security, the backend blocks admin queries until your initial password is replaced. Set your permanent password below to unlock all users, metrics, and moderation controls.
-              </p>
-            </div>
-          </div>
-          <form
-            onSubmit={async e => {
-              e.preventDefault();
-              if (initialNewPw.trim().length < 8) {
-                notify('New password must be at least 8 characters long.', 'error');
-                return;
-              }
-              if (initialNewPw.trim() !== initialConfirmPw.trim()) {
-                notify('Passwords do not match.', 'error');
-                return;
-              }
-              setSavingInitialPw(true);
-              try {
-                const res = await fetch('/api/auth/change-password', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-                  credentials: 'include',
-                  body: JSON.stringify({ newPassword: initialNewPw.trim() }),
-                });
-                const data = await res.json();
-                if (!res.ok || !data.status) {
-                  notify(data.message || 'Could not update password.', 'error');
-                  return;
-                }
-                if (data.sessionToken) {
-                  localStorage.setItem('shopit_session_token', data.sessionToken);
-                }
-                setAdminError(null);
-                setAdminErrorCode(null);
-                setInitialNewPw('');
-                setInitialConfirmPw('');
-                notify('Password updated! Loading all admin records...', 'success');
-                window.location.reload();
-              } catch {
-                notify('Network error updating password.', 'error');
-              } finally {
-                setSavingInitialPw(false);
-              }
-            }}
-            className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-1"
-          >
-            <input
-              type="password"
-              required
-              minLength={8}
-              value={initialNewPw}
-              onChange={e => setInitialNewPw(e.target.value)}
-              placeholder="New password (min 8 chars)"
-              className="h-10 px-3 rounded-xl border border-amber-300 bg-white text-xs text-stone-900"
-            />
-            <input
-              type="password"
-              required
-              minLength={8}
-              value={initialConfirmPw}
-              onChange={e => setInitialConfirmPw(e.target.value)}
-              placeholder="Confirm new password"
-              className="h-10 px-3 rounded-xl border border-amber-300 bg-white text-xs text-stone-900"
-            />
-            <button
-              type="submit"
-              disabled={savingInitialPw}
-              className="h-10 px-4 rounded-xl bg-[#FF6B00] hover:bg-[#ff7a1a] text-[#111111] font-black text-xs border border-[#111111] cursor-pointer disabled:opacity-60"
-            >
-              {savingInitialPw ? 'Updating...' : 'Save Password & Unlock'}
-            </button>
-          </form>
-        </div>
-      )}
 
       {adminError && adminErrorCode !== 'PASSWORD_CHANGE_REQUIRED' && (
         <div className="bg-red-50 border-2 border-red-300 text-red-900 rounded-2xl p-4 flex items-center justify-between gap-3">
@@ -1609,7 +1657,7 @@ export const AdminPanel: React.FC = () => {
                   <span>Real Seller Identity &amp; Biometric Verification Queue</span>
                 </h3>
                 <p className="text-xs text-stone-500 mt-0.5">
-                  Side-by-side review of Nigerian identity documents, live camera selfies, and NIMC matching (NDPA 2023 Compliant).
+                  Side-by-side review of Nigerian identity documents, live camera selfies, and NIMC matching.
                 </p>
               </div>
               <div className="flex items-center gap-2">
@@ -1686,7 +1734,7 @@ export const AdminPanel: React.FC = () => {
                           <div className="text-xs text-stone-700 bg-amber-50 p-2.5 rounded-xl border border-amber-200 space-y-0.5">
                             <div><strong>Guardian Name:</strong> {req.guardianName || 'N/A'}</div>
                             {req.guardianNinLast4 && <div><strong>Guardian NIN:</strong> <span className="font-mono font-bold">***-***-{req.guardianNinLast4}</span></div>}
-                            <div className="text-[11px] text-amber-800 font-semibold">✓ Parent/Guardian Signed NDPA Consent on file</div>
+                            <div className="text-[11px] text-amber-800 font-semibold">✓ Parent/Guardian Signed Consent on file</div>
                           </div>
                         )}
 
@@ -2357,7 +2405,7 @@ export const AdminPanel: React.FC = () => {
           {/* Finance Metrics */}
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
             <div className="p-4 bg-white rounded-xl border border-stone-200">
-              <span className="text-xs text-stone-500 font-medium">Active Escrow Vault</span>
+              <span className="text-xs text-stone-500 font-medium">Held Order Payments</span>
               <p className="text-xl sm:text-2xl font-bold font-mono-numbers text-stone-900 mt-1">
                 {formatNaira(totalHeldInEscrow)}
               </p>
@@ -2365,7 +2413,7 @@ export const AdminPanel: React.FC = () => {
             </div>
 
             <div className="p-4 bg-white rounded-xl border border-stone-200">
-              <span className="text-xs text-stone-500 font-medium">Frozen in Dispute</span>
+              <span className="text-xs text-stone-500 font-medium">Paused in Dispute</span>
               <p className="text-xl sm:text-2xl font-bold font-mono-numbers text-red-600 mt-1">
                 {formatNaira(totalDisputedEscrow)}
               </p>
@@ -2377,7 +2425,7 @@ export const AdminPanel: React.FC = () => {
               <p className="text-xl sm:text-2xl font-bold font-mono-numbers text-[#f95700] mt-1">
                 {formatNaira(totalServiceFeesEarned)}
               </p>
-              <span className="text-[11px] text-stone-500">Shop It protection fee</span>
+              <span className="text-[11px] text-stone-500">Shop It service fee</span>
             </div>
 
             <div className="p-4 bg-white rounded-xl border border-stone-200">
@@ -2516,7 +2564,7 @@ export const AdminPanel: React.FC = () => {
                   </p>
                 </div>
                 <div className="bg-white p-2.5 rounded-lg border border-stone-200">
-                  <span className="text-stone-500 text-[11px]">Shop It Protection Fee</span>
+                  <span className="text-stone-500 text-[11px]">Shop It Service Fee</span>
                   <p className="font-bold font-mono-numbers text-sm text-[#f95700] mt-0.5">
                     +{formatNaira(testBreakdown.serviceFee)} ({testBreakdown.feePercentageDisplay})
                   </p>
@@ -2530,7 +2578,7 @@ export const AdminPanel: React.FC = () => {
                 <div className="bg-white p-2.5 rounded-lg border border-stone-200">
                   <span className="text-stone-500 text-[11px]">Seller Payout / Earnings</span>
                   <p className="font-bold font-mono-numbers text-sm text-[#123524] mt-0.5">
-                    {formatNaira(testBreakdown.sellerPrice)} (100% of base)
+                    {formatNaira(testBreakdown.sellerPrice)} (base item price)
                   </p>
                 </div>
               </div>
@@ -2646,16 +2694,16 @@ export const AdminPanel: React.FC = () => {
             )}
           </div>
 
-          {/* Orders & Escrow Financial Super-Powers (Moderator Authority) */}
+          {/* Orders & Held Payment Governance (Moderator Authority) */}
           <div className="bg-white rounded-2xl border border-stone-200 overflow-hidden shadow-xs">
             <div className="p-4 sm:p-5 border-b border-stone-200 bg-stone-50/60 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
               <div>
                 <h3 className="text-base font-bold font-heading text-stone-900 flex items-center gap-2">
                   <ShieldCheck className="w-4 h-4 text-emerald-600" />
-                  <span>Escrow Vault Authority & Direct Intervention</span>
+                  <span>Held Order Payments &amp; Direct Intervention</span>
                 </h3>
                 <p className="text-xs text-stone-500 mt-0.5">
-                  Moderator authority over every transaction: place an Admin Hold (pauses Day-5 unshipped auto-refund), release escrow early, or force-refund a buyer.
+                  Moderator controls over every transaction: place an Admin Hold (pauses Day-5 unshipped auto-refund), release held payment early, or force-refund a buyer.
                 </p>
               </div>
               <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200">
@@ -2672,9 +2720,9 @@ export const AdminPanel: React.FC = () => {
                       <th className="p-3.5">Customer</th>
                       <th className="p-3.5">Artisan Shop</th>
                       <th className="p-3.5">Grand Total</th>
-                      <th className="p-3.5">Escrow Status</th>
+                      <th className="p-3.5">Order Status</th>
                       <th className="p-3.5">Auto-Release Due</th>
-                      <th className="p-3.5 text-right">Moderator Super-Powers</th>
+                      <th className="p-3.5 text-right">Moderator Actions</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-stone-200">
@@ -2735,9 +2783,9 @@ export const AdminPanel: React.FC = () => {
                                 type="button"
                                 onClick={() => setSelectedAdminReceiptOrder(order)}
                                 className="px-2.5 py-1.5 rounded-lg border border-stone-300 hover:bg-stone-100 text-stone-700 font-bold text-[11px] transition-colors"
-                                title="Inspect official safe pass, 4-digit OTP, and cryptographic receipt"
+                                title="Inspect order pass, 4-digit OTP, and receipt"
                               >
-                                Safe Pass
+                                Order Pass
                               </button>
                               {canRelease && (
                                 <button
@@ -2761,7 +2809,7 @@ export const AdminPanel: React.FC = () => {
                                   className="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[11px] transition-colors shadow-2xs"
                                   title="Bypass 5-day timer and immediately credit seller available balance"
                                 >
-                                  Release Escrow
+                                  Release Payment
                                 </button>
                               )}
                               {canRefund && (
@@ -2787,7 +2835,7 @@ export const AdminPanel: React.FC = () => {
               </div>
             ) : (
               <div className="p-8 text-center text-xs text-stone-500">
-                No orders placed yet. Orders will appear here with live escrow intervention controls.
+                No orders placed yet. Orders will appear here with payment hold controls.
               </div>
             )}
           </div>
@@ -2815,7 +2863,7 @@ export const AdminPanel: React.FC = () => {
                   <tr>
                     <th className="p-3.5">Seller / Shop</th>
                     <th className="p-3.5">Campus</th>
-                    <th className="p-3.5">Pending (Escrow)</th>
+                    <th className="p-3.5">Pending (Held)</th>
                     <th className="p-3.5">Available (Withdrawable)</th>
                     <th className="p-3.5">Total Withdrawn</th>
                     <th className="p-3.5">Wallet Status</th>
@@ -2886,7 +2934,7 @@ export const AdminPanel: React.FC = () => {
                   <span>Shop It Append-Only Financial Ledger (Rule 5)</span>
                 </h3>
                 <p className="text-xs text-stone-500 mt-0.5">
-                  Immutable double-entry log. Every sale, escrow release, withdrawal, fee, and refund creates an append-only entry.
+                  Immutable double-entry log. Every sale, payment release, withdrawal, fee, and refund creates an append-only entry.
                 </p>
               </div>
 
@@ -2896,7 +2944,7 @@ export const AdminPanel: React.FC = () => {
                   [
                     { id: 'all', label: 'All Entries' },
                     { id: 'sale_pending', label: 'Pending Sales' },
-                    { id: 'escrow_release', label: 'Escrow Releases' },
+                    { id: 'escrow_release', label: 'Payment Releases' },
                     { id: 'withdrawal', label: 'Withdrawals' },
                     { id: 'refund', label: 'Refunds' },
                     { id: 'fee_deduction', label: 'Fees' },
@@ -2997,7 +3045,7 @@ export const AdminPanel: React.FC = () => {
             <div className="p-3 bg-stone-50 border-t border-stone-200 flex items-center justify-between text-[11px] text-stone-500">
               <span className="flex items-center gap-1.5 font-sans">
                 <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-                <span>Append-only verification: Ledgers cannot be deleted or edited. Audit matches 100%.</span>
+                <span>Append-only verification: Ledgers cannot be deleted or edited.</span>
               </span>
               <span className="font-mono">{ledgerEntries.length} immutable records</span>
             </div>
@@ -3012,7 +3060,7 @@ export const AdminPanel: React.FC = () => {
                 </div>
                 <div>
                   <h4 className="text-sm font-extrabold text-white flex items-center gap-2">
-                    <span>Flutterwave Webhook &amp; Escrow Server Integration</span>
+                    <span>Flutterwave Webhook &amp; Payment Server Integration</span>
                     <span className="text-[10px] bg-[#9FE870] text-[#111111] px-2 py-0.5 rounded-full font-bold">
                       ACTIVE
                     </span>
@@ -3072,7 +3120,7 @@ export const AdminPanel: React.FC = () => {
                 </p>
               </div>
               <span className="text-xs font-mono text-emerald-700 font-bold bg-emerald-50 px-2 py-1 rounded border border-emerald-200">
-                100% Secret Hash Verification
+                Secret Hash Verification
               </span>
             </div>
 
@@ -3170,7 +3218,7 @@ export const AdminPanel: React.FC = () => {
                   </div>
 
                   <div className="text-xs font-semibold text-stone-800">
-                    Held in Escrow: <span className="font-mono-numbers text-[#f95700] text-sm font-bold">{formatNaira(disp.amountHeldInEscrow)}</span>
+                    Held Order Amount: <span className="font-mono-numbers text-[#f95700] text-sm font-bold">{formatNaira(disp.amountHeldInEscrow)}</span>
                   </div>
                 </div>
 
@@ -3242,7 +3290,7 @@ export const AdminPanel: React.FC = () => {
                         onClick={() => resolveDispute(disp.id, 'release_seller', undefined, 'Seller packed properly; claim rejected')}
                         className="px-4 py-2 rounded-xl bg-[#123524] hover:bg-[#1b4330] text-white font-semibold text-xs shadow-xs active:scale-95 transition-all"
                       >
-                        Release Escrow to Seller
+                        Release Payment to Seller
                       </button>
                     </div>
                   ) : (
@@ -3311,7 +3359,7 @@ export const AdminPanel: React.FC = () => {
                 {emergencyControls.pauseNewOrders ? 'ORDERS PAUSED' : 'OPERATIONAL'}
               </p>
               <span className="text-[11px] text-stone-500">
-                {emergencyControls.pauseNewOrders ? 'New checkouts blocked' : 'Flutterwave escrow live'}
+                {emergencyControls.pauseNewOrders ? 'New checkouts blocked' : 'Flutterwave checkout live'}
               </span>
             </div>
 
@@ -3374,8 +3422,8 @@ export const AdminPanel: React.FC = () => {
                     disabled={isSavingBroadcast}
                     onClick={async () => {
                       const nextPayload = {
-                        title: 'Campus Safe Handshake Protocol',
-                        message: 'Always verify your 4-digit Handshake OTP in person at a daylight porter station before accepting orders.',
+                        title: 'Campus Pickup Handshake Protocol',
+                        message: 'Always verify your 4-digit Handshake OTP in person at a daylight pickup spot before accepting orders.',
                         tone: 'warning' as const,
                         isActive: true,
                       };
@@ -3395,7 +3443,7 @@ export const AdminPanel: React.FC = () => {
                     onClick={async () => {
                       const nextPayload = {
                         title: 'Banking Network Advisory',
-                        message: 'Flutterwave bank transfers are experiencing slight delays. Card payments clear immediately into safe escrow.',
+                        message: 'Flutterwave bank transfers may experience slight delays. Card payments are held until delivery confirmation.',
                         tone: 'info' as const,
                         isActive: true,
                       };
@@ -3727,7 +3775,7 @@ export const AdminPanel: React.FC = () => {
               <p className="text-2xl font-black font-mono-numbers text-emerald-600 mt-1">
                 {paymentsList.filter(p => p.status === 'paid').length}
               </p>
-              <span className="text-[11px] text-emerald-700 font-semibold mt-0.5 block">Secured in Escrow</span>
+              <span className="text-[11px] text-emerald-700 font-semibold mt-0.5 block">Payment Confirmed</span>
             </div>
 
             <div className="p-4 bg-white rounded-2xl border border-stone-200 shadow-xs">
@@ -4179,8 +4227,8 @@ export const AdminPanel: React.FC = () => {
 
             <p className="text-xs text-stone-600 leading-relaxed">
               {freezeModal.isCurrentlyFrozen
-                ? 'Unfreezing this wallet will re-enable withdrawals via Flutterwave Transfers API and restore automated escrow releases.'
-                : 'Freezing this wallet halts all Flutterwave withdrawals immediately and prevents pending escrow release until cleared by an admin.'}
+                ? 'Unfreezing this wallet will re-enable withdrawals via Flutterwave Transfers API and restore automated payment releases.'
+                : 'Freezing this wallet halts all Flutterwave withdrawals immediately and pauses pending payment releases until cleared by an admin.'}
             </p>
 
             {!freezeModal.isCurrentlyFrozen && (
@@ -4423,7 +4471,7 @@ export const AdminPanel: React.FC = () => {
                     Side-by-Side Biometric &amp; ID Review
                   </h3>
                   <p className="text-xs text-stone-500">
-                    NIMC Identity Check · NDPA 2023 Compliance Review · {inspectRequest.shopName}
+                    NIMC Identity &amp; Guardian Consent Review · {inspectRequest.shopName}
                   </p>
                 </div>
               </div>
@@ -4566,7 +4614,7 @@ export const AdminPanel: React.FC = () => {
                   <div className="bg-amber-50 border border-amber-200 p-3 rounded-xl space-y-1">
                     <span className="font-bold text-amber-900 block flex items-center gap-1.5">
                       <AlertTriangle className="w-3.5 h-3.5 text-amber-700" />
-                      <span>Minor Seller Under 18 Years Old (NDPA Guardian Compliance)</span>
+                      <span>Minor Seller Under 18 Years Old (Guardian Consent Required)</span>
                     </span>
                     <p className="text-[11px] text-amber-800">
                       Guardian Name: <strong>{inspectRequest.guardianName || 'N/A'}</strong>

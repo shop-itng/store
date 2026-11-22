@@ -1,5 +1,6 @@
 import React from 'react';
 import { useApp } from '../context/AppContext';
+import { getTrustCopy } from '../../shared/trustAndLegalCopy';
 import { formatNaira } from '../utils/pricing';
 import {
   ArrowLeft,
@@ -7,13 +8,13 @@ import {
   ShoppingBag,
   ShieldCheck,
   Truck,
-  Sparkles,
   AlertCircle,
   CheckCircle,
 } from 'lucide-react';
 
 export const CartView: React.FC = () => {
-  const { cart, removeFromCart, setActiveView, openCheckoutModal, notify, paymentsEnabled } = useApp();
+  const { cart, removeFromCart, setActiveView, openCheckoutModal, paymentsEnabled } = useApp();
+  const trustCopy = getTrustCopy(paymentsEnabled);
 
   // Aggregate items by seller to combine delivery fees per seller!
   const sellersInCart = Array.from(new Set(cart.map(i => i.product.sellerShopName)));
@@ -138,7 +139,7 @@ export const CartView: React.FC = () => {
               <div className="flex justify-between text-emerald-800 dark:text-[#9FE870]">
                 <span className="flex items-center gap-1">
                   <ShieldCheck className="w-3.5 h-3.5" />
-                  <span>Shop It Buyer Protection Fee</span>
+                  <span>{trustCopy.productFeeLabel}</span>
                 </span>
                 <span className="font-mono-numbers font-medium">
                   +{formatNaira(totalServiceFees)}
@@ -165,7 +166,7 @@ export const CartView: React.FC = () => {
               <div className="p-3 bg-amber-50 dark:bg-amber-950/40 border-2 border-amber-400 dark:border-amber-600 rounded-xl text-xs text-amber-900 dark:text-amber-200 flex items-center gap-2">
                 <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
                 <span className="font-bold">
-                  Online payments are coming soon. Arrange directly with the seller
+                  {trustCopy.cartDisabledBanner}
                 </span>
               </div>
             )}
@@ -176,13 +177,13 @@ export const CartView: React.FC = () => {
               className="w-full h-12 bg-[#FF6B00] hover:bg-[#ff7a1a] disabled:bg-stone-300 disabled:border-stone-400 disabled:text-stone-500 disabled:shadow-none text-[#111111] font-black rounded-xl text-sm transition-all border-2 border-[#111111] dark:border-stone-800 shadow-[0_3px_0_#111111] dark:shadow-none active:translate-y-0.5 active:shadow-[0_1px_0_#111111] flex items-center justify-center gap-2"
             >
               {!paymentsEnabled ? (
-                <span className="text-xs font-bold text-center px-2">Online payments are coming soon. Arrange directly with the seller</span>
+                <span className="text-xs font-bold text-center px-2">{trustCopy.cartProceedLabel}</span>
               ) : (
                 <>
                   <div className="w-5 h-5 rounded-md bg-[#9FE870] border border-[#111111] flex items-center justify-center text-[#111111]">
                     <ShieldCheck className="w-3.5 h-3.5" />
                   </div>
-                  <span>Proceed to Escrow Checkout</span>
+                  <span>{trustCopy.cartProceedLabel}</span>
                 </>
               )}
             </button>
@@ -192,7 +193,7 @@ export const CartView: React.FC = () => {
                 <ShieldCheck className="w-3 h-3" />
               </div>
               <span>
-                Payment is held in Shop It escrow until you inspect your items. Dispute protection and locked chat active.
+                {trustCopy.cartBottomNote}
               </span>
             </div>
           </div>

@@ -29,6 +29,7 @@ interface OrderProgressTrackerProps {
     | 'packedPhotoUrl'
   > | null;
   viewerRole?: 'buyer' | 'seller';
+  paymentsEnabled?: boolean;
   compact?: boolean;
   isLoading?: boolean;
   error?: string | null;
@@ -59,9 +60,10 @@ function formatShortTime(iso?: string): string | undefined {
 function resolveProgressState(
   status: OrderStatus,
   order: NonNullable<OrderProgressTrackerProps['order']>,
-  viewerRole: 'buyer' | 'seller'
+  viewerRole: 'buyer' | 'seller',
+  paymentsEnabled: boolean
 ) {
-  const pickupTarget = order.safeMeetingSpotName || order.pickupPoint || order.deliveryArea || 'Safe Spot';
+  const pickupTarget = order.safeMeetingSpotName || order.pickupPoint || order.deliveryArea || 'Campus Pickup Spot';
 
   const stages: StageDefinition[] = [
     {
@@ -73,7 +75,7 @@ function resolveProgressState(
     },
     {
       id: 'escrow_held',
-      label: 'Escrow Held',
+      label: paymentsEnabled ? 'Payment Held' : 'Order Preparing',
       icon: status === 'packed' ? Package : ShieldCheck,
       sublabel:
         status === 'packed'
@@ -82,7 +84,9 @@ function resolveProgressState(
           ? viewerRole === 'seller'
             ? 'Pack & upload proof'
             : 'Seller preparing craft'
-          : 'Funds secured',
+          : paymentsEnabled
+          ? 'Order recorded'
+          : 'Order confirmed',
       timestamp: formatShortTime(order.packedAt),
     },
     {
@@ -94,14 +98,19 @@ function resolveProgressState(
           ? `At ${pickupTarget}`
           : status === 'shipped'
           ? `En route to ${pickupTarget}`
-          : 'Campus handoff',
+          : 'Campus pickup',
       timestamp: formatShortTime(order.deliveredAt || order.shippedAt),
     },
     {
       id: 'completed',
       label: 'Completed',
       icon: CheckCircle2,
-      sublabel: status === 'completed' ? 'Escrow released' : 'Buyer confirmation',
+      sublabel:
+        status === 'completed'
+          ? paymentsEnabled
+            ? 'Payment released'
+            : 'Delivered & closed'
+          : 'Buyer confirmation',
       timestamp: formatShortTime(order.completedAt),
     },
   ];
@@ -115,7 +124,9 @@ function resolveProgressState(
         activeIndex: 0,
         progressPercent: 8,
         headline: 'Order Placed · Awaiting Payment',
-        detail: 'Complete Flutterwave checkout within 30 minutes to lock funds into escrow.',
+        detail: paymentsEnabled
+          ? 'Complete Flutterwave checkout within 30 minutes to confirm your order.'
+          : 'Order awaiting seller arrangement.',
         isHalted: false as const,
       };
     case 'paid':
@@ -124,11 +135,15 @@ function resolveProgressState(
         completedThroughIndex: 0,
         activeIndex: 1,
         progressPercent: 33,
-        headline: 'Escrow Held · Preparing Order',
+        headline: paymentsEnabled ? 'Payment Held · Preparing Order' : 'Order Confirmed · Preparing Order',
         detail:
           viewerRole === 'seller'
-            ? 'Buyer payment is secured in escrow. Upload a packing photo to mark as Packed.'
-            : 'Payment confirmed and locked safely in escrow while the seller prepares your item.',
+            ? paymentsEnabled
+              ? 'Buyer payment is held until delivery confirmation. Upload a packing photo to mark as Packed.'
+              : 'Upload a packing photo to mark this order as Packed.'
+            : paymentsEnabled
+            ? 'Payment confirmed and held while the seller prepares your item.'
+            : 'Seller is preparing your item.',
         isHalted: false as const,
       };
     case 'packed':
@@ -137,10 +152,10 @@ function resolveProgressState(
         completedThroughIndex: 0,
         activeIndex: 1,
         progressPercent: 50,
-        headline: 'Escrow Held · Packed & Photo Verified',
+        headline: paymentsEnabled ? 'Payment Held · Packed & Photo Verified' : 'Packed & Photo Verified',
         detail:
           viewerRole === 'seller'
-            ? 'Packing proof saved. Dispatch to the safe campus spot to advance.'
+            ? 'Packing proof saved. Dispatch to the campus pickup spot to advance.'
             : 'The artisan packed and photographed your order and is getting ready to dispatch.',
         isHalted: false as const,
       };
@@ -151,7 +166,7 @@ function resolveProgressState(
         activeIndex: 2,
         progressPercent: 68,
         headline: `Pickup Ready · En Route to ${pickupTarget}`,
-        detail: `Item has been dispatched toward ${pickupTarget}. Inspect carefully before releasing your PIN.`,
+        detail: `Item has been dispatched toward ${pickupTarget}. Inspect carefully before sharing your PIN.`,
         isHalted: false as const,
       };
     case 'delivered':
@@ -163,8 +178,8 @@ function resolveProgressState(
         headline: `Pickup Ready · Arrived at ${pickupTarget}`,
         detail:
           viewerRole === 'seller'
-            ? 'Delivered. Enter the buyer Handshake PIN or wait for confirmation to unlock funds.'
-            : 'Your item is ready for inspection. Confirm receipt once satisfied to release escrow.',
+            ? 'Delivered. Enter the buyer Handshake PIN or wait for confirmation to complete the order.'
+            : 'Your item is ready for inspection. Confirm receipt once satisfied to complete the order.',
         isHalted: false as const,
       };
     case 'completed':
@@ -173,8 +188,10 @@ function resolveProgressState(
         completedThroughIndex: 3,
         activeIndex: 3,
         progressPercent: 100,
-        headline: 'Completed · Escrow Funds Released',
-        detail: 'Delivery confirmed and payment released to the seller wallet.',
+        headline: paymentsEnabled ? 'Completed · Payment Released' : 'Order Completed',
+        detail: paymentsEnabled
+          ? 'Delivery confirmed and payment moved to the seller available balance.'
+          : 'Delivery confirmed and order marked completed.',
         isHalted: false as const,
       };
     case 'disputed': {
@@ -184,10 +201,12 @@ function resolveProgressState(
         completedThroughIndex: Math.max(0, reachedStage - 1),
         activeIndex: reachedStage,
         progressPercent: reachedStage === 2 ? 67 : reachedStage === 1 ? 33 : 10,
-        headline: 'Dispute Open · Escrow Frozen',
+        headline: paymentsEnabled ? 'Dispute Open · Payout Paused' : 'Dispute Open · Under Review',
         detail:
           order.disputeReason ||
-          'Order is paused under moderation review. Escrow funds remain safely frozen.',
+          (paymentsEnabled
+            ? 'Order is paused under moderation review. Held payment does not release while a dispute is open.'
+            : 'Order is paused under moderation review.'),
         isHalted: 'disputed' as const,
       };
     }
@@ -198,7 +217,7 @@ function resolveProgressState(
         activeIndex: -1,
         progressPercent: 0,
         headline: 'Order Refunded',
-        detail: order.disputeReason || 'Escrow payment has been returned to the buyer.',
+        detail: order.disputeReason || 'Order payment has been returned to the buyer.',
         isHalted: 'refunded' as const,
       };
     case 'cancelled':
@@ -218,6 +237,7 @@ function resolveProgressState(
 export const OrderProgressTracker: React.FC<OrderProgressTrackerProps> = ({
   order,
   viewerRole = 'buyer',
+  paymentsEnabled = true,
   compact = false,
   isLoading = false,
   error = null,
@@ -280,7 +300,7 @@ export const OrderProgressTracker: React.FC<OrderProgressTrackerProps> = ({
     );
   }
 
-  const state = resolveProgressState(order.status, order, viewerRole);
+  const state = resolveProgressState(order.status, order, viewerRole, paymentsEnabled);
   const { stages, completedThroughIndex, activeIndex, progressPercent, headline, detail, isHalted } =
     state;
 

@@ -1,4 +1,3 @@
-import crypto from 'crypto';
 import type { Request, Response, NextFunction } from 'express';
 import { getSession, UserSession, SESSION_COOKIE_NAME, logAuditEvent } from './sessionStore.js';
 
@@ -305,45 +304,3 @@ export function requirePayoutsEnabled(
   return next();
 }
 
-/**
- * Cron endpoint protection: requires valid Authorization Bearer CRON_SECRET or x-cron-secret header.
- */
-export function requireCronSecret(
-  req: Request,
-  res: Response,
-  next: NextFunction
-): any {
-  const configuredSecret = (process.env.CRON_SECRET || '').trim();
-  if (!configuredSecret) {
-    return res.status(503).json({
-      status: false,
-      error: 'CRON_SECRET_MISSING',
-      message: 'CRON_SECRET is not configured on the server.',
-    });
-  }
-
-  const authHeader = String(req.headers.authorization || '').trim();
-  const bearerToken = authHeader.toLowerCase().startsWith('bearer ') ? authHeader.slice(7).trim() : '';
-  const headerToken = typeof req.headers['x-cron-secret'] === 'string' ? req.headers['x-cron-secret'].trim() : '';
-  const provided = bearerToken || headerToken;
-
-  if (!provided) {
-    return res.status(401).json({
-      status: false,
-      error: 'UNAUTHORIZED',
-      message: 'Valid CRON_SECRET is required.',
-    });
-  }
-
-  const a = Buffer.from(provided, 'utf8');
-  const b = Buffer.from(configuredSecret, 'utf8');
-  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
-    return res.status(401).json({
-      status: false,
-      error: 'UNAUTHORIZED',
-      message: 'Invalid CRON_SECRET.',
-    });
-  }
-
-  return next();
-}

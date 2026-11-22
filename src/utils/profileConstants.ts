@@ -1,24 +1,24 @@
-export const PROFILE_INTERESTS = [
-  'Waist Beads & Jewelry',
-  'Crochet & Yarn',
-  'Perfume Oils & Scents',
-  'Thrift & Fashion',
-  'Room Decor & Candles',
-  'Art & Illustration',
-  'Phone Cases & Tech Crafts',
-  'Hair Accessories',
-  'Leather & Bags',
-  'Stationery & Gifts',
-] as const;
+import {
+  PROFILE_INTERESTS,
+  ALLOWED_LANGUAGES,
+  PROCESSING_TIME_OPTIONS,
+  DEFAULT_AVATAR_PRESETS,
+  MAX_TAGLINE_LENGTH,
+  MAX_BIO_LENGTH,
+  MAX_SHOP_STORY_LENGTH,
+  MAX_CRAFT_MATERIALS_LENGTH,
+} from '../../shared/profileOptions';
 
-export const DEFAULT_AVATAR_PRESETS = [
-  { id: 'avatar-1', label: 'Warm Sunset', url: '/avatars/avatar-1.svg' },
-  { id: 'avatar-2', label: 'Fresh Leaf', url: '/avatars/avatar-2.svg' },
-  { id: 'avatar-3', label: 'Midnight Star', url: '/avatars/avatar-3.svg' },
-  { id: 'avatar-4', label: 'Amber Wave', url: '/avatars/avatar-4.svg' },
-  { id: 'avatar-5', label: 'Emerald Shield', url: '/avatars/avatar-5.svg' },
-  { id: 'avatar-6', label: 'Terracotta Bead', url: '/avatars/avatar-6.svg' },
-] as const;
+export {
+  PROFILE_INTERESTS,
+  ALLOWED_LANGUAGES,
+  PROCESSING_TIME_OPTIONS,
+  DEFAULT_AVATAR_PRESETS,
+  MAX_TAGLINE_LENGTH,
+  MAX_BIO_LENGTH,
+  MAX_SHOP_STORY_LENGTH,
+  MAX_CRAFT_MATERIALS_LENGTH,
+};
 
 export const DEFAULT_NOTIFICATION_PREFS = {
   emailOrders: true,

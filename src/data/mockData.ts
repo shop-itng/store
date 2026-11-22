@@ -49,7 +49,7 @@ export const INITIAL_SAFE_SPOTS: SafePickupSpot[] = [
   {
     id: 'spot_unilag_sub',
     campus: 'UNILAG (Akoka)',
-    name: 'Akoka Safe Youth Spot',
+    name: 'Akoka Student Quad Hub',
     landmark: 'Student Quadrangle / Quad Hub',
     operatingHours: '8:00 AM - 7:00 PM',
     securityLevel: 'manned_porter',
@@ -61,7 +61,7 @@ export const INITIAL_SAFE_SPOTS: SafePickupSpot[] = [
   {
     id: 'spot_ikeja_hub',
     campus: 'LASU (Ojo)',
-    name: 'Ikeja Youth Safe Hub',
+    name: 'Ikeja Campus Pickup Hub',
     landmark: 'Maryland / Mobolaji Bank Anthony Way',
     operatingHours: '9:00 AM - 6:00 PM',
     securityLevel: 'cctv_monitored',

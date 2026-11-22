@@ -111,19 +111,32 @@ interface AppContextType {
   toggleProductPin: (productId: string, isPinned: boolean) => Promise<boolean>;
   toggleProductPause: (productId: string, isPaused: boolean) => Promise<boolean>;
 
-  // Profiles & Account Settings (Phase A)
+  // Profiles & Account Settings (Phase A & Part 3)
   updateMyProfile: (payload: {
     displayName?: string;
+    tagline?: string;
     avatarUrl?: string | null;
     coverUrl?: string | null;
     bio?: string;
+    locationState?: string;
     campus?: string;
     locationArea?: string;
     interests?: string[];
+    languages?: string[];
     shopName?: string;
     shopBio?: string;
+    shopStory?: string;
+    craftMaterials?: string;
+    processingTime?: string;
+    deliveryOptions?: {
+      allowsPickup: boolean;
+      allowsLocalDelivery: boolean;
+      pickupSpots: string[];
+    };
+    vacationMode?: boolean;
     logoUrl?: string | null;
     bannerUrl?: string | null;
+    privacySettings?: Partial<PrivacySettings>;
   }) => Promise<{ status: boolean; message?: string; profile?: any }>;
   updateMySettings: (payload: {
     notificationPrefs?: Partial<NotificationPrefs>;
@@ -400,9 +413,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     safeStorageSet('shopit_theme', theme);
   }, [theme]);
 
-  // Checkout & Coupon states
-  const paymentsEnabled = import.meta.env.VITE_PAYMENTS_ENABLED === 'true';
-  const payoutsEnabled = import.meta.env.VITE_PAYOUTS_ENABLED === 'true';
+  // Checkout & Coupon states (hydrated from /api/platform/config; default fallback from Vite env)
+  const [paymentsEnabled, setPaymentsEnabled] = useState<boolean>(
+    import.meta.env.VITE_PAYMENTS_ENABLED === 'true'
+  );
+  const [payoutsEnabled, setPayoutsEnabled] = useState<boolean>(
+    import.meta.env.VITE_PAYOUTS_ENABLED === 'true'
+  );
   const [isCheckoutModalOpen, setIsCheckoutModalOpen] = useState(false);
   const [appliedCoupon, setAppliedCoupon] = useState<Coupon | null>(null);
 
@@ -652,7 +669,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     id: 'broad_default',
     isActive: false,
     title: 'Campus Safety & Verified Handshake Advisory',
-    message: 'All campus craft handoffs must be verified using the 4-digit Handshake OTP in daylight safe spots.',
+    message: 'All campus craft handoffs must be verified using the 4-digit Handshake PIN at public campus pickup spots.',
     tone: 'info',
     createdAt: new Date().toISOString(),
     author: 'Shop It Safety Desk',
@@ -780,6 +797,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (!res.ok) return;
       const data = await res.json();
       if (data.status) {
+        if (typeof data.paymentsEnabled === 'boolean') setPaymentsEnabled(data.paymentsEnabled);
+        if (typeof data.payoutsEnabled === 'boolean') setPayoutsEnabled(data.payoutsEnabled);
         if (data.broadcastAnnouncement) setBroadcastAnnouncement(data.broadcastAnnouncement);
         if (data.emergencyControls) setEmergencyControls(data.emergencyControls);
         if (data.feeSettings) setFeeSettings(data.feeSettings);
@@ -2100,7 +2119,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       } else if (status === 'delivered') {
         notify('Order delivered! Buyer notified to inspect.', 'info');
       } else if (status === 'completed') {
-        notify('Order completed and escrow funds released!', 'success');
+        notify('Order completed and funds released to seller!', 'success');
       }
 
       await refreshFinancials();
@@ -2115,7 +2134,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!ord) return;
 
     if (ord.status === 'disputed') {
-      notify(`Cannot release escrow: Order #${orderId} has an open dispute under moderation. Funds remain frozen.`, 'error');
+      notify(`Cannot complete order: Order #${orderId} has an open dispute under moderation. Funds remain paused.`, 'error');
       return;
     }
 
@@ -2175,7 +2194,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setOrders(prev => prev.map(o => (o.id === orderId ? { ...o, status: 'disputed', disputeReason: reason } : o)));
       }
       await refreshFinancials();
-      notify('Dispute opened. Escrow release is frozen while moderation reviews.', 'error');
+      notify('Dispute opened. Payment release is paused while moderation reviews.', 'error');
     } catch (err: any) {
       notify(err?.message || 'Network error opening dispute.', 'error');
     }
@@ -2693,7 +2712,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (!currentUser?.id) {
         setPendingChatTarget({ conversationId, targetInfo });
         openAuthModal('login');
-        notify('Please sign in to ask the seller via Escrow Chat.', 'info');
+        notify('Please sign in to message the seller in Shop It chat.', 'info');
         return;
       }
 
@@ -2800,7 +2819,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return {
           success: false,
           isBlocked: true,
-          warning: 'Numbers and number words are strictly blocked in chat to protect your escrow safety. Please tap the preset price and quantity buttons.',
+          warning: 'Numbers and number words are strictly blocked in chat to help keep conversations on-platform. Please tap the preset price and quantity buttons.',
         };
       }
     }
@@ -3858,8 +3877,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const adminForceReleaseEscrow = (orderId: string) => {
     confirmItemReceived(orderId);
-    notify(`[Moderator Override] Escrow released for Order #${orderId} to seller available balance.`, 'success');
-    addAdminAuditLog('ESCROW_FORCE_RELEASED', `Escrow funds force-released directly to seller for order #${orderId}`, orderId);
+    notify(`[Moderator Override] Funds released for Order #${orderId} to seller available balance.`, 'success');
+    addAdminAuditLog('ESCROW_FORCE_RELEASED', `Order funds released directly to seller for order #${orderId}`, orderId);
   };
 
   const adminForceRefundOrder = (orderId: string, notes?: string) => {
@@ -4340,8 +4359,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
 
       await refreshFinancials();
-      notify(`Handshake Verified! Order #${orderId} completed and escrow funds released.`, 'success');
-      return { success: true, message: 'Handshake PIN verified successfully! Escrow released.' };
+      notify(`Handshake Verified! Order #${orderId} completed and payment released.`, 'success');
+      return { success: true, message: 'Handshake PIN verified successfully!' };
     } catch (err: any) {
       notify(err.message || 'Network error verifying Handshake PIN.', 'error');
       return { success: false, message: err.message || 'Verification failed.' };

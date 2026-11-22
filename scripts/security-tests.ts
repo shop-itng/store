@@ -1102,7 +1102,7 @@ async function main() {
       assert.strictEqual(adminDocRes.status, 200, 'Moderator admin session should stream decrypted image (200)');
     });
 
-    await test('CR4: /api/cron/daily rejects missing CRON_SECRET (401) and calling 10 times changes nothing after first run', async () => {
+    await test('CR4: /api/cron/daily runs safely without CRON_SECRET (200) and calling 10 times changes nothing after first run', async () => {
       // Seed one overdue pending_payment order with reserved stock to verify run 1 processes it and runs 2-10 are zero-ops
       const cronProdId = `prod_cron_${ts}`;
       await query(
@@ -1132,14 +1132,8 @@ async function main() {
         ]
       );
 
-      const unauthCron = await origFetch(`${baseUrl}/api/cron/daily`, { method: 'GET' });
-      assert.strictEqual(unauthCron.status, 401, 'Missing CRON_SECRET must return 401');
-
-      const firstRes = await origFetch(`${baseUrl}/api/cron/daily`, {
-        method: 'GET',
-        headers: { Authorization: `Bearer ${process.env.CRON_SECRET}` },
-      });
-      assert.strictEqual(firstRes.status, 200);
+      const firstRes = await origFetch(`${baseUrl}/api/cron/daily`, { method: 'GET' });
+      assert.strictEqual(firstRes.status, 200, 'Public idempotent cron must return 200 without CRON_SECRET');
       const firstBody: any = await firstRes.json();
       assert.strictEqual(firstBody.ok, true);
       assert.strictEqual(firstBody.processed.expiredOrdersCount, 1);
@@ -1148,10 +1142,7 @@ async function main() {
       assert.strictEqual(stockAfterFirst, 5);
 
       for (let i = 2; i <= 10; i++) {
-        const res = await origFetch(`${baseUrl}/api/cron/daily`, {
-          method: 'GET',
-          headers: { Authorization: `Bearer ${process.env.CRON_SECRET}` },
-        });
+        const res = await origFetch(`${baseUrl}/api/cron/daily`, { method: 'GET' });
         assert.strictEqual(res.status, 200, `Cron run #${i} failed with ${res.status}`);
         const body: any = await res.json();
         assert.strictEqual(body.ok, true);

@@ -84,6 +84,8 @@ try {
   const healthJson = JSON.parse(healthText);
   assert.strictEqual(healthJson.status, 'OK', '/api/health payload.status must be OK');
   assert.strictEqual(healthJson.databaseConnected, true, '/api/health payload.databaseConnected must be true');
+  assert.strictEqual(healthJson.schemaOk, true, '/api/health payload.schemaOk must be true');
+  assert.ok(Boolean(healthJson.schemaVersion), '/api/health payload.schemaVersion must be present');
 
   const versionRes = await fetch(`${baseUrl}/api/version`);
   const versionText = await versionRes.text();

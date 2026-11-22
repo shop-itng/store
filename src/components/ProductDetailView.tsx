@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Product } from '../types';
 import { useApp } from '../context/AppContext';
+import { getTrustCopy } from '../../shared/trustAndLegalCopy';
 import { formatNaira } from '../utils/pricing';
 import {
   ArrowLeft,
@@ -54,7 +55,9 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({ product, o
     followUser,
     unfollowUser,
     openAuthModal,
+    paymentsEnabled,
   } = useApp();
+  const trustCopy = getTrustCopy(paymentsEnabled);
 
   const seller = getSellerById(product.sellerId);
   const isWishlisted = wishlist.includes(product.id);
@@ -384,12 +387,9 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({ product, o
             <div className="bg-slate-50 dark:bg-[#15161C] rounded-xl p-4 border border-slate-200/80 dark:border-[#27272A] space-y-2 text-xs text-slate-600 dark:text-[#A1A1AA]">
               <div className="flex items-center gap-2 font-semibold text-slate-900 dark:text-white">
                 <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-[#9FE870]" />
-                <span>Shop It Escrow &amp; Buyer Protection Included</span>
+                <span>{trustCopy.productInfoTitle}</span>
               </div>
-              <p>
-                Your payment is held safely until you confirm "Item Received" in person or on delivery.
-                If the item does not match the description or doesn’t arrive, you get an automatic refund.
-              </p>
+              <p>{trustCopy.productInfoBody}</p>
             </div>
           </div>
         </div>
@@ -415,7 +415,7 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({ product, o
                   <span>{product.locationArea || 'Nigeria'}</span>
                 </span>
                 <span aria-hidden="true">·</span>
-                <span>{seller ? `${seller.salesCount} completed sales` : 'Escrow Protected'}</span>
+                <span>{seller ? `${seller.salesCount} completed sales` : trustCopy.productSellerTrustFallback}</span>
               </div>
             </div>
 
@@ -494,7 +494,7 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({ product, o
                 <span className="font-mono-numbers">{formatNaira(product.sellerPrice)}</span>
               </div>
               <div className="flex justify-between text-emerald-800 font-medium">
-                <span>Shop It Buyer Protection Fee</span>
+                <span>{trustCopy.productFeeLabel}</span>
                 <span className="font-mono-numbers">+{formatNaira(product.serviceFee)}</span>
               </div>
             </div>
@@ -674,7 +674,7 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({ product, o
                     onClick={handleBuyNow}
                     className="h-12 rounded-xl bg-[#FF6B00] hover:bg-[#FF7A1A] text-[#111111] border-2 border-[#111111] font-black text-xs sm:text-sm active:translate-y-0.5 transition-all flex items-center justify-center shadow-[0_2px_0_#111111]"
                   >
-                    <span>Buy Now · {formatNaira(grandTotal)}</span>
+                    <span>{paymentsEnabled ? `Buy Now · ${formatNaira(grandTotal)}` : 'Arrange Directly'}</span>
                   </button>
                 </div>
               </>
@@ -713,7 +713,7 @@ export const ProductDetailView: React.FC<ProductDetailViewProps> = ({ product, o
                 className="w-full h-12 rounded-xl bg-[#111111] hover:bg-[#18181B] text-[#9FE870] border-2 border-[#111111] hover:border-[#FF6B00] font-black text-xs sm:text-sm flex items-center justify-center gap-2 transition-all shadow-[0_2px_0_#111111] active:translate-y-0.5 whitespace-nowrap"
               >
                 <MessageSquare className="w-4 h-4 text-[#FF6B00]" />
-                <span>Ask Seller (Safe Escrow Chat)</span>
+                <span>{trustCopy.productChatButtonLabel}</span>
               </button>
             ) : (
               <button

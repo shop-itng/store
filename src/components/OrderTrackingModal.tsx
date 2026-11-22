@@ -1,6 +1,8 @@
 import React from 'react';
 import { Order } from '../types';
 import { formatNaira } from '../utils/pricing';
+import { useApp } from '../context/AppContext';
+import { getTrustCopy } from '../../shared/trustAndLegalCopy';
 import {
   X,
   CheckCircle2,
@@ -34,6 +36,9 @@ export const OrderTrackingModal: React.FC<Props> = ({
   error = null,
   onRetry,
 }) => {
+  const { paymentsEnabled } = useApp();
+  const trustCopy = getTrustCopy(paymentsEnabled);
+
   if (!order) return null;
 
   const createdAtDate = new Date(order.createdAt);
@@ -51,8 +56,10 @@ export const OrderTrackingModal: React.FC<Props> = ({
   const steps = [
     {
       step: 1,
-      title: 'Order Placed & Escrow Created',
-      desc: 'Payment confirmed via Flutterwave. Funds locked in secure Escrow.',
+      title: 'Order Placed',
+      desc: paymentsEnabled
+        ? 'Payment confirmed via Flutterwave. Held until delivery confirmation.'
+        : 'Order recorded on Shop It.',
       time: createdAtDate.toLocaleDateString('en-NG', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }),
       done: isStep1Done,
       active: order.status === 'paid',
@@ -71,7 +78,7 @@ export const OrderTrackingModal: React.FC<Props> = ({
     {
       step: 3,
       title: 'Dispatched & On The Way',
-      desc: `Dispatched to ${order.deliveryArea || 'Campus Safe Zone'}.`,
+      desc: `Dispatched to ${order.deliveryArea || 'Campus Pickup Area'}.`,
       time: shippedDate ? shippedDate.toLocaleDateString('en-NG', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'Pending dispatch',
       done: isStep3Done,
       active: order.status === 'shipped',
@@ -79,7 +86,7 @@ export const OrderTrackingModal: React.FC<Props> = ({
     },
     {
       step: 4,
-      title: 'Delivered to Safe Spot',
+      title: 'Delivered to Pickup Spot',
       desc: 'Package ready for buyer inspection at specified pickup/delivery point.',
       time: deliveredDate ? deliveredDate.toLocaleDateString('en-NG', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'Estimated: 1-2 campus days',
       done: isStep4Done,
@@ -88,9 +95,15 @@ export const OrderTrackingModal: React.FC<Props> = ({
     },
     {
       step: 5,
-      title: 'Item Received & Funds Released',
-      desc: 'Buyer confirmed receipt or 5-day window auto-released funds to artisan.',
-      time: completedDate ? completedDate.toLocaleDateString('en-NG', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'Auto-release in 5 days if undisputed',
+      title: paymentsEnabled ? 'Item Received & Payment Released' : 'Item Received',
+      desc: paymentsEnabled
+        ? 'Buyer confirmed receipt or 5-day window moved funds to seller available balance.'
+        : 'Buyer confirmed receipt.',
+      time: completedDate
+        ? completedDate.toLocaleDateString('en-NG', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
+        : paymentsEnabled
+        ? 'Auto-release in 5 days if undisputed'
+        : 'Pending buyer confirmation',
       done: isStep5Done,
       active: isStep5Done,
       icon: CheckCircle2,
@@ -114,7 +127,7 @@ export const OrderTrackingModal: React.FC<Props> = ({
                 </span>
               </div>
               <p className="text-[11px] text-slate-500 dark:text-[#A1A1AA]">
-                Live delivery progress · Funds secured in Shop It Escrow
+                Live delivery progress · {trustCopy.receiptTitle}
               </p>
             </div>
           </div>
@@ -151,7 +164,7 @@ export const OrderTrackingModal: React.FC<Props> = ({
             <span className="font-black text-slate-900 dark:text-white font-mono-numbers">
               {formatNaira(order.grandTotal)}
             </span>
-            <span className="block text-[10px] text-emerald-600 font-bold">Escrow Protected</span>
+            <span className="block text-[10px] text-emerald-600 font-bold">{trustCopy.productCardBadge}</span>
           </div>
         </div>
 
@@ -159,6 +172,7 @@ export const OrderTrackingModal: React.FC<Props> = ({
         <OrderProgressTracker
           order={order}
           viewerRole="buyer"
+          paymentsEnabled={paymentsEnabled}
           isLoading={isLoading}
           error={error}
           onRetry={onRetry}

@@ -5,6 +5,7 @@ import { ProductCategory } from '../types';
 import { getPricingBreakdown, formatNaira } from '../utils/pricing';
 import { clientContainsForbiddenContactInfo } from '../utils/profileConstants';
 import { uploadFileToServer } from '../utils/fileUpload';
+import { getTrustCopy } from '../../shared/trustAndLegalCopy';
 import {
   X,
   Upload,
@@ -34,7 +35,9 @@ export const QuickListModal: React.FC = () => {
     userLocation,
     notify,
     verificationRequests,
+    paymentsEnabled,
   } = useApp();
+  const trustCopy = getTrustCopy(paymentsEnabled);
 
   useEffect(() => {
     if (isQuickListModalOpen) {
@@ -199,7 +202,7 @@ export const QuickListModal: React.FC = () => {
           isSoldOut: stock <= 0,
           delivery: {
             allowsPickup: true,
-            pickupLocation: `${areaName} Safe Handoff Spot`,
+            pickupLocation: `${areaName} Campus Pickup Spot`,
             pickupFee,
             allowsLocalDelivery: true,
             localDeliveryFee,
@@ -233,7 +236,7 @@ export const QuickListModal: React.FC = () => {
           isDraft: saveAsDraft,
           delivery: {
             allowsPickup: true,
-            pickupLocation: `${areaName} Safe Handoff Spot`,
+            pickupLocation: `${areaName} Campus Pickup Spot`,
             pickupFee,
             allowsLocalDelivery: true,
             localDeliveryFee,
@@ -306,7 +309,7 @@ export const QuickListModal: React.FC = () => {
             <div className="flex-1">
               <span className="font-bold block">Recommended: Verify Identity Before Withdrawals</span>
               <p className="text-[11px] text-amber-700 dark:text-amber-300 mt-0.5">
-                You can publish products right away. Under NDPA 2023 guidelines, you will only need to submit your NIN and live selfie before requesting bank withdrawals.
+                You can publish products right away. Identity verification (NIN and live selfie) is only required before requesting bank withdrawals.
               </p>
               <div className="mt-2 flex flex-wrap items-center gap-2">
                 <button
@@ -514,7 +517,7 @@ export const QuickListModal: React.FC = () => {
               />
             </div>
             <div className="flex justify-between text-[11px] text-[#166534] dark:text-emerald-300 pt-1">
-              <span>Includes Shop It Escrow Protection:</span>
+              <span>{trustCopy.productFeeLabel}:</span>
               <span>+{formatNaira(pricing.serviceFee)}</span>
             </div>
           </div>

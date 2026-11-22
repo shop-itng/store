@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import { Order } from '../types';
 import { formatNaira } from '../utils/pricing';
+import { useApp } from '../context/AppContext';
+import { getTrustCopy } from '../../shared/trustAndLegalCopy';
 import {
   ShieldCheck,
   CheckCircle2,
@@ -30,6 +32,8 @@ export const EscrowReceiptModal: React.FC<EscrowReceiptModalProps> = ({
   isOpen,
   onClose,
 }) => {
+  const { paymentsEnabled } = useApp();
+  const trustCopy = getTrustCopy(paymentsEnabled);
   const [copiedOtp, setCopiedOtp] = useState(false);
   const [copiedRef, setCopiedRef] = useState(false);
 
@@ -72,10 +76,10 @@ export const EscrowReceiptModal: React.FC<EscrowReceiptModalProps> = ({
               <div>
                 <div className="flex items-center gap-1.5">
                   <h3 className="text-base font-black tracking-tight text-white">
-                    Shop It Safe Escrow Pass
+                    {trustCopy.receiptTitle}
                   </h3>
                   <span className="text-[10px] font-black px-2 py-0.5 rounded-full bg-[#9FE870] text-[#111111]">
-                    OFFICIAL
+                    ORDER PASS
                   </span>
                 </div>
                 <p className="text-[11px] text-stone-300 font-mono">
@@ -133,22 +137,23 @@ export const EscrowReceiptModal: React.FC<EscrowReceiptModalProps> = ({
             </div>
 
             <p className="text-[11px] text-amber-900 leading-relaxed">
-              <strong>Campus Safety Rule:</strong> Only give this 4-digit code to the artisan or courier <em>after</em> you have physically inspected your craft in daylight. Once entered, escrow payment is instantly released to the seller.
+              <strong>Campus Safety Rule:</strong> Only give this 4-digit code to the artisan or courier <em>after</em> you have physically inspected your craft in daylight.{' '}
+              {paymentsEnabled
+                ? 'Once confirmed, payment is moved to the seller available balance.'
+                : 'Once confirmed, the order is marked completed.'}
             </p>
           </div>
 
-          {/* Escrow Vault Status Badge */}
+          {/* Payment Status Badge */}
           <div className="flex items-center justify-between p-3.5 rounded-2xl bg-stone-50 border border-stone-200 text-xs">
             <div className="flex items-center gap-2">
               <ShieldCheck className="w-5 h-5 text-emerald-600 shrink-0" />
               <div>
                 <span className="font-bold text-stone-900 block">
-                  {isCompleted ? 'Escrow Vault Settled' : 'Funds Secured in Escrow Vault'}
+                  {isCompleted ? trustCopy.receiptStatusSettled : trustCopy.receiptStatusActive}
                 </span>
                 <span className="text-[11px] text-stone-500">
-                  {isCompleted
-                    ? 'Payment has been released to the artisan.'
-                    : '100% money-back guarantee until you confirm receipt.'}
+                  {isCompleted ? trustCopy.receiptSubSettled : trustCopy.receiptSubActive}
                 </span>
               </div>
             </div>
@@ -206,11 +211,11 @@ export const EscrowReceiptModal: React.FC<EscrowReceiptModalProps> = ({
                 <span className="font-mono-numbers">{formatNaira(order.itemsSubtotal)}</span>
               </div>
               <div className="flex justify-between text-emerald-800">
-                <span>Shop It Protection Fee (Escrow Insurance)</span>
+                <span>{trustCopy.productFeeLabel}</span>
                 <span className="font-mono-numbers">+{formatNaira(order.serviceFeeTotal)}</span>
               </div>
               <div className="flex justify-between">
-                <span>Campus Delivery / Handoff Fee</span>
+                <span>Campus Delivery / Pickup Fee</span>
                 <span className="font-mono-numbers">+{formatNaira(order.deliveryTotal)}</span>
               </div>
               {order.discountTotal > 0 && (
@@ -220,7 +225,7 @@ export const EscrowReceiptModal: React.FC<EscrowReceiptModalProps> = ({
                 </div>
               )}
               <div className="pt-2 border-t border-stone-200 flex justify-between items-baseline font-black text-sm text-stone-950">
-                <span>Total Escrow Amount</span>
+                <span>{trustCopy.receiptTotalLabel}</span>
                 <span className="text-lg font-mono-numbers text-[#111111]">
                   {formatNaira(order.grandTotal)}
                 </span>
@@ -292,7 +297,7 @@ export const EscrowReceiptModal: React.FC<EscrowReceiptModalProps> = ({
 
         {/* Footer print watermark */}
         <div className="bg-stone-50 px-6 py-2 border-t border-stone-200 text-center text-[10px] text-stone-400">
-          Shop It Escrow Protocol · NIMC Verified · Flutterwave Escrow Protected
+          {trustCopy.receiptWatermark}
         </div>
       </div>
     </div>

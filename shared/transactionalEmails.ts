@@ -5,6 +5,8 @@
  * Contains zero browser-only globals (no window, document, localStorage, or fetch).
  */
 
+import { EMAIL_TRUST_COPY, OPERATOR_INFO } from './trustAndLegalCopy.js';
+
 export type EmailTemplateKey =
   | 'signup_code'
   | 'new_device_login'
@@ -29,16 +31,16 @@ export interface EmailRenderResult {
   html: string;
 }
 
-export const EMAIL_SIGNATURE_TEXT = `The Shop It Team · Operated by TEEDS.
-Support: shopitverified@gmail.com (we reply within 3 working days).
-Never share your codes. Shop It will never ask for your password or code.`;
+export const EMAIL_SIGNATURE_TEXT = `${EMAIL_TRUST_COPY.signatureTeam} · ${OPERATOR_INFO.operatedByLine}.
+${EMAIL_TRUST_COPY.signatureHelpPrefix}
+${EMAIL_TRUST_COPY.signatureSecurityWarning}`;
 
 export const EMAIL_SIGNATURE_HTML = `
   <div style="margin-top: 28px; padding-top: 18px; border-top: 1px solid #e2e8f0; color: #64748b; font-size: 13px; line-height: 1.6;">
-    <p style="margin: 0; font-weight: 800; color: #1e293b;">The Shop It Team</p>
-    <p style="margin: 3px 0 0; color: #64748b; font-size: 12px;">Operated by TEEDS · Nigerian Youth & Student Artisanal Marketplace</p>
-    <p style="margin: 4px 0 0; color: #475569; font-size: 12px;">Need help? Email <a href="mailto:shopitverified@gmail.com" style="color: #FF6B00; text-decoration: underline;">shopitverified@gmail.com</a> (we reply within 3 working days).</p>
-    <p style="margin: 6px 0 0; color: #dc2626; font-size: 11px; font-weight: 700;">Never share your codes. Shop It will never ask for your password or code.</p>
+    <p style="margin: 0; font-weight: 800; color: #1e293b;">${EMAIL_TRUST_COPY.signatureTeam}</p>
+    <p style="margin: 3px 0 0; color: #64748b; font-size: 12px;">${EMAIL_TRUST_COPY.signatureSubline}</p>
+    <p style="margin: 4px 0 0; color: #475569; font-size: 12px;">Need help? Email <a href="mailto:${OPERATOR_INFO.supportEmail}" style="color: #FF6B00; text-decoration: underline;">${OPERATOR_INFO.supportEmail}</a> (${OPERATOR_INFO.supportSlaLine})</p>
+    <p style="margin: 6px 0 0; color: #dc2626; font-size: 11px; font-weight: 700;">${EMAIL_TRUST_COPY.signatureSecurityWarning}</p>
   </div>
 `;
 
@@ -167,12 +169,13 @@ If you didn't ask to reset your password, you can safely ignore this email. Your
       `;
       break;
 
-    case 'order_placed_buyer':
+    case 'order_placed_buyer': {
+      const orderPlacedMsg = EMAIL_TRUST_COPY.orderPlacedBodyPrefix.replace('{total}', total);
       subject = `We got your order #${orderId}`;
-      bodyText = `Payment of ₦${total} received. Your money is held safely until you confirm the item arrived. Track your order: ${appUrl}/orders?track=${orderId}`;
+      bodyText = `${orderPlacedMsg} Track your order: ${appUrl}/orders?track=${orderId}`;
       bodyHtmlContent = `
         <p style="margin: 0 0 16px; font-size: 15px; color: #0f172a; line-height: 1.6;">
-          Payment of <strong>₦${total}</strong> received. Your money is held safely until you confirm the item arrived.
+          Payment of <strong>₦${total}</strong> received. Payments are processed by Flutterwave. Shop It holds your payment until you confirm delivery.
         </p>
         <p style="margin: 16px 0;">
           <a href="${appUrl}/orders?track=${orderId}" style="display: inline-block; background: #111111; color: #9FE870; font-weight: 700; font-size: 13px; text-decoration: none; padding: 10px 18px; border-radius: 8px; border: 1px solid #FF6B00;">
@@ -181,6 +184,7 @@ If you didn't ask to reset your password, you can safely ignore this email. Your
         </p>
       `;
       break;
+    }
 
     case 'new_order_seller':
       subject = `New order #${orderId}`;
@@ -270,10 +274,10 @@ If you didn't ask to reset your password, you can safely ignore this email. Your
     case 'welcome':
     default:
       subject = 'Welcome to Shop It';
-      bodyText = `Your account is ready. Buy safe, sell easy.`;
+      bodyText = EMAIL_TRUST_COPY.welcomeBody;
       bodyHtmlContent = `
         <p style="margin: 0 0 16px; font-size: 15px; color: #0f172a; line-height: 1.6;">
-          Your account is ready. Buy safe, sell easy.
+          ${EMAIL_TRUST_COPY.welcomeBody}
         </p>
       `;
       break;

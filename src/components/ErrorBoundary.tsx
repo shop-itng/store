@@ -47,7 +47,7 @@ export class ErrorBoundary extends Component<Props, State> {
               </span>
               <h1 className="text-xl sm:text-2xl font-black">Something went wrong</h1>
               <p className="text-xs sm:text-sm text-stone-500 dark:text-stone-400 leading-relaxed">
-                Don’t worry — your orders, escrow funds, and wallet balances are 100% safe. This glitch has been logged securely for our engineering team.
+                Your account and saved order records remain intact. This error has been logged for our team to review.
               </p>
             </div>
 

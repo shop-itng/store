@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Product } from '../types';
 import { useApp } from '../context/AppContext';
+import { getTrustCopy } from '../../shared/trustAndLegalCopy';
 import { formatNaira } from '../utils/pricing';
 import { Heart, Star, MapPin, ImageOff, ShieldCheck, Share2, Check, MessageSquare } from 'lucide-react';
 import { UserIdentityBadge } from './UserIdentityBadge';
@@ -21,7 +22,9 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product, index = 0 }) 
     notify,
     currentUser,
     setActiveView,
+    paymentsEnabled,
   } = useApp();
+  const trustCopy = getTrustCopy(paymentsEnabled);
   const [imageError, setImageError] = useState(false);
   const [imageLoaded, setImageLoaded] = useState(false);
   const [copiedShare, setCopiedShare] = useState(false);
@@ -195,7 +198,7 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product, index = 0 }) 
             ) : (
               <span className="text-[10px] font-black text-[#9FE870] bg-[#111111] dark:bg-[#1E2028] border border-[#FF6B00] px-2 py-0.5 rounded-md flex items-center gap-1 whitespace-nowrap shrink-0">
                 <ShieldCheck className="w-3 h-3 text-[#FF6B00]" />
-                <span>Escrow</span>
+                <span>{trustCopy.productCardBadge}</span>
               </span>
             )}
           </div>

@@ -1,6 +1,7 @@
 import React from 'react';
 import { CheckCircle2, Circle, ArrowRight, ShieldCheck, CreditCard, PlusCircle, MapPin, Sparkles } from 'lucide-react';
 import { SellerProfile, SellerWallet } from '../types';
+import { useApp } from '../context/AppContext';
 
 interface Props {
   seller: SellerProfile;
@@ -19,6 +20,7 @@ export const SellerOnboardingChecklist: React.FC<Props> = ({
   onOpenAddProduct,
   onOpenWallet,
 }) => {
+  const { paymentsEnabled } = useApp();
   const isIdentityVerified = seller.isVerifiedSeller || seller.verificationStatus === 'verified';
   const hasPayoutAccount = Boolean(wallet?.payoutAccounts && wallet.payoutAccounts.length > 0);
   const hasListedProduct = productCount > 0;
@@ -37,7 +39,9 @@ export const SellerOnboardingChecklist: React.FC<Props> = ({
     {
       id: 'payout_account',
       label: 'Add your bank or payout account',
-      desc: 'Where you receive escrow payments after delivery',
+      desc: paymentsEnabled
+        ? 'Where you receive order payouts after delivery'
+        : 'Add a Nigerian bank account for future online payouts',
       done: hasPayoutAccount,
       action: onOpenWallet,
       actionText: hasPayoutAccount ? 'Account Added' : 'Add Bank',
@@ -55,7 +59,7 @@ export const SellerOnboardingChecklist: React.FC<Props> = ({
     {
       id: 'delivery_area',
       label: 'Set your campus & pickup area',
-      desc: 'Students near you can order with safe campus handoff',
+      desc: 'Students near you can find items with campus pickup or local delivery',
       done: hasSetDelivery,
       action: onOpenVerification,
       actionText: hasSetDelivery ? 'Location Set' : 'Set Area',

@@ -56,6 +56,7 @@ export const SellerDashboard: React.FC = () => {
     updateOrderStatus,
     notify,
     currentUser,
+    paymentsEnabled,
   } = useApp();
 
   const [dashboardTab, setDashboardTab] = useState<'inventory' | 'orders' | 'wallet'>('inventory');
@@ -466,7 +467,7 @@ export const SellerDashboard: React.FC = () => {
                   ? `Your verification was rejected: ${rejectionReason || 'Document or selfie did not match official identity requirements.'} Please review the issues and resubmit.`
                   : isVerifNeedsResubmit
                   ? `Resubmission requested: ${rejectionReason || 'Please upload a clearer document photo or retake the live camera selfie.'}`
-                  : 'In compliance with NDPA 2023 regulations and to prevent counterfeit goods, sellers must complete NIN and live selfie verification before listing crafts or withdrawing funds.'}
+                  : 'To verify seller identity and help prevent counterfeit goods, sellers submit their NIN and live selfie before listing crafts or requesting withdrawals.'}
               </p>
             </div>
           </div>
@@ -508,12 +509,12 @@ export const SellerDashboard: React.FC = () => {
       {/* Escrow & Earnings Wallet Preview Strip */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="bg-white dark:bg-[#15161C] p-4 rounded-xl border border-slate-200 dark:border-[#27272A]">
-          <div className="text-xs text-slate-500 dark:text-[#A1A1AA] font-medium">Pending in Escrow</div>
+          <div className="text-xs text-slate-500 dark:text-[#A1A1AA] font-medium">Pending Order Balance</div>
           <div className="text-2xl font-extrabold text-blue-700 dark:text-blue-400 font-mono-numbers mt-1">
             {formatNaira(pendingEscrowEarnings)}
           </div>
           <div className="text-[11px] text-slate-400 dark:text-[#71717A] mt-0.5">
-            Releases when buyer confirms
+            Moves to Available when buyer confirms
           </div>
         </div>
 
@@ -808,7 +809,7 @@ export const SellerDashboard: React.FC = () => {
                     </div>
 
                     {/* Visual Stage Progress Tracker */}
-                    <OrderProgressTracker order={order} viewerRole="seller" compact />
+                    <OrderProgressTracker order={order} viewerRole="seller" paymentsEnabled={paymentsEnabled} compact />
 
                     {/* Packaging Proof if uploaded */}
                     {order.packedPhotoUrl && (
@@ -951,7 +952,7 @@ export const SellerDashboard: React.FC = () => {
               Confirm Handshake Delivery for #{handshakeOrder.id}
             </h3>
             <p className="text-xs text-slate-600">
-              Ask the buyer (or campus runner with the buyer) for their 4-digit Handshake PIN from their Orders tab to mark delivered and release escrow.
+              Ask the buyer (or campus runner with the buyer) for their 4-digit Handshake PIN from their Orders tab to mark delivered and complete the order.
             </p>
             <form onSubmit={handleHandshakeSubmit} className="space-y-4 text-xs">
               <input

@@ -122,19 +122,78 @@ var init_minorSafety = __esm({
   }
 });
 
+// shared/profileOptions.ts
+var PROFILE_INTERESTS, ALLOWED_LANGUAGES, PROCESSING_TIME_OPTIONS, DEFAULT_AVATAR_PRESETS, MAX_TAGLINE_LENGTH, MAX_BIO_LENGTH, MAX_SHOP_STORY_LENGTH, MAX_CRAFT_MATERIALS_LENGTH;
+var init_profileOptions = __esm({
+  "shared/profileOptions.ts"() {
+    PROFILE_INTERESTS = [
+      "Waist Beads & Jewelry",
+      "Crochet & Yarn",
+      "Perfume Oils & Scents",
+      "Thrift & Fashion",
+      "Room Decor & Candles",
+      "Art & Illustration",
+      "Phone Cases & Tech Crafts",
+      "Hair Accessories",
+      "Leather & Bags",
+      "Stationery & Gifts"
+    ];
+    ALLOWED_LANGUAGES = [
+      "English",
+      "Nigerian Pidgin",
+      "Yoruba",
+      "Igbo",
+      "Hausa",
+      "Ibibio",
+      "Efik",
+      "Tiv",
+      "Fulfulde",
+      "French"
+    ];
+    PROCESSING_TIME_OPTIONS = [
+      "Same day",
+      "1\u20132 days",
+      "1\u20133 days",
+      "3\u20135 days",
+      "1\u20132 weeks",
+      "Made to order (custom timeline)"
+    ];
+    DEFAULT_AVATAR_PRESETS = [
+      { id: "avatar-1", label: "Warm Sunset", url: "/avatars/avatar-1.svg" },
+      { id: "avatar-2", label: "Fresh Leaf", url: "/avatars/avatar-2.svg" },
+      { id: "avatar-3", label: "Midnight Star", url: "/avatars/avatar-3.svg" },
+      { id: "avatar-4", label: "Amber Wave", url: "/avatars/avatar-4.svg" },
+      { id: "avatar-5", label: "Emerald Shield", url: "/avatars/avatar-5.svg" },
+      { id: "avatar-6", label: "Terracotta Bead", url: "/avatars/avatar-6.svg" }
+    ];
+    MAX_TAGLINE_LENGTH = 80;
+    MAX_BIO_LENGTH = 300;
+    MAX_SHOP_STORY_LENGTH = 600;
+    MAX_CRAFT_MATERIALS_LENGTH = 300;
+  }
+});
+
 // server/lib/validation.ts
 var validation_exports = {};
 __export(validation_exports, {
   ALLOWED_AVATAR_PRESETS: () => ALLOWED_AVATAR_PRESETS,
+  ALLOWED_LANGUAGES: () => ALLOWED_LANGUAGES,
   ALLOWED_UPLOAD_PURPOSES: () => ALLOWED_UPLOAD_PURPOSES,
+  DEFAULT_AVATAR_PRESETS: () => DEFAULT_AVATAR_PRESETS,
   DEFAULT_NOTIFICATION_PREFS: () => DEFAULT_NOTIFICATION_PREFS,
   DEFAULT_PRIVACY_SETTINGS: () => DEFAULT_PRIVACY_SETTINGS,
+  MAX_BIO_LENGTH: () => MAX_BIO_LENGTH,
+  MAX_CRAFT_MATERIALS_LENGTH: () => MAX_CRAFT_MATERIALS_LENGTH,
+  MAX_SHOP_STORY_LENGTH: () => MAX_SHOP_STORY_LENGTH,
+  MAX_TAGLINE_LENGTH: () => MAX_TAGLINE_LENGTH,
+  PROCESSING_TIME_OPTIONS: () => PROCESSING_TIME_OPTIONS,
   PROFILE_INTERESTS: () => PROFILE_INTERESTS,
   UNDER_18_PRIVACY_SETTINGS: () => UNDER_18_PRIVACY_SETTINGS,
   containsForbiddenContactInfo: () => containsForbiddenContactInfo,
   extractFirstName: () => extractFirstName,
   generateUniqueProfileSlug: () => generateUniqueProfileSlug,
   rejectUnknownFields: () => rejectUnknownFields,
+  sanitizeDeliveryOptions: () => sanitizeDeliveryOptions,
   sanitizeNotificationPrefs: () => sanitizeNotificationPrefs,
   sanitizePrivacySettings: () => sanitizePrivacySettings,
   slugifyDisplayName: () => slugifyDisplayName,
@@ -189,14 +248,60 @@ async function generateUniqueProfileSlug(queryFn, displayName, excludeUserId) {
   let candidate = baseSlug;
   let counter = 2;
   while (counter <= 200) {
-    const res = excludeUserId ? await queryFn("SELECT id FROM shopit_users WHERE profile_slug = $1 AND id != $2 LIMIT 1", [candidate, excludeUserId]) : await queryFn("SELECT id FROM shopit_users WHERE profile_slug = $1 LIMIT 1", [candidate]);
+    const res = excludeUserId ? await queryFn("SELECT id FROM shopit_users WHERE LOWER(profile_slug) = LOWER($1) AND id != $2 LIMIT 1", [
+      candidate,
+      excludeUserId
+    ]) : await queryFn("SELECT id FROM shopit_users WHERE LOWER(profile_slug) = LOWER($1) LIMIT 1", [candidate]);
+    let histTaken = false;
     if (res.rows.length === 0) {
+      try {
+        const histRes = excludeUserId ? await queryFn(
+          "SELECT slug FROM shopit_profile_slug_history WHERE LOWER(slug) = LOWER($1) AND user_id != $2 LIMIT 1",
+          [candidate, excludeUserId]
+        ) : await queryFn("SELECT slug FROM shopit_profile_slug_history WHERE LOWER(slug) = LOWER($1) LIMIT 1", [
+          candidate
+        ]);
+        histTaken = histRes.rows.length > 0;
+      } catch {
+        histTaken = false;
+      }
+    }
+    if (res.rows.length === 0 && !histTaken) {
       return candidate;
     }
     candidate = `${baseSlug}-${counter}`;
     counter++;
   }
   return `${baseSlug}-${crypto.randomBytes(2).toString("hex")}`;
+}
+function sanitizeDeliveryOptions(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return { valid: false, message: "Delivery options must be a valid object." };
+  }
+  const src = input;
+  const allowsPickup = src.allowsPickup !== void 0 ? Boolean(src.allowsPickup) : true;
+  const allowsLocalDelivery = src.allowsLocalDelivery !== void 0 ? Boolean(src.allowsLocalDelivery) : true;
+  const rawSpots = Array.isArray(src.pickupSpots) ? src.pickupSpots : [];
+  const pickupSpots = [];
+  for (const item of rawSpots.slice(0, 5)) {
+    const spot = String(item || "").trim().replace(/\s+/g, " ").slice(0, 80);
+    if (!spot) continue;
+    const contact = containsForbiddenContactInfo(spot);
+    if (contact.blocked) {
+      return { valid: false, message: `Pickup spot "${spot}": ${contact.reason}` };
+    }
+    if (!pickupSpots.includes(spot)) {
+      pickupSpots.push(spot);
+    }
+  }
+  return {
+    valid: true,
+    value: {
+      allowsPickup,
+      allowsLocalDelivery,
+      pickupSpots
+    }
+  };
 }
 function stripJpegMetadata(buf) {
   if (buf.length < 4 || buf[0] !== 255 || buf[1] !== 216) {
@@ -398,30 +503,12 @@ function sanitizePrivacySettings(input, current = DEFAULT_PRIVACY_SETTINGS, isUn
     showLastSeen: src.showLastSeen !== void 0 ? Boolean(src.showLastSeen) : current.showLastSeen
   };
 }
-var PROFILE_INTERESTS, ALLOWED_AVATAR_PRESETS, DEFAULT_NOTIFICATION_PREFS, DEFAULT_PRIVACY_SETTINGS, UNDER_18_PRIVACY_SETTINGS, PHONE_REGEX, EMAIL_REGEX, URL_REGEX, HANDLE_OR_OFFPLATFORM_REGEX, ALLOWED_UPLOAD_PURPOSES;
+var ALLOWED_AVATAR_PRESETS, DEFAULT_NOTIFICATION_PREFS, DEFAULT_PRIVACY_SETTINGS, UNDER_18_PRIVACY_SETTINGS, PHONE_REGEX, EMAIL_REGEX, URL_REGEX, HANDLE_OR_OFFPLATFORM_REGEX, ALLOWED_UPLOAD_PURPOSES;
 var init_validation = __esm({
   "server/lib/validation.ts"() {
     init_minorSafety();
-    PROFILE_INTERESTS = [
-      "Waist Beads & Jewelry",
-      "Crochet & Yarn",
-      "Perfume Oils & Scents",
-      "Thrift & Fashion",
-      "Room Decor & Candles",
-      "Art & Illustration",
-      "Phone Cases & Tech Crafts",
-      "Hair Accessories",
-      "Leather & Bags",
-      "Stationery & Gifts"
-    ];
-    ALLOWED_AVATAR_PRESETS = [
-      "/avatars/avatar-1.svg",
-      "/avatars/avatar-2.svg",
-      "/avatars/avatar-3.svg",
-      "/avatars/avatar-4.svg",
-      "/avatars/avatar-5.svg",
-      "/avatars/avatar-6.svg"
-    ];
+    init_profileOptions();
+    ALLOWED_AVATAR_PRESETS = DEFAULT_AVATAR_PRESETS.map((p) => p.url);
     DEFAULT_NOTIFICATION_PREFS = {
       emailOrders: true,
       emailMessages: true,
@@ -448,6 +535,7 @@ var init_validation = __esm({
     __name(extractFirstName, "extractFirstName");
     __name(slugifyDisplayName, "slugifyDisplayName");
     __name(generateUniqueProfileSlug, "generateUniqueProfileSlug");
+    __name(sanitizeDeliveryOptions, "sanitizeDeliveryOptions");
     __name(stripJpegMetadata, "stripJpegMetadata");
     __name(verifyMagicBytesForImage, "verifyMagicBytesForImage");
     __name(validateAndSanitizeImageInput, "validateAndSanitizeImageInput");
@@ -468,7 +556,7 @@ var init_validation = __esm({
 
 // server/app.ts
 import express4 from "express";
-import crypto13 from "crypto";
+import crypto12 from "crypto";
 import cookieParser from "cookie-parser";
 
 // server/webhooks/flutterwave.ts
@@ -481,9 +569,17 @@ import crypto2 from "crypto";
 if (process.env.NODE_ENV !== "production" && !process.env.VERCEL) {
   dotenv.config({ override: false });
 }
+var EXPECTED_SCHEMA_VERSION = "20261121_01";
 var activePool = null;
 var isPgMem = false;
 var migrationCompleted = false;
+var isMigrationRunner = false;
+var prodSchemaVerified = false;
+var lastMigrationResult = null;
+function isProdRuntime() {
+  return (process.env.NODE_ENV === "production" || Boolean(process.env.VERCEL)) && !isMigrationRunner;
+}
+__name(isProdRuntime, "isProdRuntime");
 function hashPassword(password) {
   const salt = crypto2.randomBytes(32).toString("hex");
   const hash = crypto2.pbkdf2Sync(password, salt, 6e5, 32, "sha256").toString("hex");
@@ -515,6 +611,8 @@ function verifyPassword(password, storedHash) {
 }
 __name(verifyPassword, "verifyPassword");
 var CORE_SCHEMA_TABLES = [
+  "shopit_schema_migrations",
+  "shopit_migration_quarantine",
   "shopit_users",
   "shopit_sellers",
   "shopit_verifications",
@@ -546,7 +644,8 @@ var CORE_SCHEMA_TABLES = [
   "shopit_follows",
   "shopit_blocks",
   "shopit_files",
-  "shopit_mutes"
+  "shopit_mutes",
+  "shopit_profile_slug_history"
 ];
 function getDatabaseUrlSource() {
   const candidates = [
@@ -612,7 +711,7 @@ __name(buildPgPoolConfig, "buildPgPoolConfig");
 async function getPool() {
   if (activePool) return activePool;
   const dbUrl = getDatabaseUrl();
-  const isProduction = process.env.NODE_ENV === "production" || Boolean(process.env.VERCEL);
+  const isProduction = (process.env.NODE_ENV === "production" || Boolean(process.env.VERCEL)) && !isMigrationRunner;
   if (dbUrl) {
     try {
       const { Pool } = pg;
@@ -644,6 +743,10 @@ async function getPool() {
       name: "nullif",
       implementation: /* @__PURE__ */ __name((a, b) => a === b ? null : a, "implementation")
     });
+    memDb.public.registerFunction({
+      name: "round",
+      implementation: /* @__PURE__ */ __name((x) => Math.round(Number(x)), "implementation")
+    });
     const { Pool } = memDb.adapters.createPg();
     activePool = new Pool();
     isPgMem = true;
@@ -655,16 +758,29 @@ async function getPool() {
   }
 }
 __name(getPool, "getPool");
-async function query(text, params) {
-  const pool = await getPool();
+async function ensureSchemaReady() {
+  if (isProdRuntime()) {
+    if (prodSchemaVerified) return;
+    const status = await verifyDatabaseSchema();
+    if (!status.ok) {
+      throw new Error(status.migrationError || 'Database schema is not at the expected version. Run "npm run migrate" at deploy time.');
+    }
+    prodSchemaVerified = true;
+    return;
+  }
   if (!migrationCompleted) {
     await runMigration();
   }
+}
+__name(ensureSchemaReady, "ensureSchemaReady");
+async function query(text, params) {
+  const pool = await getPool();
+  await ensureSchemaReady();
   try {
     return await pool.query(text, params);
   } catch (err) {
-    if (err?.code === "42P01") {
-      console.warn("[PostgreSQL Query Recovery] Missing relation detected (42P01). Re-running migration and retrying once.");
+    if (err?.code === "42P01" && !isProdRuntime()) {
+      console.warn("[PostgreSQL Query Recovery] Missing relation detected (42P01). Re-running migration in non-production runtime.");
       migrationCompleted = false;
       await runMigration();
       return await pool.query(text, params);
@@ -676,9 +792,7 @@ async function query(text, params) {
 __name(query, "query");
 async function withTransaction(fn) {
   const pool = await getPool();
-  if (!migrationCompleted) {
-    await runMigration();
-  }
+  await ensureSchemaReady();
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -690,7 +804,7 @@ async function withTransaction(fn) {
       await client.query("ROLLBACK");
     } catch {
     }
-    if (err?.code === "42P01") {
+    if (err?.code === "42P01" && !isProdRuntime()) {
       migrationCompleted = false;
     }
     throw err;
@@ -710,14 +824,49 @@ async function verifyDatabaseSchema() {
         missingTables.push(table);
       }
     }
+    let schemaVersion = null;
+    if (!missingTables.includes("shopit_schema_migrations")) {
+      try {
+        const verRes = await pool.query(
+          `SELECT version FROM shopit_schema_migrations ORDER BY applied_at DESC LIMIT 1`
+        );
+        schemaVersion = verRes.rows[0]?.version ? String(verRes.rows[0].version) : null;
+      } catch (verErr) {
+        return {
+          ok: false,
+          schemaVersion: null,
+          expectedSchemaVersion: EXPECTED_SCHEMA_VERSION,
+          missingTables,
+          migrationError: `Unable to read shopit_schema_migrations: ${verErr?.message || "unknown error"}`,
+          error: verErr?.message
+        };
+      }
+    }
+    const versionMatches = schemaVersion === EXPECTED_SCHEMA_VERSION;
+    const ok = missingTables.length === 0 && versionMatches;
+    let migrationError;
+    if (missingTables.length > 0) {
+      migrationError = `Missing core schema table(s): ${missingTables.join(", ")}. Run "npm run migrate" during deploy.`;
+    } else if (!versionMatches) {
+      migrationError = `Schema version mismatch: database is at "${schemaVersion || "unversioned"}", expected "${EXPECTED_SCHEMA_VERSION}". Run "npm run migrate".`;
+    }
+    if (ok) {
+      prodSchemaVerified = true;
+    }
     return {
-      ok: missingTables.length === 0,
-      missingTables
+      ok,
+      schemaVersion,
+      expectedSchemaVersion: EXPECTED_SCHEMA_VERSION,
+      missingTables,
+      ...migrationError ? { migrationError, error: migrationError } : {}
     };
   } catch (err) {
     return {
       ok: false,
+      schemaVersion: null,
+      expectedSchemaVersion: EXPECTED_SCHEMA_VERSION,
       missingTables: [...CORE_SCHEMA_TABLES],
+      migrationError: err.message,
       error: err.message
     };
   }
@@ -733,28 +882,36 @@ async function pingPostgres() {
         ok: false,
         isPgMem,
         schemaOk: false,
+        schemaVersion: null,
+        expectedSchemaVersion: EXPECTED_SCHEMA_VERSION,
         provider: isPgMem ? "pg-mem (local dev)" : `PostgreSQL (${getDatabaseUrlSource() || "DATABASE_URL"})`,
+        migrationError: "Database heartbeat query (SELECT 1) failed",
         error: "SELECT 1 check failed"
       };
     }
-    if (!migrationCompleted) {
+    if (!isProdRuntime() && !migrationCompleted) {
       await runMigration();
     }
     const schemaCheck = await verifyDatabaseSchema();
     return {
       ok: schemaCheck.ok,
       schemaOk: schemaCheck.ok,
-      ...schemaCheck.ok ? {} : { missingTables: schemaCheck.missingTables },
+      schemaVersion: schemaCheck.schemaVersion,
+      expectedSchemaVersion: schemaCheck.expectedSchemaVersion,
+      ...schemaCheck.missingTables.length > 0 ? { missingTables: schemaCheck.missingTables } : {},
+      ...schemaCheck.migrationError ? { migrationError: schemaCheck.migrationError, error: schemaCheck.migrationError } : {},
       isPgMem,
-      provider: isPgMem ? "pg-mem (local dev)" : `PostgreSQL (${getDatabaseUrlSource() || "DATABASE_URL"})`,
-      ...schemaCheck.ok ? {} : { error: `Missing core tables: ${schemaCheck.missingTables.join(", ")}` }
+      provider: isPgMem ? "pg-mem (local dev)" : `PostgreSQL (${getDatabaseUrlSource() || "DATABASE_URL"})`
     };
   } catch (err) {
     return {
       ok: false,
       schemaOk: false,
+      schemaVersion: null,
+      expectedSchemaVersion: EXPECTED_SCHEMA_VERSION,
       isPgMem,
       provider: isPgMem ? "pg-mem (local dev)" : `PostgreSQL (${getDatabaseUrlSource() || "DATABASE_URL"})`,
+      migrationError: err.message,
       error: err.message
     };
   }
@@ -776,7 +933,7 @@ async function getDatabaseHealthStats() {
   let fileCount = 0;
   try {
     const pool = await getPool();
-    if (!migrationCompleted) {
+    if (!isProdRuntime() && !migrationCompleted) {
       await runMigration();
     }
     if (isPgMem) {
@@ -844,12 +1001,30 @@ async function pingRedis() {
 __name(pingRedis, "pingRedis");
 var migrationPromise = null;
 async function runMigration() {
-  if (migrationCompleted) return;
+  if (migrationCompleted && lastMigrationResult) return lastMigrationResult;
   if (migrationPromise) return migrationPromise;
   migrationPromise = (async () => {
     const pool = await getPool();
-    console.log("[Database Migration] Running schema migration on PostgreSQL...");
+    console.log(`[Database Migration] Running schema migration (target version ${EXPECTED_SCHEMA_VERSION}) on PostgreSQL...`);
     const migrationSql = `
+      -- 0. Schema Version Registry & Zero-Loss Orphan Quarantine
+      CREATE TABLE IF NOT EXISTS shopit_schema_migrations (
+        version VARCHAR(64) PRIMARY KEY,
+        summary JSONB DEFAULT '{}',
+        applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS shopit_migration_quarantine (
+        id VARCHAR(80) PRIMARY KEY,
+        source_table VARCHAR(64) NOT NULL,
+        source_pk VARCHAR(128) NOT NULL,
+        reason TEXT NOT NULL,
+        row_data JSONB NOT NULL DEFAULT '{}',
+        quarantined_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        schema_version VARCHAR(64)
+      );
+      CREATE INDEX IF NOT EXISTS idx_shopit_quarantine_table ON shopit_migration_quarantine (source_table, quarantined_at DESC);
+
       -- 1. Users Table
       CREATE TABLE IF NOT EXISTS shopit_users (
         id VARCHAR(64) PRIMARY KEY,
@@ -869,12 +1044,15 @@ async function runMigration() {
       profile_slug VARCHAR(100),
       avatar_url TEXT,
       cover_url TEXT,
-      bio VARCHAR(200),
+      tagline VARCHAR(80),
+      bio VARCHAR(300),
+      location_state VARCHAR(100),
       campus VARCHAR(120),
       location_area VARCHAR(120),
-      interests JSONB DEFAULT '[]'::jsonb,
-      notification_prefs JSONB DEFAULT '{"emailOrders":true,"emailMessages":true,"emailFollowers":true,"emailRestock":true}'::jsonb,
-      privacy_settings JSONB DEFAULT '{"profileVisibility":"public","whoCanFollow":"everyone","whoCanMessage":"everyone","showFollowersList":true,"showFollowingList":true,"showLastSeen":true}'::jsonb,
+      interests JSONB DEFAULT '[]',
+      languages JSONB DEFAULT '[]',
+      notification_prefs JSONB DEFAULT '{"emailOrders":true,"emailMessages":true,"emailFollowers":true,"emailRestock":true}',
+      privacy_settings JSONB DEFAULT '{"profileVisibility":"public","whoCanFollow":"everyone","whoCanMessage":"everyone","showFollowersList":true,"showFollowingList":true,"showLastSeen":true}',
       last_seen_at TIMESTAMPTZ DEFAULT NOW(),
       deleted_at TIMESTAMPTZ,
       last_login_at TIMESTAMPTZ,
@@ -895,6 +1073,10 @@ async function runMigration() {
       owner_name VARCHAR(255) NOT NULL,
       email VARCHAR(255) NOT NULL,
       bio TEXT,
+      shop_story VARCHAR(600),
+      craft_materials VARCHAR(300),
+      processing_time VARCHAR(60),
+      delivery_options JSONB DEFAULT '{}',
       campus VARCHAR(255),
       location_state VARCHAR(100),
       location_city VARCHAR(100),
@@ -905,7 +1087,7 @@ async function runMigration() {
       guardian_consent BOOLEAN DEFAULT false,
       guardian_name VARCHAR(255),
       guardian_phone VARCHAR(50),
-      badges JSONB DEFAULT '[]'::jsonb,
+      badges JSONB DEFAULT '[]',
       vacation_mode BOOLEAN DEFAULT false,
       logo_url TEXT,
       banner_url TEXT,
@@ -964,17 +1146,17 @@ async function runMigration() {
       service_fee_kobo BIGINT NOT NULL DEFAULT 0,
       display_price_kobo BIGINT NOT NULL DEFAULT 0,
       stock INTEGER NOT NULL DEFAULT 1,
-      images JSONB DEFAULT '[]'::jsonb,
+      images JSONB DEFAULT '[]',
       delivery_pickup_fee_kobo BIGINT NOT NULL DEFAULT 0,
       delivery_local_fee_kobo BIGINT NOT NULL DEFAULT 0,
       delivery_buyer_arranges BOOLEAN DEFAULT false,
       location_state VARCHAR(100),
       location_city VARCHAR(100),
       location_area VARCHAR(100),
-      seller_badges JSONB DEFAULT '[]'::jsonb,
+      seller_badges JSONB DEFAULT '[]',
       rating NUMERIC(3,2) DEFAULT 5.0,
       review_count INTEGER DEFAULT 0,
-      reviews JSONB DEFAULT '[]'::jsonb,
+      reviews JSONB DEFAULT '[]',
       is_sold_out BOOLEAN DEFAULT false,
       is_new_arrival BOOLEAN DEFAULT true,
       is_paused BOOLEAN DEFAULT false,
@@ -997,7 +1179,7 @@ async function runMigration() {
       buyer_name VARCHAR(255),
       buyer_email VARCHAR(255),
       buyer_masked_id VARCHAR(64),
-      items JSONB NOT NULL DEFAULT '[]'::jsonb,
+      items JSONB NOT NULL DEFAULT '[]',
       subtotal_kobo BIGINT NOT NULL DEFAULT 0,
       service_fee_kobo BIGINT NOT NULL DEFAULT 0,
       delivery_fee_kobo BIGINT NOT NULL DEFAULT 0,
@@ -1043,7 +1225,7 @@ async function runMigration() {
       status VARCHAR(50) NOT NULL DEFAULT 'pending',
       webhook_received BOOLEAN DEFAULT false,
       customer_email VARCHAR(255),
-      data JSONB DEFAULT '{}'::jsonb,
+      data JSONB DEFAULT '{}',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
@@ -1058,7 +1240,7 @@ async function runMigration() {
       total_withdrawn_kobo BIGINT NOT NULL DEFAULT 0,
       is_frozen BOOLEAN NOT NULL DEFAULT false,
       freeze_reason TEXT,
-      payout_accounts JSONB DEFAULT '[]'::jsonb,
+      payout_accounts JSONB DEFAULT '[]',
       active_payout_account_id VARCHAR(64),
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -1118,7 +1300,7 @@ async function runMigration() {
       reason VARCHAR(255) NOT NULL,
       details TEXT,
       status VARCHAR(50) NOT NULL DEFAULT 'open',
-      action_logs JSONB DEFAULT '[]'::jsonb,
+      action_logs JSONB DEFAULT '[]',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
@@ -1174,7 +1356,7 @@ async function runMigration() {
       actor_role VARCHAR(50),
       target_type VARCHAR(100),
       target_id VARCHAR(255),
-      details JSONB DEFAULT '{}'::jsonb,
+      details JSONB DEFAULT '{}',
       ip_address VARCHAR(100),
       user_agent TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -1200,14 +1382,14 @@ async function runMigration() {
     -- 15. User Carts Table
     CREATE TABLE IF NOT EXISTS shopit_carts (
       user_id VARCHAR(64) PRIMARY KEY,
-      items JSONB NOT NULL DEFAULT '[]'::jsonb,
+      items JSONB NOT NULL DEFAULT '[]',
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
     -- 16. User Wishlists Table
     CREATE TABLE IF NOT EXISTS shopit_wishlists (
       user_id VARCHAR(64) PRIMARY KEY,
-      product_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+      product_ids JSONB NOT NULL DEFAULT '[]',
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
@@ -1249,7 +1431,7 @@ async function runMigration() {
       description TEXT,
       budget_kobo BIGINT NOT NULL DEFAULT 0,
       status VARCHAR(50) NOT NULL DEFAULT 'pending',
-      milestones JSONB DEFAULT '[]'::jsonb,
+      milestones JSONB DEFAULT '[]',
       reference VARCHAR(255),
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -1342,7 +1524,7 @@ async function runMigration() {
       title VARCHAR(255),
       message TEXT,
       is_read BOOLEAN NOT NULL DEFAULT false,
-      metadata JSONB DEFAULT '{}'::jsonb,
+      metadata JSONB DEFAULT '{}',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
     CREATE INDEX IF NOT EXISTS idx_shopit_admin_alerts_created ON shopit_admin_alerts (created_at DESC);
@@ -1351,7 +1533,7 @@ async function runMigration() {
     -- 27. Persistent Platform Settings Table (Broadcasts, Killswitches, Fee Policy)
     CREATE TABLE IF NOT EXISTS shopit_platform_settings (
       key VARCHAR(100) PRIMARY KEY,
-      value JSONB NOT NULL DEFAULT '{}'::jsonb,
+      value JSONB NOT NULL DEFAULT '{}',
       updated_by VARCHAR(255),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
@@ -1408,6 +1590,14 @@ async function runMigration() {
       UNIQUE (muter_id, muted_id)
     );
     CREATE INDEX IF NOT EXISTS idx_shopit_mutes_muter ON shopit_mutes (muter_id);
+
+    -- 32. Profile Slug History Table (Old-slug redirects when display name changes)
+    CREATE TABLE IF NOT EXISTS shopit_profile_slug_history (
+      slug VARCHAR(100) PRIMARY KEY,
+      user_id VARCHAR(64) NOT NULL REFERENCES shopit_users(id) ON DELETE CASCADE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_shopit_slug_history_user ON shopit_profile_slug_history (user_id);
   `;
     const alterStatements = [
       // 1. shopit_users
@@ -1436,10 +1626,14 @@ async function runMigration() {
       "ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS profile_slug VARCHAR(100);",
       "ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS avatar_url TEXT;",
       "ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS cover_url TEXT;",
-      "ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS bio VARCHAR(200);",
+      "ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS tagline VARCHAR(80);",
+      "ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS bio VARCHAR(300);",
+      "ALTER TABLE shopit_users ALTER COLUMN bio TYPE VARCHAR(300);",
+      "ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS location_state VARCHAR(100);",
       "ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS campus VARCHAR(120);",
       "ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS location_area VARCHAR(120);",
       "ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS interests JSONB DEFAULT '[]'::jsonb;",
+      "ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS languages JSONB DEFAULT '[]'::jsonb;",
       "ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS notification_prefs JSONB;",
       "ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS privacy_settings JSONB;",
       "ALTER TABLE shopit_users ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ DEFAULT NOW();",
@@ -1453,6 +1647,10 @@ async function runMigration() {
       "ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS owner_name VARCHAR(255);",
       "ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS email VARCHAR(255);",
       "ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS bio TEXT;",
+      "ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS shop_story VARCHAR(600);",
+      "ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS craft_materials VARCHAR(300);",
+      "ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS processing_time VARCHAR(60);",
+      "ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS delivery_options JSONB DEFAULT '{}'::jsonb;",
       "ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS campus VARCHAR(255);",
       "ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS location_state VARCHAR(100);",
       "ALTER TABLE shopit_sellers ADD COLUMN IF NOT EXISTS location_city VARCHAR(100);",
@@ -1669,7 +1867,11 @@ async function runMigration() {
       "ALTER TABLE shopit_chat_messages ADD COLUMN IF NOT EXISTS reply_to_id VARCHAR(64);"
     ];
     const stripLeadingComments = /* @__PURE__ */ __name((sql) => sql.split("\n").map((line) => line.replace(/^\s*--.*$/, "")).join("\n").trim(), "stripLeadingComments");
-    const allStatements = migrationSql.split(";").map(stripLeadingComments).filter((s) => s.length > 0);
+    let processedMigrationSql = migrationSql;
+    if (isPgMem) {
+      processedMigrationSql = processedMigrationSql.replace(/\bJSONB\b/gi, "TEXT").replace(/\bJSON\b/gi, "TEXT").replace(/DEFAULT\s+'[^']*'/gi, "").replace(/DEFAULT\s+"[^"]*"/gi, "");
+    }
+    const allStatements = processedMigrationSql.split(";").map(stripLeadingComments).filter((s) => s.length > 0);
     const tableStatements = allStatements.filter((s) => /^CREATE\s+TABLE/i.test(s));
     const sqlIndexStatements = allStatements.filter((s) => /^CREATE\s+(UNIQUE\s+)?INDEX/i.test(s));
     const otherSqlStatements = allStatements.filter(
@@ -1683,7 +1885,7 @@ async function runMigration() {
       if (code === "42P07" || code === "42710" || code === "42701" || msg.includes("already exists")) {
         return true;
       }
-      if (isPgMem && (stmt.includes("DROP DEFAULT") || stmt.includes("SET DEFAULT") || stmt.includes("DROP CONSTRAINT") || stmt.includes("ADD CONSTRAINT"))) {
+      if (isPgMem && (stmt.includes("DROP DEFAULT") || stmt.includes("SET DEFAULT") || stmt.includes("DROP CONSTRAINT") || stmt.includes("ADD CONSTRAINT") || stmt.includes("ALTER COLUMN bio TYPE"))) {
         return true;
       }
       return false;
@@ -1692,6 +1894,10 @@ async function runMigration() {
       try {
         await pool.query(statement);
       } catch (err) {
+        if (isPgMem) {
+          console.warn("[pg-mem Migration Note - Ignored AST/DDL Error]:", err?.message || err);
+          continue;
+        }
         if (!isBenignDdlError(statement, err)) {
           console.error("[Migration Table DDL Error]:", err.message);
           throw err;
@@ -1710,102 +1916,200 @@ async function runMigration() {
         console.warn("[Migration Column Note]:", alterErr.message);
       }
     }
-    if (!isPgMem) {
-      const legacyMigrations = [
-        {
-          table: "shopit_products",
-          column: "seller_price",
-          backfillSql: `
-          UPDATE shopit_products SET
-            seller_price_kobo = CASE WHEN COALESCE(seller_price_kobo, 0) = 0 AND COALESCE(seller_price, 0) <> 0 THEN ROUND(seller_price * 100)::bigint ELSE COALESCE(seller_price_kobo, 0) END,
-            service_fee_kobo = CASE WHEN COALESCE(service_fee_kobo, 0) = 0 AND COALESCE(service_fee, 0) <> 0 THEN ROUND(service_fee * 100)::bigint ELSE COALESCE(service_fee_kobo, 0) END,
-            display_price_kobo = CASE WHEN COALESCE(display_price_kobo, 0) = 0 AND COALESCE(display_price, 0) <> 0 THEN ROUND(display_price * 100)::bigint ELSE COALESCE(display_price_kobo, 0) END,
-            delivery_pickup_fee_kobo = CASE WHEN COALESCE(delivery_pickup_fee_kobo, 0) = 0 AND COALESCE(delivery_pickup_fee, 0) <> 0 THEN ROUND(delivery_pickup_fee * 100)::bigint ELSE COALESCE(delivery_pickup_fee_kobo, 0) END,
-            delivery_local_fee_kobo = CASE WHEN COALESCE(delivery_local_fee_kobo, 0) = 0 AND COALESCE(delivery_local_fee, 0) <> 0 THEN ROUND(delivery_local_fee * 100)::bigint ELSE COALESCE(delivery_local_fee_kobo, 0) END
-        `,
-          dropSql: `ALTER TABLE shopit_products DROP COLUMN IF EXISTS seller_price, DROP COLUMN IF EXISTS service_fee, DROP COLUMN IF EXISTS display_price, DROP COLUMN IF EXISTS delivery_pickup_fee, DROP COLUMN IF EXISTS delivery_local_fee`
-        },
-        {
-          table: "shopit_orders",
-          column: "grand_total",
-          backfillSql: `
-          UPDATE shopit_orders SET
-            subtotal_kobo = CASE WHEN COALESCE(subtotal_kobo, 0) = 0 AND COALESCE(subtotal, 0) <> 0 THEN ROUND(subtotal * 100)::bigint ELSE COALESCE(subtotal_kobo, 0) END,
-            service_fee_kobo = CASE WHEN COALESCE(service_fee_kobo, 0) = 0 AND COALESCE(service_fee_total, 0) <> 0 THEN ROUND(service_fee_total * 100)::bigint ELSE COALESCE(service_fee_kobo, 0) END,
-            delivery_fee_kobo = CASE WHEN COALESCE(delivery_fee_kobo, 0) = 0 AND COALESCE(delivery_total, 0) <> 0 THEN ROUND(delivery_total * 100)::bigint ELSE COALESCE(delivery_fee_kobo, 0) END,
-            discount_total_kobo = CASE WHEN COALESCE(discount_total_kobo, 0) = 0 AND COALESCE(discount_total, 0) <> 0 THEN ROUND(discount_total * 100)::bigint ELSE COALESCE(discount_total_kobo, 0) END,
-            grand_total_kobo = CASE WHEN COALESCE(grand_total_kobo, 0) = 0 AND COALESCE(grand_total, 0) <> 0 THEN ROUND(grand_total * 100)::bigint ELSE COALESCE(grand_total_kobo, 0) END
-        `,
-          dropSql: `ALTER TABLE shopit_orders DROP COLUMN IF EXISTS subtotal, DROP COLUMN IF EXISTS service_fee_total, DROP COLUMN IF EXISTS delivery_total, DROP COLUMN IF EXISTS discount_total, DROP COLUMN IF EXISTS grand_total`
-        },
-        {
-          table: "shopit_payments",
-          column: "amount_naira",
-          backfillSql: `
-          UPDATE shopit_payments SET
-            amount_kobo = CASE WHEN COALESCE(amount_kobo, 0) = 0 AND COALESCE(amount_naira, 0) <> 0 THEN ROUND(amount_naira * 100)::bigint ELSE COALESCE(amount_kobo, 0) END
-        `,
-          dropSql: `ALTER TABLE shopit_payments DROP COLUMN IF EXISTS amount_naira`
-        },
-        {
-          table: "shopit_wallets",
-          column: "pending_balance",
-          backfillSql: `
-          UPDATE shopit_wallets SET
-            pending_balance_kobo = CASE WHEN COALESCE(pending_balance_kobo, 0) = 0 AND COALESCE(pending_balance, 0) <> 0 THEN ROUND(pending_balance * 100)::bigint ELSE COALESCE(pending_balance_kobo, 0) END,
-            available_balance_kobo = CASE WHEN COALESCE(available_balance_kobo, 0) = 0 AND COALESCE(available_balance, 0) <> 0 THEN ROUND(available_balance * 100)::bigint ELSE COALESCE(available_balance_kobo, 0) END,
-            total_withdrawn_kobo = CASE WHEN COALESCE(total_withdrawn_kobo, 0) = 0 AND COALESCE(total_withdrawn, 0) <> 0 THEN ROUND(total_withdrawn * 100)::bigint ELSE COALESCE(total_withdrawn_kobo, 0) END
-        `,
-          dropSql: `ALTER TABLE shopit_wallets DROP COLUMN IF EXISTS pending_balance, DROP COLUMN IF EXISTS available_balance, DROP COLUMN IF EXISTS total_withdrawn`
-        },
-        {
-          table: "shopit_ledger_entries",
-          column: "amount",
-          backfillSql: `
-          UPDATE shopit_ledger_entries SET
-            amount_kobo = CASE WHEN COALESCE(amount_kobo, 0) = 0 AND COALESCE(amount, 0) <> 0 THEN ROUND(amount * 100)::bigint ELSE COALESCE(amount_kobo, 0) END,
-            fee_kobo = CASE WHEN COALESCE(fee_kobo, 0) = 0 AND COALESCE(fee, 0) <> 0 THEN ROUND(fee * 100)::bigint ELSE COALESCE(fee_kobo, 0) END,
-            balance_after_kobo = CASE WHEN COALESCE(balance_after_kobo, 0) = 0 AND COALESCE(balance_after, 0) <> 0 THEN ROUND(balance_after * 100)::bigint ELSE COALESCE(balance_after_kobo, 0) END
-        `,
-          dropSql: `ALTER TABLE shopit_ledger_entries DROP COLUMN IF EXISTS amount, DROP COLUMN IF EXISTS fee, DROP COLUMN IF EXISTS balance_after`
-        },
-        {
-          table: "shopit_disputes",
-          column: "amount_held_in_escrow",
-          backfillSql: `
-          UPDATE shopit_disputes SET
-            amount_held_in_escrow_kobo = CASE WHEN COALESCE(amount_held_in_escrow_kobo, 0) = 0 AND COALESCE(amount_held_in_escrow, 0) <> 0 THEN ROUND(amount_held_in_escrow * 100)::bigint ELSE COALESCE(amount_held_in_escrow_kobo, 0) END
-        `,
-          dropSql: `ALTER TABLE shopit_disputes DROP COLUMN IF EXISTS amount_held_in_escrow`
-        },
-        {
-          table: "shopit_commissions",
-          column: "budget_naira",
-          backfillSql: `
-          UPDATE shopit_commissions SET
-            budget_kobo = CASE WHEN COALESCE(budget_kobo, 0) = 0 AND COALESCE(budget_naira, 0) <> 0 THEN ROUND(budget_naira * 100)::bigint ELSE COALESCE(budget_kobo, 0) END
-        `,
-          dropSql: `ALTER TABLE shopit_commissions DROP COLUMN IF EXISTS budget_naira`
-        }
-      ];
-      for (const m of legacyMigrations) {
-        const colRes = await pool.query(
-          `SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2 LIMIT 1`,
-          [m.table, m.column]
+    const legacyColumnMigrations = [
+      { table: "shopit_products", legacyCol: "seller_price", koboCol: "seller_price_kobo" },
+      { table: "shopit_products", legacyCol: "service_fee", koboCol: "service_fee_kobo" },
+      { table: "shopit_products", legacyCol: "display_price", koboCol: "display_price_kobo" },
+      { table: "shopit_products", legacyCol: "delivery_pickup_fee", koboCol: "delivery_pickup_fee_kobo" },
+      { table: "shopit_products", legacyCol: "delivery_local_fee", koboCol: "delivery_local_fee_kobo" },
+      { table: "shopit_orders", legacyCol: "subtotal", koboCol: "subtotal_kobo" },
+      { table: "shopit_orders", legacyCol: "service_fee_total", koboCol: "service_fee_kobo" },
+      { table: "shopit_orders", legacyCol: "delivery_total", koboCol: "delivery_fee_kobo" },
+      { table: "shopit_orders", legacyCol: "discount_total", koboCol: "discount_total_kobo" },
+      { table: "shopit_orders", legacyCol: "grand_total", koboCol: "grand_total_kobo" },
+      { table: "shopit_payments", legacyCol: "amount_naira", koboCol: "amount_kobo" },
+      { table: "shopit_wallets", legacyCol: "pending_balance", koboCol: "pending_balance_kobo" },
+      { table: "shopit_wallets", legacyCol: "available_balance", koboCol: "available_balance_kobo" },
+      { table: "shopit_wallets", legacyCol: "total_withdrawn", koboCol: "total_withdrawn_kobo" },
+      { table: "shopit_ledger_entries", legacyCol: "amount", koboCol: "amount_kobo" },
+      { table: "shopit_ledger_entries", legacyCol: "fee", koboCol: "fee_kobo" },
+      { table: "shopit_ledger_entries", legacyCol: "balance_after", koboCol: "balance_after_kobo" },
+      { table: "shopit_disputes", legacyCol: "amount_held_in_escrow", koboCol: "amount_held_in_escrow_kobo" },
+      { table: "shopit_commissions", legacyCol: "budget_naira", koboCol: "budget_kobo" }
+    ];
+    for (const m of legacyColumnMigrations) {
+      try {
+        await pool.query(`SELECT ${m.legacyCol} FROM ${m.table} LIMIT 0`);
+        await pool.query(
+          `UPDATE ${m.table} SET ${m.koboCol} = CASE WHEN COALESCE(${m.koboCol}, 0) = 0 AND COALESCE(${m.legacyCol}, 0) <> 0 THEN CAST((${m.legacyCol} * 100) AS BIGINT) ELSE COALESCE(${m.koboCol}, 0) END`
         );
-        if (colRes.rows.length > 0) {
-          await pool.query(m.backfillSql);
-          await pool.query(m.dropSql);
+        try {
+          await pool.query(`ALTER TABLE ${m.table} DROP COLUMN IF EXISTS ${m.legacyCol}`);
+        } catch {
         }
+      } catch {
       }
-      await pool.query(`DELETE FROM shopit_products p WHERE NOT EXISTS (SELECT 1 FROM shopit_sellers s WHERE s.id = p.seller_id)`);
-      await pool.query(`UPDATE shopit_orders o SET buyer_id = NULL WHERE o.buyer_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM shopit_users u WHERE u.id = o.buyer_id)`);
-      await pool.query(`DELETE FROM shopit_payments p WHERE p.order_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM shopit_orders o WHERE o.id = p.order_id)`);
-      await pool.query(`DELETE FROM shopit_wallets w WHERE NOT EXISTS (SELECT 1 FROM shopit_sellers s WHERE s.id = w.seller_id)`);
-      await pool.query(`DELETE FROM shopit_ledger_entries l WHERE NOT EXISTS (SELECT 1 FROM shopit_wallets w WHERE w.seller_id = l.wallet_id)`);
-      await pool.query(`UPDATE shopit_ledger_entries l SET order_id = NULL WHERE l.order_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM shopit_orders o WHERE o.id = l.order_id)`);
-      await pool.query(`DELETE FROM shopit_disputes d WHERE NOT EXISTS (SELECT 1 FROM shopit_orders o WHERE o.id = d.order_id) OR NOT EXISTS (SELECT 1 FROM shopit_sellers s WHERE s.id = d.seller_id)`);
-      await pool.query(`UPDATE shopit_disputes d SET buyer_id = NULL WHERE d.buyer_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM shopit_users u WHERE u.id = d.buyer_id)`);
+    }
+    const quarantined = {
+      payments: 0,
+      wallets: 0,
+      ledgerEntries: 0,
+      disputes: 0
+    };
+    let orphanOrdersNullified = 0;
+    let deletedOrphanProducts = 0;
+    const deletedOrphanProductIds = [];
+    const qClient = await pool.connect();
+    try {
+      await qClient.query("BEGIN");
+      try {
+        const orphanProdRes = await qClient.query(
+          `SELECT p.id FROM shopit_products p WHERE NOT EXISTS (SELECT 1 FROM shopit_sellers s WHERE s.id = p.seller_id)`
+        );
+        if (orphanProdRes.rows.length > 0) {
+          for (const r of orphanProdRes.rows) {
+            deletedOrphanProductIds.push(String(r.id));
+          }
+          await qClient.query(
+            `DELETE FROM shopit_products WHERE NOT EXISTS (SELECT 1 FROM shopit_sellers s WHERE s.id = shopit_products.seller_id)`
+          );
+          deletedOrphanProducts = deletedOrphanProductIds.length;
+          console.warn(
+            `[Migration Cleanup] Deleted ${deletedOrphanProducts} orphaned product row(s) with missing shopit_sellers parent: ${deletedOrphanProductIds.join(", ")}`
+          );
+        }
+      } catch (prodErr) {
+        console.warn("[Migration Orphan Products Note]:", prodErr?.message);
+      }
+      try {
+        const orphanOrdRes = await qClient.query(
+          `SELECT id FROM shopit_orders WHERE buyer_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM shopit_users u WHERE u.id = shopit_orders.buyer_id)`
+        );
+        if (orphanOrdRes.rows.length > 0) {
+          orphanOrdersNullified = orphanOrdRes.rows.length;
+          await qClient.query(
+            `UPDATE shopit_orders SET buyer_id = NULL WHERE buyer_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM shopit_users u WHERE u.id = shopit_orders.buyer_id)`
+          );
+          console.warn(
+            `[Migration Repair] Preserved ${orphanOrdersNullified} order(s) by clearing dangling buyer_id references.`
+          );
+        }
+      } catch (ordErr) {
+        console.warn("[Migration Orphan Orders Note]:", ordErr?.message);
+      }
+      const insertQuarantineRow = /* @__PURE__ */ __name(async (sourceTable, sourcePk, reason, rowObj) => {
+        const qId = `q_${sourceTable}_${Date.now()}_${crypto2.randomBytes(4).toString("hex")}`;
+        await qClient.query(
+          `INSERT INTO shopit_migration_quarantine (id, source_table, source_pk, reason, row_data, quarantined_at, schema_version)
+         VALUES ($1, $2, $3, $4, $5::jsonb, NOW(), $6)`,
+          [qId, sourceTable, sourcePk, reason, JSON.stringify(rowObj), EXPECTED_SCHEMA_VERSION]
+        );
+      }, "insertQuarantineRow");
+      try {
+        const orphanPayRes = await qClient.query(
+          `SELECT * FROM shopit_payments WHERE order_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM shopit_orders o WHERE o.id = shopit_payments.order_id)`
+        );
+        for (const row of orphanPayRes.rows) {
+          const pk = String(row.reference || "");
+          await insertQuarantineRow(
+            "shopit_payments",
+            pk,
+            `Orphaned payment referencing missing order_id="${row.order_id}"`,
+            row
+          );
+          await qClient.query(`DELETE FROM shopit_payments WHERE reference = $1`, [row.reference]);
+          quarantined.payments++;
+        }
+      } catch (payErr) {
+        console.warn("[Migration Orphan Payments Note]:", payErr?.message);
+      }
+      try {
+        await qClient.query(
+          `UPDATE shopit_ledger_entries SET order_id = NULL WHERE order_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM shopit_orders o WHERE o.id = shopit_ledger_entries.order_id)`
+        );
+      } catch (ledOrdErr) {
+        console.warn("[Migration Ledger Order Clean Note]:", ledOrdErr?.message);
+      }
+      try {
+        const orphanWalletRes = await qClient.query(
+          `SELECT * FROM shopit_wallets WHERE NOT EXISTS (SELECT 1 FROM shopit_sellers s WHERE s.id = shopit_wallets.seller_id)`
+        );
+        const orphanWalletIds = new Set(orphanWalletRes.rows.map((w) => String(w.seller_id)));
+        const allLedgerCandidates = await qClient.query(
+          `SELECT * FROM shopit_ledger_entries WHERE NOT EXISTS (SELECT 1 FROM shopit_wallets w WHERE w.seller_id = shopit_ledger_entries.wallet_id)`
+        );
+        for (const lRow of allLedgerCandidates.rows) {
+          await insertQuarantineRow(
+            "shopit_ledger_entries",
+            String(lRow.id),
+            `Orphaned ledger entry referencing missing wallet_id="${lRow.wallet_id}"`,
+            lRow
+          );
+          await qClient.query(`DELETE FROM shopit_ledger_entries WHERE id = $1`, [lRow.id]);
+          quarantined.ledgerEntries++;
+        }
+        if (orphanWalletIds.size > 0) {
+          for (const wId of orphanWalletIds) {
+            const wLedgerRes = await qClient.query(`SELECT * FROM shopit_ledger_entries WHERE wallet_id = $1`, [wId]);
+            for (const lRow of wLedgerRes.rows) {
+              await insertQuarantineRow(
+                "shopit_ledger_entries",
+                String(lRow.id),
+                `Ledger entry attached to orphaned wallet_id="${wId}" (missing seller)`,
+                lRow
+              );
+              await qClient.query(`DELETE FROM shopit_ledger_entries WHERE id = $1`, [lRow.id]);
+              quarantined.ledgerEntries++;
+            }
+          }
+        }
+        for (const wRow of orphanWalletRes.rows) {
+          await insertQuarantineRow(
+            "shopit_wallets",
+            String(wRow.seller_id),
+            `Orphaned wallet referencing missing shopit_sellers.id="${wRow.seller_id}"`,
+            wRow
+          );
+          await qClient.query(`DELETE FROM shopit_wallets WHERE seller_id = $1`, [wRow.seller_id]);
+          quarantined.wallets++;
+        }
+      } catch (wallErr) {
+        console.warn("[Migration Orphan Wallets Note]:", wallErr?.message);
+      }
+      try {
+        await qClient.query(
+          `UPDATE shopit_disputes SET buyer_id = NULL WHERE buyer_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM shopit_users u WHERE u.id = shopit_disputes.buyer_id)`
+        );
+        const orphanDisputeRes = await qClient.query(
+          `SELECT * FROM shopit_disputes WHERE NOT EXISTS (SELECT 1 FROM shopit_orders o WHERE o.id = shopit_disputes.order_id) OR NOT EXISTS (SELECT 1 FROM shopit_sellers s WHERE s.id = shopit_disputes.seller_id)`
+        );
+        for (const dRow of orphanDisputeRes.rows) {
+          await insertQuarantineRow(
+            "shopit_disputes",
+            String(dRow.id),
+            `Orphaned dispute missing required order_id="${dRow.order_id}" or seller_id="${dRow.seller_id}"`,
+            dRow
+          );
+          await qClient.query(`DELETE FROM shopit_disputes WHERE id = $1`, [dRow.id]);
+          quarantined.disputes++;
+        }
+      } catch (dispErr) {
+        console.warn("[Migration Orphan Disputes Note]:", dispErr?.message);
+      }
+      await qClient.query("COMMIT");
+    } catch (qErr) {
+      try {
+        await qClient.query("ROLLBACK");
+      } catch {
+      }
+      throw qErr;
+    } finally {
+      qClient.release();
+    }
+    console.log(
+      `[Database Migration] Quarantine summary: payments=${quarantined.payments}, wallets=${quarantined.wallets}, ledgerEntries=${quarantined.ledgerEntries}, disputes=${quarantined.disputes}, orphanOrdersNullified=${orphanOrdersNullified}, deletedOrphanProducts=${deletedOrphanProducts}`
+    );
+    if (!isPgMem) {
       const fkConstraints = [
         { table: "shopit_products", name: "fk_shopit_products_seller", ddl: "FOREIGN KEY (seller_id) REFERENCES shopit_sellers(id) ON DELETE CASCADE" },
         { table: "shopit_orders", name: "fk_shopit_orders_buyer", ddl: "FOREIGN KEY (buyer_id) REFERENCES shopit_users(id) ON DELETE SET NULL" },
@@ -1849,7 +2153,7 @@ async function runMigration() {
           id: "broad_default",
           isActive: false,
           title: "Campus Safety & Verified Handshake Advisory",
-          message: "All campus craft handoffs must be verified using the 4-digit Handshake OTP in daylight safe spots.",
+          message: "All campus order pickups must be verified using the 4-digit Handshake OTP at daylight campus pickup spots.",
           tone: "info",
           createdAt: (/* @__PURE__ */ new Date()).toISOString(),
           author: "Shop It Safety Desk"
@@ -1983,11 +2287,30 @@ async function runMigration() {
     } catch (alertBackfillErr) {
       console.warn("[Migration Admin Alert Backfill Note]:", alertBackfillErr?.message || alertBackfillErr);
     }
+    const resultSummary = {
+      schemaVersion: EXPECTED_SCHEMA_VERSION,
+      quarantined,
+      orphanOrdersNullified,
+      deletedOrphanProducts,
+      deletedOrphanProductIds
+    };
+    await pool.query(
+      `INSERT INTO shopit_schema_migrations (version, summary, applied_at)
+       VALUES ($1, $2::jsonb, NOW())
+       ON CONFLICT (version) DO UPDATE SET summary = $2::jsonb, applied_at = NOW()`,
+      [EXPECTED_SCHEMA_VERSION, JSON.stringify(resultSummary)]
+    );
+    lastMigrationResult = resultSummary;
     migrationCompleted = true;
-    console.log("[Database Migration] All tables, indexes, audit logs, and security schemas successfully verified in PostgreSQL.");
+    prodSchemaVerified = true;
+    console.log(
+      `[Database Migration] Schema v${EXPECTED_SCHEMA_VERSION} verified. All tables, indexes, quarantine logs, and security schemas ready.`
+    );
+    return resultSummary;
   })().catch((err) => {
     migrationPromise = null;
     migrationCompleted = false;
+    prodSchemaVerified = false;
     console.error("[Database Migration Critical Error]:", err.message);
     throw err;
   });
@@ -2022,7 +2345,7 @@ var DEFAULT_BROADCAST_SETTING = {
   id: "broad_default",
   isActive: false,
   title: "Campus Safety & Verified Handshake Advisory",
-  message: "All campus craft handoffs must be verified using the 4-digit Handshake OTP in daylight safe spots.",
+  message: "All campus order pickups must be verified using the 4-digit Handshake OTP at daylight campus pickup spots.",
   tone: "info",
   createdAt: (/* @__PURE__ */ new Date()).toISOString(),
   author: "Shop It Safety Desk"
@@ -2148,20 +2471,12 @@ var derivedKeyCache = /* @__PURE__ */ new Map();
 function validateAppSecret() {
   const envVal = process.env.APP_SECRET;
   const raw = typeof envVal === "string" ? envVal.trim() : "";
-  const reasons = [];
-  if (!raw) {
-    reasons.push("not set (or empty)");
-  } else {
-    if (raw.length < 64) {
-      reasons.push(`invalid length (${raw.length} chars; minimum 64 characters required)`);
-    }
-    if (/[^0-9a-fA-F]/.test(raw)) {
-      reasons.push("contains non-hex characters (expected only 0-9, a-f, A-F)");
-    }
-  }
-  if (reasons.length > 0) {
+  const isSet = raw.length > 0;
+  const hasNonHex = isSet && /[^0-9a-fA-F]/.test(raw);
+  const isLengthValid = raw.length >= 64;
+  if (!isSet || !isLengthValid || hasNonHex) {
     throw new Error(
-      `[SECURITY FATAL] Invalid APP_SECRET (${reasons.join("; ")}). Generate one with \`openssl rand -hex 32\`. Refusing to boot.`
+      `[SECURITY FATAL] APP_SECRET invalid: length ${raw.length} (need 64), non-hex: ${hasNonHex ? "yes" : "no"}, set: ${isSet ? "yes" : "no"}. Refusing to boot.`
     );
   }
   if (cachedMasterHex !== raw) {
@@ -2191,16 +2506,172 @@ function deriveSubKey(label, lengthBytes = 32) {
 }
 __name(deriveSubKey, "deriveSubKey");
 
+// shared/trustAndLegalCopy.ts
+var OPERATOR_INFO = {
+  brandName: "Shop It",
+  operatorName: "TEEDS",
+  operatedByLine: "Operated by TEEDS",
+  copyrightLine: "\xA9 2026 Shop It. Made by TEEDS.",
+  platformLabel: "Shop It Nigeria (TEEDS)",
+  supportEmail: "shopitverified@gmail.com",
+  supportSlaLine: "We aim to reply within 3 working days.",
+  registrationDisclosure: "TEEDS is an independent student venture and is not registered with the Corporate Affairs Commission (CAC).",
+  lawyerStatusComment: "Pending lawyer approval (TEEDS is not CAC-registered)."
+};
+var PAYMENT_HOLD_STATEMENT = "Payments are processed by Flutterwave. Shop It holds your payment until you confirm delivery.";
+var PAYMENTS_DISABLED_STATEMENT = "Arrange directly with the seller";
+var PAYMENTS_DISABLED_NOTICE = "Online payments are currently turned off. Arrange directly with the seller.";
+var TRUST_COPY_BY_MODE = {
+  enabled: {
+    paymentsEnabled: true,
+    topBarBadgeLong: "Shop It Order Payment Hold",
+    topBarBadgeShort: "Order Protection",
+    footerSummary: "Nigerian teen and youth marketplace where students and young makers sell handmade crafts.",
+    footerTagline: "Nigerian Student & Youth Marketplace",
+    footerStatusPill: "Flutterwave Checkout",
+    footerOrdersLinkLabel: "Track Orders",
+    footerProtectionLinkLabel: "Buyer Protection Policy",
+    footerPrivacyLinkLabel: "Privacy Policy",
+    productCardBadge: "Payment Hold",
+    homeWelcomeBadge: "Nigerian Youth Marketplace",
+    homeWelcomeSubtitle: "Marketplace for Nigerian teens and youth to buy and sell handmade beads, scent oils, crochet wear, fashion, and crafts.",
+    homeTrustPrimary: PAYMENT_HOLD_STATEMENT,
+    homeTrustSecondary: "Campus pickup or local delivery",
+    pickupDirectoryTitle: "Campus Pickup Spots",
+    pickupDirectorySubtitle: "Public, well-lit campus hubs for inspecting crafts before confirming delivery with your 4-digit Handshake PIN.",
+    checkoutTitle: "Flutterwave Checkout",
+    checkoutStatusBadge: "FLUTTERWAVE",
+    checkoutSubtitle: "Card details handled by Flutterwave \xB7 Payment held until delivery confirmation",
+    checkoutBoxTitle: "How Payment Hold Works",
+    checkoutBoxPill: "5-Day Window",
+    checkoutBoxBody: PAYMENT_HOLD_STATEMENT,
+    checkoutChannelLabel: "Processed by Flutterwave",
+    checkoutChannelFootnote: "Payments are processed by Flutterwave. Card details are not stored on Shop It servers.",
+    checkoutFeeLabel: "Shop It Service Fee",
+    checkoutTotalSubnote: "Includes Shop It service fee and delivery",
+    checkoutFooterNote: PAYMENT_HOLD_STATEMENT,
+    productInfoTitle: "How Payment Works",
+    productInfoBody: `${PAYMENT_HOLD_STATEMENT} If an item does not match the listing or does not arrive, report a problem from your Orders page within 3 days for moderation review.`,
+    productFeeLabel: "Shop It Service Fee",
+    productSellerTrustFallback: "Trackable via Orders",
+    productChatButtonLabel: "Ask Seller (In-App Chat)",
+    cartProceedLabel: "Proceed to Checkout",
+    cartDisabledBanner: PAYMENTS_DISABLED_NOTICE,
+    cartBottomNote: PAYMENT_HOLD_STATEMENT,
+    chatHeaderBadge: "In-App Order Chat",
+    chatEmptyHint: 'Click "Ask Seller" on any item or shop to start an in-app conversation.',
+    chatOfferTotalLabel: "Total Offer:",
+    chatOfferCardHeader: "Preset Order Offer",
+    chatOfferAcceptLabel: "Accept & Go to Checkout",
+    chatQuickActionLine: "I would like to order through Shop It checkout",
+    authTagline: "Marketplace for Nigerian teens and youth to buy and sell handmade crafts.",
+    shareBadgeLabel: "Shop It Listing",
+    shareFooterTagline: "Nigerian Youth Marketplace",
+    quickListNoteTitle: "How Shop It Fees & Orders Work:",
+    quickListNotePoints: [
+      "Your seller payout is tracked in your Seller Wallet.",
+      "Shop It adds a tiered service fee at checkout, shown clearly before payment.",
+      "Packing photo upload protects makers if a buyer opens an order dispute."
+    ],
+    ordersHeaderTitle: "My Orders & Delivery Tracking",
+    ordersHeaderSubtitle: "Track handmade orders, view packing photos, confirm delivery, or report an issue.",
+    receiptTitle: "Shop It Order Pass",
+    receiptStatusSettled: "Order Payment Released",
+    receiptStatusActive: "Payment Held Pending Delivery",
+    receiptSubSettled: "Order payment has been moved to the seller available balance.",
+    receiptSubActive: PAYMENT_HOLD_STATEMENT,
+    receiptTotalLabel: "Total Paid",
+    receiptWatermark: "Shop It Order Record \xB7 Processed by Flutterwave",
+    reportHeaderTitle: "Report an Order Problem",
+    reportBannerText: "Opening a dispute pauses automatic release of the held payment until Admin Support reviews evidence from both sides.",
+    reportRefundOptionLabel: "Request Refund",
+    reportSubmitLabel: "Submit Problem Report"
+  },
+  disabled: {
+    paymentsEnabled: false,
+    topBarBadgeLong: "Shop It \xB7 Direct Arrangement",
+    topBarBadgeShort: "Arrange Direct",
+    footerSummary: "Nigerian teen and youth marketplace where students and young makers showcase handmade crafts.",
+    footerTagline: "Nigerian Student & Youth Marketplace",
+    footerStatusPill: "Arrange Directly with Seller",
+    footerOrdersLinkLabel: "View Orders",
+    footerProtectionLinkLabel: "Order & Dispute Policy",
+    footerPrivacyLinkLabel: "Privacy Policy",
+    productCardBadge: "Arrange Direct",
+    homeWelcomeBadge: "Nigerian Youth Marketplace",
+    homeWelcomeSubtitle: "Marketplace for Nigerian teens and youth to discover handmade beads, scent oils, crochet wear, fashion, and crafts.",
+    homeTrustPrimary: PAYMENTS_DISABLED_STATEMENT,
+    homeTrustSecondary: "Campus pickup or local meetup",
+    pickupDirectoryTitle: "Campus Pickup Spots",
+    pickupDirectorySubtitle: "Public, well-lit campus hubs where buyers and sellers can meet in person.",
+    checkoutTitle: "Direct Order Arrangement",
+    checkoutStatusBadge: "PAYMENTS OFF",
+    checkoutSubtitle: "Online payments are currently turned off",
+    checkoutBoxTitle: PAYMENTS_DISABLED_STATEMENT,
+    checkoutBoxPill: "Payments Off",
+    checkoutBoxBody: "Online payments are currently turned off on Shop It. Arrange directly with the seller via in-app chat.",
+    checkoutChannelLabel: "Online checkout paused",
+    checkoutChannelFootnote: "Online payments are currently turned off. Arrange directly with the seller.",
+    checkoutFeeLabel: "Estimated Service Fee (when online checkout is enabled)",
+    checkoutTotalSubnote: "Estimated breakdown for reference",
+    checkoutFooterNote: PAYMENTS_DISABLED_STATEMENT,
+    productInfoTitle: "How Ordering Works Right Now",
+    productInfoBody: "Online payments are currently turned off. Message the seller in Shop It chat to arrange directly with the seller for pickup or delivery.",
+    productFeeLabel: "Platform Service Fee (when online checkout is on)",
+    productSellerTrustFallback: PAYMENTS_DISABLED_STATEMENT,
+    productChatButtonLabel: "Message Seller to Arrange",
+    cartProceedLabel: PAYMENTS_DISABLED_STATEMENT,
+    cartDisabledBanner: PAYMENTS_DISABLED_NOTICE,
+    cartBottomNote: PAYMENTS_DISABLED_NOTICE,
+    chatHeaderBadge: "In-App Chat",
+    chatEmptyHint: 'Click "Ask Seller" on any item or shop to message the maker directly.',
+    chatOfferTotalLabel: "Total Discussed:",
+    chatOfferCardHeader: "Preset Price Proposal",
+    chatOfferAcceptLabel: PAYMENTS_DISABLED_STATEMENT,
+    chatQuickActionLine: "Can we arrange directly for pickup or delivery?",
+    authTagline: "Marketplace for Nigerian teens and youth to showcase and discover handmade crafts.",
+    shareBadgeLabel: "Shop It Listing",
+    shareFooterTagline: "Nigerian Youth Marketplace",
+    quickListNoteTitle: "Listing & Direct Arrangement:",
+    quickListNotePoints: [
+      "Online checkout is currently turned off. Buyers will arrange directly with the seller.",
+      "Your item stays visible in the marketplace with pickup and delivery details.",
+      "Keep communication inside Shop It chat for safety."
+    ],
+    ordersHeaderTitle: "My Orders & Tracking",
+    ordersHeaderSubtitle: "View existing order updates and tracking history.",
+    receiptTitle: "Shop It Order Record",
+    receiptStatusSettled: "Order Completed",
+    receiptStatusActive: "Order In Progress",
+    receiptSubSettled: "Order marked as completed.",
+    receiptSubActive: "View current order tracking details below.",
+    receiptTotalLabel: "Order Total",
+    receiptWatermark: "Shop It Order Record",
+    reportHeaderTitle: "Report an Order Problem",
+    reportBannerText: "Submit evidence and details below so moderation can review your order.",
+    reportRefundOptionLabel: "Request Refund",
+    reportSubmitLabel: "Submit Problem Report"
+  }
+};
+var EMAIL_TRUST_COPY = {
+  signatureTeam: "The Shop It Team",
+  signatureSubline: `${OPERATOR_INFO.operatedByLine} \xB7 Nigerian Youth & Student Artisanal Marketplace`,
+  signatureHelpPrefix: `Support: ${OPERATOR_INFO.supportEmail} (${OPERATOR_INFO.supportSlaLine})`,
+  signatureSecurityWarning: "Never share your codes. Shop It will never ask for your password or code.",
+  orderPlacedBodyPrefix: "Payment of \u20A6{total} has been received. Payments are processed by Flutterwave. Shop It holds your payment until you confirm delivery.",
+  welcomeBody: "Your Shop It account is ready."
+};
+
 // shared/transactionalEmails.ts
-var EMAIL_SIGNATURE_TEXT = `The Shop It Team \xB7 Operated by TEEDS.
-Support: shopitverified@gmail.com (we reply within 3 working days).
-Never share your codes. Shop It will never ask for your password or code.`;
+var EMAIL_SIGNATURE_TEXT = `${EMAIL_TRUST_COPY.signatureTeam} \xB7 ${OPERATOR_INFO.operatedByLine}.
+${EMAIL_TRUST_COPY.signatureHelpPrefix}
+${EMAIL_TRUST_COPY.signatureSecurityWarning}`;
 var EMAIL_SIGNATURE_HTML = `
   <div style="margin-top: 28px; padding-top: 18px; border-top: 1px solid #e2e8f0; color: #64748b; font-size: 13px; line-height: 1.6;">
-    <p style="margin: 0; font-weight: 800; color: #1e293b;">The Shop It Team</p>
-    <p style="margin: 3px 0 0; color: #64748b; font-size: 12px;">Operated by TEEDS \xB7 Nigerian Youth & Student Artisanal Marketplace</p>
-    <p style="margin: 4px 0 0; color: #475569; font-size: 12px;">Need help? Email <a href="mailto:shopitverified@gmail.com" style="color: #FF6B00; text-decoration: underline;">shopitverified@gmail.com</a> (we reply within 3 working days).</p>
-    <p style="margin: 6px 0 0; color: #dc2626; font-size: 11px; font-weight: 700;">Never share your codes. Shop It will never ask for your password or code.</p>
+    <p style="margin: 0; font-weight: 800; color: #1e293b;">${EMAIL_TRUST_COPY.signatureTeam}</p>
+    <p style="margin: 3px 0 0; color: #64748b; font-size: 12px;">${EMAIL_TRUST_COPY.signatureSubline}</p>
+    <p style="margin: 4px 0 0; color: #475569; font-size: 12px;">Need help? Email <a href="mailto:${OPERATOR_INFO.supportEmail}" style="color: #FF6B00; text-decoration: underline;">${OPERATOR_INFO.supportEmail}</a> (${OPERATOR_INFO.supportSlaLine})</p>
+    <p style="margin: 6px 0 0; color: #dc2626; font-size: 11px; font-weight: 700;">${EMAIL_TRUST_COPY.signatureSecurityWarning}</p>
   </div>
 `;
 function escapeEmailHtml(val) {
@@ -2308,12 +2779,13 @@ If you didn't ask to reset your password, you can safely ignore this email. Your
         </p>
       `;
       break;
-    case "order_placed_buyer":
+    case "order_placed_buyer": {
+      const orderPlacedMsg = EMAIL_TRUST_COPY.orderPlacedBodyPrefix.replace("{total}", total);
       subject = `We got your order #${orderId}`;
-      bodyText = `Payment of \u20A6${total} received. Your money is held safely until you confirm the item arrived. Track your order: ${appUrl}/orders?track=${orderId}`;
+      bodyText = `${orderPlacedMsg} Track your order: ${appUrl}/orders?track=${orderId}`;
       bodyHtmlContent = `
         <p style="margin: 0 0 16px; font-size: 15px; color: #0f172a; line-height: 1.6;">
-          Payment of <strong>\u20A6${total}</strong> received. Your money is held safely until you confirm the item arrived.
+          Payment of <strong>\u20A6${total}</strong> received. Payments are processed by Flutterwave. Shop It holds your payment until you confirm delivery.
         </p>
         <p style="margin: 16px 0;">
           <a href="${appUrl}/orders?track=${orderId}" style="display: inline-block; background: #111111; color: #9FE870; font-weight: 700; font-size: 13px; text-decoration: none; padding: 10px 18px; border-radius: 8px; border: 1px solid #FF6B00;">
@@ -2322,6 +2794,7 @@ If you didn't ask to reset your password, you can safely ignore this email. Your
         </p>
       `;
       break;
+    }
     case "new_order_seller":
       subject = `New order #${orderId}`;
       bodyText = `You have a new order for ${item}. Pack it, upload a photo, and mark it shipped.`;
@@ -2402,10 +2875,10 @@ If you didn't ask to reset your password, you can safely ignore this email. Your
     case "welcome":
     default:
       subject = "Welcome to Shop It";
-      bodyText = `Your account is ready. Buy safe, sell easy.`;
+      bodyText = EMAIL_TRUST_COPY.welcomeBody;
       bodyHtmlContent = `
         <p style="margin: 0 0 16px; font-size: 15px; color: #0f172a; line-height: 1.6;">
-          Your account is ready. Buy safe, sell easy.
+          ${EMAIL_TRUST_COPY.welcomeBody}
         </p>
       `;
       break;
@@ -4481,7 +4954,6 @@ async function updateReportStatus(reportId, status, actionNote) {
 __name(updateReportStatus, "updateReportStatus");
 
 // server/auth/middleware.ts
-import crypto8 from "crypto";
 function extractToken(req) {
   if (req.cookies && req.cookies[SESSION_COOKIE_NAME]) {
     return String(req.cookies[SESSION_COOKIE_NAME]).trim();
@@ -4683,38 +5155,6 @@ function requirePayoutsEnabled(_req, res, next) {
   return next();
 }
 __name(requirePayoutsEnabled, "requirePayoutsEnabled");
-function requireCronSecret(req, res, next) {
-  const configuredSecret = (process.env.CRON_SECRET || "").trim();
-  if (!configuredSecret) {
-    return res.status(503).json({
-      status: false,
-      error: "CRON_SECRET_MISSING",
-      message: "CRON_SECRET is not configured on the server."
-    });
-  }
-  const authHeader = String(req.headers.authorization || "").trim();
-  const bearerToken = authHeader.toLowerCase().startsWith("bearer ") ? authHeader.slice(7).trim() : "";
-  const headerToken = typeof req.headers["x-cron-secret"] === "string" ? req.headers["x-cron-secret"].trim() : "";
-  const provided = bearerToken || headerToken;
-  if (!provided) {
-    return res.status(401).json({
-      status: false,
-      error: "UNAUTHORIZED",
-      message: "Valid CRON_SECRET is required."
-    });
-  }
-  const a = Buffer.from(provided, "utf8");
-  const b = Buffer.from(configuredSecret, "utf8");
-  if (a.length !== b.length || !crypto8.timingSafeEqual(a, b)) {
-    return res.status(401).json({
-      status: false,
-      error: "UNAUTHORIZED",
-      message: "Invalid CRON_SECRET."
-    });
-  }
-  return next();
-}
-__name(requireCronSecret, "requireCronSecret");
 
 // server/lib/kycProvider.ts
 function compareNames(typedName, registryName) {
@@ -4871,7 +5311,7 @@ init_validation();
 
 // server/routes/marketplace.ts
 import express from "express";
-import crypto9 from "crypto";
+import crypto8 from "crypto";
 init_validation();
 init_minorSafety();
 var router = express.Router();
@@ -4960,7 +5400,7 @@ async function notifyFollowersOfNewProduct(params) {
         `INSERT INTO shopit_notifications (id, user_id, title, message, type, is_read, link, created_at)
          VALUES ($1, $2, $3, $4, 'info', false, $5, NOW())`,
         [
-          `notif_newprod_${Date.now()}_${crypto9.randomBytes(3).toString("hex")}`,
+          `notif_newprod_${Date.now()}_${crypto8.randomBytes(3).toString("hex")}`,
           followerId,
           `New craft from ${params.shopName}`,
           `"${params.productTitle}" was just listed by ${params.shopName}.`,
@@ -5146,7 +5586,7 @@ router.get("/products", async (req, res) => {
       reviews: (Array.isArray(row.reviews) ? row.reviews : []).map((rv) => mapReviewWithUsers(rv, reviewerMap)),
       delivery: {
         allowsPickup: true,
-        pickupLocation: `${row.location_area || "Hub"} Safe Handoff Spot`,
+        pickupLocation: `${row.location_area || "Hub"} Campus Pickup Spot`,
         pickupFee: koboToNaira(row.delivery_pickup_fee_kobo || 0),
         allowsLocalDelivery: true,
         localDeliveryFee: row.delivery_local_fee_kobo !== void 0 && row.delivery_local_fee_kobo !== null ? koboToNaira(row.delivery_local_fee_kobo) : 500,
@@ -5215,7 +5655,7 @@ router.get("/products/mine", requireAuth, async (req, res) => {
       reviews: Array.isArray(row.reviews) ? row.reviews : [],
       delivery: {
         allowsPickup: true,
-        pickupLocation: `${row.location_area || "Hub"} Safe Handoff Spot`,
+        pickupLocation: `${row.location_area || "Hub"} Campus Pickup Spot`,
         pickupFee: koboToNaira(row.delivery_pickup_fee_kobo || 0),
         allowsLocalDelivery: true,
         localDeliveryFee: row.delivery_local_fee_kobo !== void 0 && row.delivery_local_fee_kobo !== null ? koboToNaira(row.delivery_local_fee_kobo) : 500,
@@ -5282,7 +5722,7 @@ router.get("/products/:id", async (req, res) => {
         reviews: rawReviews.map((rv) => mapReviewWithUsers(rv, reviewerMap)),
         delivery: {
           allowsPickup: true,
-          pickupLocation: `${row.location_area || "Hub"} Safe Handoff Spot`,
+          pickupLocation: `${row.location_area || "Hub"} Campus Pickup Spot`,
           pickupFee: koboToNaira(row.delivery_pickup_fee_kobo || 0),
           allowsLocalDelivery: true,
           localDeliveryFee: row.delivery_local_fee_kobo !== void 0 && row.delivery_local_fee_kobo !== null ? koboToNaira(row.delivery_local_fee_kobo) : 500,
@@ -5384,7 +5824,7 @@ router.post("/products", requireAuth, async (req, res) => {
     if (isVerified) {
       badges.push("verified");
     }
-    const productId = `prod_${Date.now()}_${crypto9.randomBytes(3).toString("hex")}`;
+    const productId = `prod_${Date.now()}_${crypto8.randomBytes(3).toString("hex")}`;
     const imagesArray = imgCheck.urls;
     const rawParsedStock = parseInt(String(stock), 10);
     const parsedStock = Math.max(0, Math.min(1e4, Number.isNaN(rawParsedStock) ? 1 : rawParsedStock));
@@ -5552,7 +5992,7 @@ router.put("/products/:id", requireAuth, async (req, res) => {
             `INSERT INTO shopit_notifications (id, user_id, title, message, type, is_read, link, created_at)
              VALUES ($1, $2, $3, $4, 'success', false, $5, NOW())`,
             [
-              `notif_restock_${Date.now()}_${crypto9.randomBytes(3).toString("hex")}`,
+              `notif_restock_${Date.now()}_${crypto8.randomBytes(3).toString("hex")}`,
               sub.user_id,
               "Item Back in Stock!",
               `"${title}" is now restocked (${stock} available) on Shop It.`,
@@ -5705,7 +6145,7 @@ router.post("/products/:id/restock-alert", requireAuth, async (req, res) => {
     if (!prod.is_sold_out && parseInt(String(prod.stock || "0"), 10) > 0) {
       return res.json({ status: true, subscribed: false, inStock: true, message: "This item is currently in stock." });
     }
-    const alertId = `rstk_${Date.now()}_${crypto9.randomBytes(3).toString("hex")}`;
+    const alertId = `rstk_${Date.now()}_${crypto8.randomBytes(3).toString("hex")}`;
     await query(
       `INSERT INTO shopit_restock_alerts (id, product_id, user_id, email, notified, created_at)
        VALUES ($1, $2, $3, $4, false, NOW())
@@ -6269,7 +6709,7 @@ router.patch("/orders/:id/status", requireAuth, async (req, res) => {
         if (handshakeOtp && order.handshake_otp) {
           const suppliedBuf = Buffer.from(String(handshakeOtp).trim());
           const expectedBuf = Buffer.from(String(order.handshake_otp).trim());
-          otpMatched = suppliedBuf.length === expectedBuf.length && crypto9.timingSafeEqual(suppliedBuf, expectedBuf);
+          otpMatched = suppliedBuf.length === expectedBuf.length && crypto8.timingSafeEqual(suppliedBuf, expectedBuf);
         }
         if (!isBuyer && !isAdmin && !(isOrderSeller && otpMatched)) {
           return {
@@ -6331,7 +6771,7 @@ router.patch("/orders/:id/status", requireAuth, async (req, res) => {
           id, order_id, previous_status, new_status, changed_by, notes, created_at
         ) VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
         [
-          `osh_${Date.now()}_${crypto9.randomBytes(3).toString("hex")}`,
+          `osh_${Date.now()}_${crypto8.randomBytes(3).toString("hex")}`,
           id,
           prevStatus,
           newStatus,
@@ -6495,7 +6935,7 @@ router.patch("/orders/:id/status", requireAuth, async (req, res) => {
           `INSERT INTO shopit_notifications (id, user_id, title, message, type, is_read, link, created_at)
            VALUES ($1, $2, 'Order Cancelled', $3, 'info', false, '/dashboard', NOW())`,
           [
-            `notif_cancel_${Date.now()}_${crypto9.randomBytes(2).toString("hex")}`,
+            `notif_cancel_${Date.now()}_${crypto8.randomBytes(2).toString("hex")}`,
             targetUid,
             `Order #${id} was cancelled by the buyer before packing. Item stock has been restored.`
           ]
@@ -6565,7 +7005,7 @@ router.post("/orders/:id/review", requireAuth, async (req, res) => {
       const uRow = uRes.rows[0];
       const reviewerName = uRow?.display_name || extractFirstName(uRow?.name || user.name || "Member");
       const reviewEntry = {
-        id: `rev_${Date.now()}_${crypto9.randomBytes(2).toString("hex")}`,
+        id: `rev_${Date.now()}_${crypto8.randomBytes(2).toString("hex")}`,
         productId: targetProductId,
         reviewerId: user.userId,
         reviewerName,
@@ -6733,7 +7173,7 @@ async function processEscrowAutoRelease(batchLimit = 50) {
           `INSERT INTO shopit_order_status_history (
             id, order_id, previous_status, new_status, changed_by, notes, created_at
           ) VALUES ($1, $2, $3, 'completed', 'escrow_auto_release_cron', 'Funds auto-released to seller after inspection period without dispute.', NOW())`,
-          [`osh_auto_${Date.now()}_${crypto9.randomBytes(3).toString("hex")}`, order.id, prevStatus]
+          [`osh_auto_${Date.now()}_${crypto8.randomBytes(3).toString("hex")}`, order.id, prevStatus]
         );
         return true;
       });
@@ -7308,7 +7748,7 @@ router.post("/chat/conversations", requireAuth, async (req, res) => {
         conversation: mapConversationRow(existingRow, userMap, unreadMap.get(existingRow.id), blockedConvSet.has(existingRow.id))
       });
     }
-    const convId = `conv_${Date.now()}_${crypto9.randomBytes(3).toString("hex")}`;
+    const convId = `conv_${Date.now()}_${crypto8.randomBytes(3).toString("hex")}`;
     const insertRes = await query(
       `INSERT INTO shopit_chat_conversations (
         id, order_id, product_id, product_title, product_image,
@@ -7560,12 +8000,12 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res) =>
     const isBypass = Boolean(
       cleanContent && (phoneRegex.test(cleanContent) || bankRegex.test(cleanContent) || whatsappRegex.test(cleanContent) || freeTextDigitRegex.test(cleanContent))
     );
-    const msgId = `msg_${Date.now()}_${crypto9.randomBytes(3).toString("hex")}`;
+    const msgId = `msg_${Date.now()}_${crypto8.randomBytes(3).toString("hex")}`;
     const role = isUserSellerOwner(user, conv.seller_id) ? "seller" : user.role === "admin" ? "admin" : "buyer";
     const senderMap = await batchLoadUserMeta([user.userId]);
     const sMeta = senderMap.get(user.userId);
     const senderDisplayName = role === "seller" ? conv.seller_shop_name || sMeta?.displayName || "Artisan" : role === "admin" ? "Shop It Moderation" : sMeta?.displayName || extractFirstName(user.name || "Member");
-    const savedContent = isBypass ? "[Security Notice: Numbers, phone numbers, account numbers, and off-platform payments are prohibited to protect your escrow security.]" : cleanContent;
+    const savedContent = isBypass ? "[Security Notice: Numbers, phone numbers, account numbers, and off-platform contact details are prohibited in chat.]" : cleanContent;
     const savedAttachment = isBypass ? void 0 : attachmentMeta;
     const lastMessagePreview = savedContent ? savedContent : savedAttachment ? `[Attachment: ${savedAttachment.originalName}]` : "[Custom Offer]";
     const nowIso = (/* @__PURE__ */ new Date()).toISOString();
@@ -7614,7 +8054,7 @@ router.post("/chat/conversations/:id/messages", requireAuth, async (req, res) =>
             `INSERT INTO shopit_notifications (id, user_id, title, message, type, is_read, link, created_at)
              VALUES ($1, $2, $3, $4, 'info', false, '/chat', NOW())`,
             [
-              `notif_chat_${Date.now()}_${crypto9.randomBytes(2).toString("hex")}`,
+              `notif_chat_${Date.now()}_${crypto8.randomBytes(2).toString("hex")}`,
               recipientUserId,
               notifTitle,
               notifBody
@@ -7678,7 +8118,7 @@ ${senderDisplayName} sent you a message on Shop It: "${notifBody}"`,
       },
       isChatLocked: nextViolations >= 2 || Boolean(conv.is_chat_locked),
       bypassViolationsCount: nextViolations,
-      warning: isBypass ? "Anti-bypass trigger: Personal contact info or numbers redacted to ensure buyer/seller escrow safety." : void 0
+      warning: isBypass ? "Anti-bypass trigger: Personal contact info or numbers redacted for marketplace safety." : void 0
     });
   } catch (err) {
     return res.status(500).json({ status: false, message: err.message });
@@ -7785,7 +8225,7 @@ router.post("/disputes", requireAuth, async (req, res) => {
       await client.query(
         `INSERT INTO shopit_order_status_history (id, order_id, previous_status, new_status, changed_by, notes, created_at)
          VALUES ($1, $2, $3, 'disputed', $4, $5, NOW())`,
-        [`osh_${Date.now()}_${crypto9.randomBytes(3).toString("hex")}`, orderId, order.status, user.userId, `Dispute filed: ${String(reason).slice(0, 120)}`]
+        [`osh_${Date.now()}_${crypto8.randomBytes(3).toString("hex")}`, orderId, order.status, user.userId, `Dispute filed: ${String(reason).slice(0, 120)}`]
       );
     });
     await logAuditEvent({
@@ -7796,7 +8236,7 @@ router.post("/disputes", requireAuth, async (req, res) => {
       ip: req.ip,
       userAgent: req.get("user-agent")
     });
-    return res.status(201).json({ status: true, disputeId, message: "Dispute opened. Funds held securely in escrow." });
+    return res.status(201).json({ status: true, disputeId, message: "Dispute opened. Held funds are paused until moderation resolves the case." });
   } catch (err) {
     return res.status(500).json({ status: false, message: err.message });
   }
@@ -7861,7 +8301,7 @@ router.patch("/disputes/:id/resolve", requireModerator, async (req, res) => {
             `INSERT INTO shopit_order_status_history (id, order_id, previous_status, new_status, changed_by, notes, created_at)
              VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
             [
-              `osh_${Date.now()}_${crypto9.randomBytes(3).toString("hex")}`,
+              `osh_${Date.now()}_${crypto8.randomBytes(3).toString("hex")}`,
               disp.order_id,
               prevStatus,
               nextOrderStatus,
@@ -7892,7 +8332,7 @@ router.patch("/disputes/:id/resolve", requireModerator, async (req, res) => {
             ON CONFLICT (idempotency_key) DO NOTHING
             RETURNING id`,
             [
-              `DISP-LED-${Date.now()}-${crypto9.randomBytes(2).toString("hex")}`,
+              `DISP-LED-${Date.now()}-${crypto8.randomBytes(2).toString("hex")}`,
               disp.seller_id,
               disp.order_id,
               ledgerType,
@@ -8125,7 +8565,7 @@ var marketplace_default = router;
 
 // server/routes/profiles.ts
 import express2 from "express";
-import crypto10 from "crypto";
+import crypto9 from "crypto";
 init_validation();
 init_minorSafety();
 var router2 = express2.Router();
@@ -8179,7 +8619,7 @@ function mapProductRow(row, sellerDisplayName, sellerAvatarUrl, sellerProfileSlu
     reviews: Array.isArray(row.reviews) ? row.reviews : parseJsonSafe(row.reviews, []),
     delivery: {
       allowsPickup: true,
-      pickupLocation: `${row.location_area || "Hub"} Safe Handoff Spot`,
+      pickupLocation: `${row.location_area || "Hub"} Campus Pickup Spot`,
       pickupFee: Math.round(Number(row.delivery_pickup_fee_kobo || 0)) / 100,
       allowsLocalDelivery: true,
       localDeliveryFee: row.delivery_local_fee_kobo !== void 0 && row.delivery_local_fee_kobo !== null ? Math.round(Number(row.delivery_local_fee_kobo)) / 100 : 500,
@@ -8197,22 +8637,39 @@ function mapProductRow(row, sellerDisplayName, sellerAvatarUrl, sellerProfileSlu
 __name(mapProductRow, "mapProductRow");
 function computeProfileCompleteness(params) {
   const items = [
-    { key: "avatar", label: "Add a profile photo", done: Boolean(params.avatarUrl) },
-    { key: "bio", label: "Write a short bio", done: Boolean(params.bio && params.bio.trim().length >= 10) },
-    { key: "location", label: "Set your campus & area", done: Boolean(params.campus || params.locationArea) },
-    { key: "interests", label: "Pick at least 1 craft interest", done: params.interests.length > 0 },
-    { key: "email", label: "Verify your email address", done: Boolean(params.isVerifiedEmail) }
+    { key: "avatar", label: "Add a profile photo", done: Boolean(params.avatarUrl), targetField: "avatar" },
+    {
+      key: "tagline",
+      label: "Add a short tagline",
+      done: Boolean(params.tagline && params.tagline.trim().length >= 5),
+      targetField: "tagline"
+    },
+    { key: "bio", label: "Write a short bio", done: Boolean(params.bio && params.bio.trim().length >= 10), targetField: "bio" },
+    {
+      key: "location",
+      label: "Set your state & area",
+      done: Boolean(params.locationState || params.campus || params.locationArea),
+      targetField: "location"
+    },
+    {
+      key: "interests",
+      label: "Pick at least 1 craft interest",
+      done: params.interests.length > 0,
+      targetField: "interests"
+    }
   ];
   if (params.isSeller) {
     items.push({
-      key: "shop_name",
-      label: "Name your shop",
-      done: Boolean(params.shopName && params.shopName.trim().length >= 2)
+      key: "shop_story",
+      label: "Share your shop story",
+      done: Boolean(params.shopStory && params.shopStory.trim().length >= 15),
+      targetField: "shopStory"
     });
     items.push({
-      key: "listing",
+      key: "first_product",
       label: "Publish at least 1 craft listing",
-      done: params.activeProductsCount > 0
+      done: params.activeProductsCount > 0,
+      targetField: "firstProduct"
     });
   }
   const doneCount = items.filter((i) => i.done).length;
@@ -8344,7 +8801,8 @@ router2.get("/profiles/me", requireAuth, async (req, res) => {
   try {
     const userId = req.user.userId;
     const uRes = await query(
-      `SELECT u.*, s.id as s_id, s.shop_name, s.bio as s_bio, s.campus as s_campus, s.location_area as s_area,
+      `SELECT u.*, s.id as s_id, s.shop_name, s.bio as s_bio, s.shop_story, s.craft_materials,
+              s.processing_time, s.delivery_options, s.campus as s_campus, s.location_area as s_area,
               s.location_state as s_state, s.location_city as s_city,
               s.logo_url as s_logo_url, s.banner_url as s_banner_url,
               s.is_verified_seller, s.verification_status, s.under_18 as s_under_18,
@@ -8361,6 +8819,8 @@ router2.get("/profiles/me", requireAuth, async (req, res) => {
     const displayName = row.display_name || extractFirstName(row.name || "Member");
     const isUnder18 = row.age !== null && row.age !== void 0 && Number(row.age) < 18 || Boolean(row.s_under_18);
     const interests = parseJsonSafe(row.interests, []);
+    const languages = parseJsonSafe(row.languages, []);
+    const deliveryOptions = parseJsonSafe(row.delivery_options, { allowsPickup: true, allowsLocalDelivery: true, pickupSpots: [] });
     const notificationPrefs = sanitizeNotificationPrefs(parseJsonSafe(row.notification_prefs, DEFAULT_NOTIFICATION_PREFS));
     const privacySettings = sanitizePrivacySettings(
       parseJsonSafe(row.privacy_settings, isUnder18 ? UNDER_18_PRIVACY_SETTINGS : DEFAULT_PRIVACY_SETTINGS),
@@ -8371,6 +8831,14 @@ router2.get("/profiles/me", requireAuth, async (req, res) => {
       id: row.s_id,
       shop_name: row.shop_name,
       bio: row.s_bio,
+      shop_story: row.shop_story,
+      craft_materials: row.craft_materials,
+      processing_time: row.processing_time,
+      delivery_options: {
+        allowsPickup: deliveryOptions?.allowsPickup !== false,
+        allowsLocalDelivery: deliveryOptions?.allowsLocalDelivery !== false,
+        pickupSpots: Array.isArray(deliveryOptions?.pickupSpots) ? deliveryOptions.pickupSpots : []
+      },
       campus: row.s_campus,
       location_area: row.s_area,
       location_state: row.s_state,
@@ -8401,14 +8869,16 @@ router2.get("/profiles/me", requireAuth, async (req, res) => {
     const pendingFollowRequestsCount = parseInt(String(pendingReqRes.rows[0]?.total || "0"), 10);
     const completeness = computeProfileCompleteness({
       avatarUrl: row.avatar_url || sellerRow?.logo_url,
-      coverUrl: row.cover_url || sellerRow?.banner_url,
+      tagline: row.tagline,
       bio: row.bio || sellerRow?.bio,
+      locationState: row.location_state || sellerRow?.location_state,
       campus: row.campus || sellerRow?.campus,
       locationArea: row.location_area || sellerRow?.location_area,
       interests,
       isVerifiedEmail: Boolean(row.is_verified_email),
       isSeller: Boolean(sellerRow),
       shopName: sellerRow?.shop_name,
+      shopStory: sellerRow?.shop_story,
       activeProductsCount: activeProds.length
     });
     return res.json({
@@ -8419,13 +8889,17 @@ router2.get("/profiles/me", requireAuth, async (req, res) => {
         fullName: row.name,
         displayName,
         profileSlug: row.profile_slug,
+        canonicalSlug: row.profile_slug,
+        tagline: row.tagline || "",
         role: row.role,
         avatarUrl: row.avatar_url || sellerRow?.logo_url || null,
         coverUrl: row.cover_url || sellerRow?.banner_url || null,
         bio: row.bio || "",
+        locationState: row.location_state || sellerRow?.location_state || "",
         campus: row.campus || sellerRow?.campus || "",
         locationArea: row.location_area || sellerRow?.location_area || "",
         interests,
+        languages,
         isVerifiedEmail: Boolean(row.is_verified_email),
         isUnder18,
         memberSince: row.created_at,
@@ -8442,6 +8916,11 @@ router2.get("/profiles/me", requireAuth, async (req, res) => {
           id: sellerRow.id,
           shopName: sellerRow.shop_name,
           bio: sellerRow.bio || "",
+          shopStory: sellerRow.shop_story || "",
+          craftMaterials: sellerRow.craft_materials || "",
+          processingTime: sellerRow.processing_time || "",
+          deliveryOptions: sellerRow.delivery_options,
+          locationState: sellerRow.location_state || row.location_state || "Lagos",
           campus: sellerRow.campus || "Lagos Mainland",
           locationArea: sellerRow.location_area || "Yaba",
           logoUrl: sellerRow.logo_url || row.avatar_url || null,
@@ -8461,16 +8940,25 @@ router2.patch("/profiles/me", requireAuth, async (req, res) => {
   try {
     const check = rejectUnknownFields(req.body, [
       "displayName",
+      "tagline",
       "avatarUrl",
       "coverUrl",
       "bio",
+      "locationState",
       "campus",
       "locationArea",
       "interests",
+      "languages",
       "shopName",
       "shopBio",
+      "shopStory",
+      "craftMaterials",
+      "processingTime",
+      "deliveryOptions",
+      "vacationMode",
       "logoUrl",
-      "bannerUrl"
+      "bannerUrl",
+      "privacySettings"
     ]);
     if (!check.ok) {
       return res.status(400).json({ status: false, message: check.message });
@@ -8489,11 +8977,29 @@ router2.patch("/profiles/me", requireAuth, async (req, res) => {
       }
       nextDisplayName = cleaned;
     }
+    let nextTagline;
+    if ("tagline" in body) {
+      const cleaned = String(body.tagline || "").trim().replace(/\s+/g, " ");
+      if (cleaned.length > MAX_TAGLINE_LENGTH) {
+        return res.status(400).json({
+          status: false,
+          message: `Tagline must be ${MAX_TAGLINE_LENGTH} characters or fewer.`
+        });
+      }
+      const contactCheck = containsForbiddenContactInfo(cleaned);
+      if (contactCheck.blocked) {
+        return res.status(400).json({ status: false, message: `Tagline: ${contactCheck.reason}` });
+      }
+      nextTagline = cleaned;
+    }
     let nextBio;
     if ("bio" in body) {
       const cleaned = String(body.bio || "").trim();
-      if (cleaned.length > 200) {
-        return res.status(400).json({ status: false, message: "Bio must be 200 characters or fewer." });
+      if (cleaned.length > MAX_BIO_LENGTH) {
+        return res.status(400).json({
+          status: false,
+          message: `Bio must be ${MAX_BIO_LENGTH} characters or fewer.`
+        });
       }
       const contactCheck = containsForbiddenContactInfo(cleaned);
       if (contactCheck.blocked) {
@@ -8525,9 +9031,74 @@ router2.patch("/profiles/me", requireAuth, async (req, res) => {
       }
       nextShopBio = cleaned;
     }
+    let nextShopStory;
+    if ("shopStory" in body && body.shopStory !== void 0 && body.shopStory !== null) {
+      const cleaned = String(body.shopStory).trim();
+      if (cleaned.length > MAX_SHOP_STORY_LENGTH) {
+        return res.status(400).json({
+          status: false,
+          message: `Shop story must be ${MAX_SHOP_STORY_LENGTH} characters or fewer.`
+        });
+      }
+      const contactCheck = containsForbiddenContactInfo(cleaned);
+      if (contactCheck.blocked) {
+        return res.status(400).json({ status: false, message: `Shop story: ${contactCheck.reason}` });
+      }
+      nextShopStory = cleaned;
+    }
+    let nextCraftMaterials;
+    if ("craftMaterials" in body && body.craftMaterials !== void 0 && body.craftMaterials !== null) {
+      const cleaned = String(body.craftMaterials).trim();
+      if (cleaned.length > MAX_CRAFT_MATERIALS_LENGTH) {
+        return res.status(400).json({
+          status: false,
+          message: `Craft & materials must be ${MAX_CRAFT_MATERIALS_LENGTH} characters or fewer.`
+        });
+      }
+      const contactCheck = containsForbiddenContactInfo(cleaned);
+      if (contactCheck.blocked) {
+        return res.status(400).json({ status: false, message: `Craft & materials: ${contactCheck.reason}` });
+      }
+      nextCraftMaterials = cleaned;
+    }
+    let nextProcessingTime;
+    if ("processingTime" in body && body.processingTime !== void 0 && body.processingTime !== null) {
+      const cleaned = String(body.processingTime).trim();
+      const allowedProcSet = new Set(PROCESSING_TIME_OPTIONS);
+      if (cleaned !== "" && !allowedProcSet.has(cleaned)) {
+        return res.status(400).json({ status: false, message: "Invalid processing time selection." });
+      }
+      nextProcessingTime = cleaned;
+    }
+    let nextDeliveryOptions;
+    if ("deliveryOptions" in body && body.deliveryOptions !== void 0 && body.deliveryOptions !== null) {
+      const dCheck = sanitizeDeliveryOptions(body.deliveryOptions);
+      if (!dCheck.valid) {
+        return res.status(400).json({ status: false, message: dCheck.message });
+      }
+      nextDeliveryOptions = dCheck.value;
+    }
+    let nextVacationMode;
+    if ("vacationMode" in body && body.vacationMode !== void 0) {
+      nextVacationMode = Boolean(body.vacationMode);
+    }
+    let nextLocationState;
+    if ("locationState" in body) {
+      const cleaned = String(body.locationState || "").trim().slice(0, 60);
+      const contactCheck = containsForbiddenContactInfo(cleaned);
+      if (contactCheck.blocked) {
+        return res.status(400).json({ status: false, message: `State: ${contactCheck.reason}` });
+      }
+      nextLocationState = cleaned;
+    }
     let nextCampus;
     if ("campus" in body) {
-      nextCampus = String(body.campus || "").trim().slice(0, 120);
+      const cleaned = String(body.campus || "").trim().slice(0, 120);
+      const contactCheck = containsForbiddenContactInfo(cleaned);
+      if (contactCheck.blocked) {
+        return res.status(400).json({ status: false, message: `Campus: ${contactCheck.reason}` });
+      }
+      nextCampus = cleaned;
     }
     let nextArea;
     if ("locationArea" in body) {
@@ -8553,6 +9124,22 @@ router2.patch("/profiles/me", requireAuth, async (req, res) => {
         if (!deduped.includes(s)) deduped.push(s);
       }
       nextInterests = deduped.slice(0, 10);
+    }
+    let nextLanguages;
+    if ("languages" in body) {
+      if (!Array.isArray(body.languages)) {
+        return res.status(400).json({ status: false, message: "Languages must be a list of allowed options." });
+      }
+      const allowedLangSet = new Set(ALLOWED_LANGUAGES);
+      const dedupedLangs = [];
+      for (const item of body.languages) {
+        const s = String(item || "").trim();
+        if (!allowedLangSet.has(s)) {
+          return res.status(400).json({ status: false, message: `Invalid language option: "${s}".` });
+        }
+        if (!dedupedLangs.includes(s)) dedupedLangs.push(s);
+      }
+      nextLanguages = dedupedLangs.slice(0, 6);
     }
     let nextAvatarUrl;
     if ("avatarUrl" in body) {
@@ -8582,83 +9169,149 @@ router2.patch("/profiles/me", requireAuth, async (req, res) => {
       const uRes = await client.query("SELECT * FROM shopit_users WHERE id = $1 FOR UPDATE", [userId]);
       if (uRes.rows.length === 0) return null;
       const current = uRes.rows[0];
+      const sRes = await client.query("SELECT * FROM shopit_sellers WHERE user_id = $1 OR id = $1 LIMIT 1", [userId]);
+      const sRow = sRes.rows[0] || null;
       let nextSlug = current.profile_slug;
+      let previousSlug;
       if (nextDisplayName && nextDisplayName !== current.display_name) {
         nextSlug = await generateUniqueProfileSlug(
           (sql, p) => client.query(sql, p),
           nextDisplayName,
           userId
         );
+        if (current.profile_slug && nextSlug.toLowerCase() !== String(current.profile_slug).toLowerCase()) {
+          previousSlug = String(current.profile_slug).toLowerCase();
+          await client.query(
+            `INSERT INTO shopit_profile_slug_history (slug, user_id, created_at)
+             VALUES ($1, $2, NOW())
+             ON CONFLICT (slug) DO UPDATE SET user_id = EXCLUDED.user_id, created_at = NOW()`,
+            [previousSlug, userId]
+          );
+          await client.query("DELETE FROM shopit_profile_slug_history WHERE LOWER(slug) = LOWER($1)", [nextSlug]);
+        }
       }
+      const isUnder18 = current.age !== null && current.age !== void 0 && Number(current.age) < 18 || Boolean(sRow?.under_18);
+      const basePrivacy = isUnder18 ? UNDER_18_PRIVACY_SETTINGS : DEFAULT_PRIVACY_SETTINGS;
+      const currentPrivacy = sanitizePrivacySettings(
+        parseJsonSafe(current.privacy_settings, basePrivacy),
+        basePrivacy,
+        isUnder18
+      );
+      const finalPrivacy = "privacySettings" in body && body.privacySettings ? sanitizePrivacySettings(body.privacySettings, currentPrivacy, isUnder18) : currentPrivacy;
       const finalDisplayName = nextDisplayName ?? current.display_name ?? extractFirstName(current.name || "Member");
+      const finalTagline = nextTagline ?? current.tagline ?? "";
       const finalAvatar = "avatarUrl" in body ? nextAvatarUrl : current.avatar_url;
       const finalCover = "coverUrl" in body ? nextCoverUrl : current.cover_url;
       const finalBio = nextBio ?? current.bio ?? "";
+      const finalState = nextLocationState ?? current.location_state ?? "";
       const finalCampus = nextCampus ?? current.campus ?? "";
       const finalArea = nextArea ?? current.location_area ?? "";
       const finalInterests = nextInterests ?? parseJsonSafe(current.interests, []);
+      const finalLanguages = nextLanguages ?? parseJsonSafe(current.languages, []);
       await client.query(
         `UPDATE shopit_users
-         SET display_name = $1, profile_slug = $2, avatar_url = $3, cover_url = $4,
-             bio = $5, campus = $6, location_area = $7, interests = $8::jsonb, updated_at = NOW()
-         WHERE id = $9`,
+         SET display_name = $1, profile_slug = $2, tagline = $3, avatar_url = $4, cover_url = $5,
+             bio = $6, location_state = $7, campus = $8, location_area = $9,
+             interests = $10::jsonb, languages = $11::jsonb, privacy_settings = $12::jsonb, updated_at = NOW()
+         WHERE id = $13`,
         [
           finalDisplayName,
           nextSlug,
+          finalTagline,
           finalAvatar ?? null,
           finalCover ?? null,
           finalBio,
+          finalState,
           finalCampus,
           finalArea,
           JSON.stringify(finalInterests),
+          JSON.stringify(finalLanguages),
+          JSON.stringify(finalPrivacy),
           userId
         ]
       );
-      const sRes = await client.query("SELECT * FROM shopit_sellers WHERE user_id = $1 OR id = $1 LIMIT 1", [userId]);
-      if (sRes.rows.length > 0) {
-        const sRow = sRes.rows[0];
+      let sellerUpdated = null;
+      if (sRow) {
         const finalShopName = nextShopName ?? sRow.shop_name;
         const finalShopBio = nextShopBio ?? (nextBio !== void 0 && !sRow.bio ? nextBio : sRow.bio) ?? "";
+        const finalShopStory = nextShopStory ?? sRow.shop_story ?? "";
+        const finalCraftMaterials = nextCraftMaterials ?? sRow.craft_materials ?? "";
+        const finalProcessingTime = nextProcessingTime ?? sRow.processing_time ?? "";
+        const currentDeliv = parseJsonSafe(sRow.delivery_options, { allowsPickup: true, allowsLocalDelivery: true, pickupSpots: [] });
+        const finalDeliv = nextDeliveryOptions ?? {
+          allowsPickup: currentDeliv?.allowsPickup !== false,
+          allowsLocalDelivery: currentDeliv?.allowsLocalDelivery !== false,
+          pickupSpots: Array.isArray(currentDeliv?.pickupSpots) ? currentDeliv.pickupSpots : []
+        };
+        const finalSellerState = nextLocationState || sRow.location_state || "Lagos";
         const finalSellerCampus = nextCampus || sRow.campus;
         const finalSellerArea = nextArea || sRow.location_area;
+        const finalVacationMode = nextVacationMode !== void 0 ? nextVacationMode : Boolean(sRow.vacation_mode);
         const finalLogo = "logoUrl" in body ? nextLogoUrl : "avatarUrl" in body ? finalAvatar : sRow.logo_url;
         const finalBanner = "bannerUrl" in body ? nextBannerUrl : "coverUrl" in body ? finalCover : sRow.banner_url;
         await client.query(
           `UPDATE shopit_sellers
-           SET shop_name = $1, bio = $2, campus = $3, location_area = $4,
-               logo_url = $5, banner_url = $6, updated_at = NOW()
-           WHERE id = $7`,
+           SET shop_name = $1, bio = $2, shop_story = $3, craft_materials = $4, processing_time = $5,
+               delivery_options = $6::jsonb, location_state = $7, campus = $8, location_area = $9,
+               vacation_mode = $10, logo_url = $11, banner_url = $12, updated_at = NOW()
+           WHERE id = $13`,
           [
             finalShopName,
             finalShopBio,
+            finalShopStory,
+            finalCraftMaterials,
+            finalProcessingTime,
+            JSON.stringify(finalDeliv),
+            finalSellerState,
             finalSellerCampus,
             finalSellerArea,
+            finalVacationMode,
             finalLogo ?? null,
             finalBanner ?? null,
             sRow.id
           ]
         );
-        if (nextShopName || nextCampus || nextArea) {
+        if (nextShopName || nextLocationState || nextCampus || nextArea) {
           await client.query(
             `UPDATE shopit_products
              SET seller_shop_name = COALESCE($1, seller_shop_name),
-                 seller_campus = COALESCE($2, seller_campus),
-                 location_area = COALESCE($3, location_area),
+                 location_state = COALESCE($2, location_state),
+                 seller_campus = COALESCE($3, seller_campus),
+                 location_area = COALESCE($4, location_area),
                  updated_at = NOW()
-             WHERE seller_id = $4 OR seller_id = $5`,
-            [nextShopName || null, nextCampus || null, nextArea || null, userId, sRow.id]
+             WHERE seller_id = $5 OR seller_id = $6`,
+            [nextShopName || null, nextLocationState || null, nextCampus || null, nextArea || null, userId, sRow.id]
           );
         }
+        sellerUpdated = {
+          shopName: finalShopName,
+          bio: finalShopBio,
+          shopStory: finalShopStory,
+          craftMaterials: finalCraftMaterials,
+          processingTime: finalProcessingTime,
+          deliveryOptions: finalDeliv,
+          locationState: finalSellerState,
+          campus: finalSellerCampus,
+          locationArea: finalSellerArea,
+          vacationMode: finalVacationMode
+        };
       }
       return {
         displayName: finalDisplayName,
         profileSlug: nextSlug,
+        canonicalSlug: nextSlug,
+        ...previousSlug ? { previousSlug } : {},
+        tagline: finalTagline,
         avatarUrl: finalAvatar || null,
         coverUrl: finalCover || null,
         bio: finalBio,
+        locationState: finalState,
         campus: finalCampus,
         locationArea: finalArea,
-        interests: finalInterests
+        interests: finalInterests,
+        languages: finalLanguages,
+        privacySettings: finalPrivacy,
+        ...sellerUpdated ? { seller: sellerUpdated } : {}
       };
     });
     if (!updated) {
@@ -8863,6 +9516,7 @@ router2.delete("/profiles/me", requireAuth, async (req, res) => {
          WHERE id = $3`,
         [anonEmail, anonSlug, userId]
       );
+      await client.query("DELETE FROM shopit_profile_slug_history WHERE user_id = $1", [userId]);
       await client.query("DELETE FROM shopit_sessions WHERE user_id = $1", [userId]);
     });
     res.clearCookie(SESSION_COOKIE_NAME, { path: "/" });
@@ -8891,7 +9545,24 @@ async function resolveTargetUserRecord(rawTarget) {
      LIMIT 1`,
     [clean]
   );
-  return res.rows[0] || null;
+  if (res.rows[0]) return res.rows[0];
+  const histRes = await query(
+    "SELECT user_id FROM shopit_profile_slug_history WHERE LOWER(slug) = LOWER($1) LIMIT 1",
+    [clean]
+  );
+  if (histRes.rows.length > 0 && histRes.rows[0].user_id) {
+    const byIdRes = await query(
+      `SELECT u.id, u.name, u.display_name, u.profile_slug, u.avatar_url, u.age, u.privacy_settings,
+              u.notification_prefs, u.is_banned, u.deleted_at, s.id as s_id, s.under_18 as s_under_18
+       FROM shopit_users u
+       LEFT JOIN shopit_sellers s ON (u.id = s.user_id OR u.id = s.id)
+       WHERE u.id = $1
+       LIMIT 1`,
+      [histRes.rows[0].user_id]
+    );
+    return byIdRes.rows[0] || null;
+  }
+  return null;
 }
 __name(resolveTargetUserRecord, "resolveTargetUserRecord");
 async function getAcceptedFollowersCount(targetUserId) {
@@ -8970,7 +9641,7 @@ router2.post("/follows", requireAuth, async (req, res) => {
     const basePrivacy = isTargetUnder18 ? UNDER_18_PRIVACY_SETTINGS : DEFAULT_PRIVACY_SETTINGS;
     const privacy = sanitizePrivacySettings(parseJsonSafe(target.privacy_settings, basePrivacy), basePrivacy, isTargetUnder18);
     const followStatus = followDecision.forcedStatus || (privacy.whoCanFollow === "approval" ? "pending" : "accepted");
-    const followId = `fol_${Date.now()}_${crypto10.randomBytes(4).toString("hex")}`;
+    const followId = `fol_${Date.now()}_${crypto9.randomBytes(4).toString("hex")}`;
     const insRes = await query(
       `INSERT INTO shopit_follows (id, follower_id, following_id, status, created_at, updated_at)
        VALUES ($1, $2, $3, $4, NOW(), NOW())
@@ -9007,7 +9678,7 @@ router2.post("/follows", requireAuth, async (req, res) => {
           `INSERT INTO shopit_notifications (id, user_id, title, message, type, is_read, link, created_at)
            VALUES ($1, $2, $3, $4, 'info', false, $5, NOW())`,
           [
-            `notif_fol_${Date.now()}_${crypto10.randomBytes(3).toString("hex")}`,
+            `notif_fol_${Date.now()}_${crypto9.randomBytes(3).toString("hex")}`,
             target.id,
             notifTitle,
             notifMsg,
@@ -9124,7 +9795,7 @@ router2.patch("/follows/requests/:followerId", requireAuth, async (req, res) => 
           `INSERT INTO shopit_notifications (id, user_id, title, message, type, is_read, link, created_at)
            VALUES ($1, $2, 'Follow Request Accepted', $3, 'success', false, $4, NOW())`,
           [
-            `notif_fol_acc_${Date.now()}_${crypto10.randomBytes(3).toString("hex")}`,
+            `notif_fol_acc_${Date.now()}_${crypto9.randomBytes(3).toString("hex")}`,
             followerId,
             `${myName} accepted your follow request.`,
             `/?profile=${encodeURIComponent(mySlug)}`
@@ -9269,7 +9940,7 @@ router2.post("/blocks", requireAuth, async (req, res) => {
       return res.status(400).json({ status: false, message: "You cannot block yourself." });
     }
     await withTransaction(async (client) => {
-      const blkId = `blk_${Date.now()}_${crypto10.randomBytes(4).toString("hex")}`;
+      const blkId = `blk_${Date.now()}_${crypto9.randomBytes(4).toString("hex")}`;
       await client.query(
         `INSERT INTO shopit_blocks (id, blocker_id, blocked_id, reason, created_at)
          VALUES ($1, $2, $3, $4, NOW())
@@ -9701,7 +10372,7 @@ router2.post("/mutes", requireAuth, async (req, res) => {
     if (target.id === viewer.userId) {
       return res.status(400).json({ status: false, message: "You cannot mute yourself." });
     }
-    const muteId = `mute_${Date.now()}_${crypto10.randomBytes(4).toString("hex")}`;
+    const muteId = `mute_${Date.now()}_${crypto9.randomBytes(4).toString("hex")}`;
     await query(
       `INSERT INTO shopit_mutes (id, muter_id, muted_id, created_at)
        VALUES ($1, $2, $3, NOW())
@@ -9739,8 +10410,9 @@ router2.get("/profiles/:slug", optionalAuth, async (req, res) => {
       return res.status(400).json({ status: false, message: "Invalid profile identifier." });
     }
     const viewer = req.user;
-    const uRes = await query(
-      `SELECT u.*, s.id as s_id, s.shop_name, s.bio as s_bio, s.campus as s_campus,
+    let uRes = await query(
+      `SELECT u.*, s.id as s_id, s.shop_name, s.bio as s_bio, s.shop_story, s.craft_materials,
+              s.processing_time, s.delivery_options, s.campus as s_campus,
               s.location_area as s_area, s.location_state as s_state, s.location_city as s_city,
               s.logo_url as s_logo_url, s.banner_url as s_banner_url,
               s.is_verified_seller, s.verification_status, s.under_18 as s_under_18,
@@ -9751,6 +10423,31 @@ router2.get("/profiles/:slug", optionalAuth, async (req, res) => {
        LIMIT 1`,
       [rawSlug]
     );
+    let redirectedFromSlug;
+    if (uRes.rows.length === 0) {
+      const histRes = await query(
+        "SELECT user_id, slug FROM shopit_profile_slug_history WHERE LOWER(slug) = LOWER($1) LIMIT 1",
+        [rawSlug]
+      );
+      if (histRes.rows.length > 0 && histRes.rows[0].user_id) {
+        uRes = await query(
+          `SELECT u.*, s.id as s_id, s.shop_name, s.bio as s_bio, s.shop_story, s.craft_materials,
+                  s.processing_time, s.delivery_options, s.campus as s_campus,
+                  s.location_area as s_area, s.location_state as s_state, s.location_city as s_city,
+                  s.logo_url as s_logo_url, s.banner_url as s_banner_url,
+                  s.is_verified_seller, s.verification_status, s.under_18 as s_under_18,
+                  s.vacation_mode, s.created_at as s_created_at, s.rating as s_rating
+           FROM shopit_users u
+           LEFT JOIN shopit_sellers s ON (u.id = s.user_id OR u.id = s.id)
+           WHERE u.id = $1
+           LIMIT 1`,
+          [histRes.rows[0].user_id]
+        );
+        if (uRes.rows.length > 0) {
+          redirectedFromSlug = rawSlug;
+        }
+      }
+    }
     if (uRes.rows.length === 0) {
       return res.status(404).json({ status: false, message: "Profile not found." });
     }
@@ -9802,10 +10499,19 @@ router2.get("/profiles/:slug", optionalAuth, async (req, res) => {
       isMutualFollow = followStatus === "accepted" && rfRes.rows.length > 0;
       isMuted = mRes.rows.length > 0;
     }
+    const sellerDelivery = parseJsonSafe(row.delivery_options, { allowsPickup: true, allowsLocalDelivery: true, pickupSpots: [] });
     const sellerRow = row.s_id ? {
       id: row.s_id,
       shop_name: row.shop_name,
       bio: row.s_bio,
+      shop_story: row.shop_story,
+      craft_materials: row.craft_materials,
+      processing_time: row.processing_time,
+      delivery_options: {
+        allowsPickup: sellerDelivery?.allowsPickup !== false,
+        allowsLocalDelivery: sellerDelivery?.allowsLocalDelivery !== false,
+        pickupSpots: Array.isArray(sellerDelivery?.pickupSpots) ? sellerDelivery.pickupSpots : []
+      },
       campus: row.s_campus,
       location_area: row.s_area,
       location_state: row.s_state,
@@ -9827,13 +10533,18 @@ router2.get("/profiles/:slug", optionalAuth, async (req, res) => {
         status: true,
         isRestricted: true,
         isOwner: false,
+        ...redirectedFromSlug ? { redirectedFromSlug, canonicalSlug: row.profile_slug } : { canonicalSlug: row.profile_slug },
         profile: {
           id: row.id,
           displayName,
           profileSlug: row.profile_slug,
+          canonicalSlug: row.profile_slug,
+          ...redirectedFromSlug ? { redirectedFromSlug } : {},
+          tagline: row.tagline || "",
           role: row.role,
           avatarUrl: row.avatar_url || sellerRow?.logo_url || null,
           coverUrl: row.cover_url || sellerRow?.banner_url || null,
+          locationState: row.location_state || sellerRow?.location_state || "",
           campus: row.campus || sellerRow?.campus || "",
           followersCount: parseInt(String(followersRes.rows[0]?.total || "0"), 10),
           followingCount: parseInt(String(followingRes.rows[0]?.total || "0"), 10),
@@ -9846,7 +10557,8 @@ router2.get("/profiles/:slug", optionalAuth, async (req, res) => {
           products: [],
           reviews: [],
           badges: [],
-          interests: []
+          interests: [],
+          languages: []
         }
       });
     }
@@ -9860,6 +10572,7 @@ router2.get("/profiles/:slug", optionalAuth, async (req, res) => {
     const visibleProds = isOwner || isAdmin ? pRes.rows : activeProds;
     const stats = await computeComputedSellerStats(row, sellerRow, activeProds, pRes.rows);
     const interests = parseJsonSafe(row.interests, []);
+    const languages = parseJsonSafe(row.languages, []);
     const avatarUrl = row.avatar_url || sellerRow?.logo_url || null;
     const coverUrl = row.cover_url || sellerRow?.banner_url || null;
     const mappedProducts = visibleProds.map(
@@ -9891,31 +10604,39 @@ router2.get("/profiles/:slug", optionalAuth, async (req, res) => {
     }
     const completeness = isOwner ? computeProfileCompleteness({
       avatarUrl,
-      coverUrl,
+      tagline: row.tagline,
       bio: row.bio || sellerRow?.bio,
+      locationState: row.location_state || sellerRow?.location_state,
       campus: row.campus || sellerRow?.campus,
       locationArea: row.location_area || sellerRow?.location_area,
       interests,
       isVerifiedEmail: Boolean(row.is_verified_email),
       isSeller: Boolean(sellerRow),
       shopName: sellerRow?.shop_name,
+      shopStory: sellerRow?.shop_story,
       activeProductsCount: activeProds.length
     }) : void 0;
     return res.json({
       status: true,
       isRestricted: false,
       isOwner,
+      ...redirectedFromSlug ? { redirectedFromSlug, canonicalSlug: row.profile_slug } : { canonicalSlug: row.profile_slug },
       profile: {
         id: row.id,
         displayName,
         profileSlug: row.profile_slug,
+        canonicalSlug: row.profile_slug,
+        ...redirectedFromSlug ? { redirectedFromSlug } : {},
+        tagline: row.tagline || "",
         role: row.role,
         avatarUrl,
         coverUrl,
         bio: row.bio || sellerRow?.bio || "",
+        locationState: row.location_state || sellerRow?.location_state || "",
         campus: row.campus || sellerRow?.campus || "",
         locationArea: row.location_area || sellerRow?.location_area || "",
         interests,
+        languages,
         memberSince: row.created_at,
         lastSeenAt: privacySettings.showLastSeen || isOwner || isAdmin ? row.last_seen_at || row.last_login_at || row.created_at : null,
         followStatus,
@@ -9926,6 +10647,7 @@ router2.get("/profiles/:slug", optionalAuth, async (req, res) => {
         whoCanMessage: privacySettings.whoCanMessage,
         showFollowersList: privacySettings.showFollowersList,
         showFollowingList: privacySettings.showFollowingList,
+        ...isOwner ? { privacySettings } : {},
         completeness,
         ...stats,
         products: mappedProducts,
@@ -9934,6 +10656,11 @@ router2.get("/profiles/:slug", optionalAuth, async (req, res) => {
           id: sellerRow.id,
           shopName: sellerRow.shop_name,
           bio: sellerRow.bio || "",
+          shopStory: sellerRow.shop_story || "",
+          craftMaterials: sellerRow.craft_materials || "",
+          processingTime: sellerRow.processing_time || "",
+          deliveryOptions: sellerRow.delivery_options,
+          locationState: sellerRow.location_state || row.location_state || "Lagos",
           campus: sellerRow.campus || "Lagos Mainland",
           locationArea: sellerRow.location_area || "Yaba",
           isVerifiedSeller: stats.isVerifiedSeller,
@@ -9951,11 +10678,11 @@ var profiles_default = router2;
 
 // server/routes/files.ts
 import express3 from "express";
-import crypto12 from "crypto";
+import crypto11 from "crypto";
 init_validation();
 
 // server/lib/fileStorage.ts
-import crypto11 from "crypto";
+import crypto10 from "crypto";
 import sharp from "sharp";
 init_validation();
 var MAX_RAW_UPLOAD_BYTES = 4 * 1024 * 1024;
@@ -10082,7 +10809,7 @@ async function processAndValidateUpload(params) {
       return { valid: false, message: optimized.message };
     }
     const finalBuf = optimized.buf;
-    const sha256 = crypto11.createHash("sha256").update(finalBuf).digest("hex");
+    const sha256 = crypto10.createHash("sha256").update(finalBuf).digest("hex");
     return {
       valid: true,
       mimeType: optimized.mimeType,
@@ -10114,7 +10841,7 @@ async function processAndValidateUpload(params) {
         return { valid: false, message: "Text attachment contains disallowed script/HTML markup." };
       }
     }
-    const sha256 = crypto11.createHash("sha256").update(rawBuf).digest("hex");
+    const sha256 = crypto10.createHash("sha256").update(rawBuf).digest("hex");
     return {
       valid: true,
       mimeType,
@@ -10376,7 +11103,7 @@ router3.post("/files/upload", requireAuth, async (req, res) => {
         usage
       });
     }
-    const fileId = "file_" + crypto12.randomBytes(12).toString("hex");
+    const fileId = "file_" + crypto11.randomBytes(12).toString("hex");
     const isPublic = PUBLIC_PURPOSES.has(purpose);
     const saved = await fileStorage.saveFile({
       id: fileId,
@@ -10548,12 +11275,22 @@ var files_default = router3;
 init_minorSafety();
 validateAppSecret();
 var sendAdminAlert2 = sendAdminAlert;
-runMigration().catch((err) => {
-  console.error("[PostgreSQL Startup Migration Error]:", err.message);
-});
+var IS_PROD2 = process.env.NODE_ENV === "production" || Boolean(process.env.VERCEL);
+if (!isProdRuntime()) {
+  runMigration().catch((err) => {
+    console.error("[PostgreSQL Startup Migration Error]:", err.message);
+  });
+} else {
+  verifyDatabaseSchema().then((status) => {
+    if (!status.ok) {
+      console.error("[PostgreSQL Schema Check Failed]:", status.migrationError || status.error);
+    }
+  }).catch((err) => {
+    console.error("[PostgreSQL Schema Check Error]:", err.message);
+  });
+}
 var app = express4();
 app.use(cookieParser());
-var IS_PROD2 = process.env.NODE_ENV === "production" || Boolean(process.env.VERCEL);
 var PRODUCTION_APP_URL = "https://shopitng.vercel.app";
 var REDIRECT_APP_URL = "https://shop-itng-pied.vercel.app";
 var APP_URL = (process.env.APP_URL || PRODUCTION_APP_URL).replace(/\/$/, "");
@@ -10703,7 +11440,7 @@ function getFlwPublicKey() {
 __name(getFlwPublicKey, "getFlwPublicKey");
 function hashNin(nin) {
   const ninKey = deriveSubKey("nin-hash", 32);
-  return crypto13.createHmac("sha256", ninKey).update(nin.trim()).digest("hex");
+  return crypto12.createHmac("sha256", ninKey).update(nin.trim()).digest("hex");
 }
 __name(hashNin, "hashNin");
 var VALID_EMAIL_TEMPLATES = /* @__PURE__ */ new Set([
@@ -10747,6 +11484,7 @@ router4.get(["/health", "/api/health"], async (_req, res) => {
   const flutterwaveConfigured = Boolean(getFlwSecretKey() && getFlwPublicKey() && getFlwWebhookHash());
   const paymentsEnabledFlag = String(process.env.PAYMENTS_ENABLED || "").toLowerCase() === "true";
   const payoutsEnabledFlag = String(process.env.PAYOUTS_ENABLED || "").toLowerCase() === "true";
+  const migrationError = pgPing.migrationError ? String(pgPing.migrationError).replace(/postgres(ql)?:\/\/[^\s]+/gi, "[redacted-url]").slice(0, 240) : null;
   if (isPgOk && isRedisOk) {
     return res.status(200).json({
       status: "OK",
@@ -10762,6 +11500,10 @@ router4.get(["/health", "/api/health"], async (_req, res) => {
       paymentsEnabled: paymentsEnabledFlag,
       payoutsEnabled: payoutsEnabledFlag,
       schemaOk: Boolean(pgPing.schemaOk),
+      schemaVersion: pgPing.schemaVersion ?? null,
+      expectedSchemaVersion: pgPing.expectedSchemaVersion ?? EXPECTED_SCHEMA_VERSION,
+      migrationError,
+      ...pgPing.missingTables && pgPing.missingTables.length > 0 ? { missingTables: pgPing.missingTables } : {},
       timestamp: (/* @__PURE__ */ new Date()).toISOString()
     });
   }
@@ -10780,6 +11522,9 @@ router4.get(["/health", "/api/health"], async (_req, res) => {
     paymentsEnabled: paymentsEnabledFlag,
     payoutsEnabled: payoutsEnabledFlag,
     schemaOk: Boolean(pgPing.schemaOk),
+    schemaVersion: pgPing.schemaVersion ?? null,
+    expectedSchemaVersion: pgPing.expectedSchemaVersion ?? EXPECTED_SCHEMA_VERSION,
+    migrationError,
     ...pgPing.missingTables && pgPing.missingTables.length > 0 ? { missingTables: pgPing.missingTables } : {},
     ...safeDbError ? { error: safeDbError } : {},
     timestamp: (/* @__PURE__ */ new Date()).toISOString()
@@ -10788,7 +11533,14 @@ router4.get(["/health", "/api/health"], async (_req, res) => {
 router4.get("/platform/config", async (_req, res) => {
   try {
     const config2 = await getAllPlatformConfig();
-    return res.json({ status: true, ...config2 });
+    const paymentsEnabledFlag = String(process.env.PAYMENTS_ENABLED || "").toLowerCase() === "true";
+    const payoutsEnabledFlag = String(process.env.PAYOUTS_ENABLED || "").toLowerCase() === "true";
+    return res.json({
+      status: true,
+      ...config2,
+      paymentsEnabled: paymentsEnabledFlag,
+      payoutsEnabled: payoutsEnabledFlag
+    });
   } catch (err) {
     console.error("[Platform Config Read Error]:", err.message);
     return res.status(500).json({ status: false, message: "Failed to load platform configuration from database." });
@@ -10863,7 +11615,7 @@ router4.post(["/auth/register", "/auth/signup"], async (req, res) => {
       });
     }
     const userRole = role === "seller" ? "seller" : "buyer";
-    const userId = `user_${Date.now()}_${crypto13.randomBytes(4).toString("hex")}`;
+    const userId = `user_${Date.now()}_${crypto12.randomBytes(4).toString("hex")}`;
     const passwordHash = hashPassword(cleanPassword);
     const defaultDisplayName = extractFirstName(cleanName);
     const resolvedCampus = campus ? String(campus).trim() : userRole === "seller" ? "Lagos Mainland" : "";
@@ -10980,7 +11732,7 @@ router4.post(["/auth/register", "/auth/signup"], async (req, res) => {
           `INSERT INTO shopit_notifications (id, user_id, title, message, type, is_read, link, created_at)
            VALUES ($1, $2, $3, $4, 'info', false, '/admin', NOW())`,
           [
-            `notif_new_user_${Date.now()}_${crypto13.randomBytes(3).toString("hex")}`,
+            `notif_new_user_${Date.now()}_${crypto12.randomBytes(3).toString("hex")}`,
             adm.id,
             alertTitle,
             alertMsg
@@ -11428,7 +12180,7 @@ router4.post("/auth/change-email/request-otp", requireAuth, async (req, res) => 
     if (!rl.allowed) {
       return res.status(429).json({ status: false, message: "Too many email change requests. Please wait a few minutes." });
     }
-    const code = String(crypto13.randomInt(1e5, 1e6));
+    const code = String(crypto12.randomInt(1e5, 1e6));
     const codeHash = hashOtp(code);
     await saveHashedOtp(cleanNewEmail, "email_change", codeHash, { userId, oldEmail: uRow.email });
     const rendered = renderTransactionalEmail("email_change", { code, email: cleanNewEmail });
@@ -11542,14 +12294,27 @@ router4.post("/auth/change-email/confirm", requireAuth, async (req, res) => {
     return res.status(500).json({ status: false, message: "Failed to confirm email change." });
   }
 });
+function parseJsonField(val, fallback) {
+  if (val === null || val === void 0) return fallback;
+  if (typeof val === "string") {
+    try {
+      return JSON.parse(val);
+    } catch {
+      return fallback;
+    }
+  }
+  return val;
+}
+__name(parseJsonField, "parseJsonField");
 async function loadHydratedUserProfile(userId) {
   const result = await query(
-    `SELECT u.id, u.email, u.name, u.display_name, u.profile_slug, u.avatar_url, u.cover_url, u.bio,
-            u.campus, u.location_area, u.interests, u.notification_prefs, u.privacy_settings, u.last_seen_at,
+    `SELECT u.id, u.email, u.name, u.display_name, u.profile_slug, u.tagline, u.avatar_url, u.cover_url, u.bio,
+            u.location_state, u.campus, u.location_area, u.interests, u.languages, u.notification_prefs, u.privacy_settings, u.last_seen_at,
             u.role, u.sub_role, u.is_verified_email, u.must_change_password, u.is_banned, u.ban_reason,
             u.age, u.has_guardian_consent, u.guardian_name, u.created_at, u.last_login_at, u.deleted_at,
-            s.id as seller_id, s.shop_name, s.bio as s_bio, s.campus as s_campus, s.location_area as s_area,
-            s.logo_url as s_logo_url, s.banner_url as s_banner_url, s.is_verified_seller as seller_is_verified,
+            s.id as seller_id, s.shop_name, s.bio as s_bio, s.shop_story, s.craft_materials, s.processing_time, s.delivery_options,
+            s.location_state as s_location_state, s.campus as s_campus, s.location_area as s_area,
+            s.vacation_mode, s.logo_url as s_logo_url, s.banner_url as s_banner_url, s.is_verified_seller as seller_is_verified,
             s.verification_status as seller_verification_status,
             s.verified_legal_name, s.verified_nin_last4, s.verified_at
      FROM shopit_users u
@@ -11567,18 +12332,24 @@ async function loadHydratedUserProfile(userId) {
   const currentStatus = isVerified ? "verified" : row.seller_verification_status || "not_started";
   const isMinor = row.age !== null && row.age !== void 0 && Number(row.age) < 18;
   const displayName = row.display_name || extractFirstName(row.name || "Member");
+  const parsedInterests = parseJsonField(row.interests, []);
+  const parsedLanguages = parseJsonField(row.languages, []);
+  const parsedDeliveryOptions = parseJsonField(row.delivery_options, { allowsPickup: true, allowsLocalDelivery: true, pickupSpots: [] });
   const sanitizedUser = {
     id: row.id,
     email: row.email,
     name: row.name,
     displayName,
     profileSlug: row.profile_slug || row.id,
+    tagline: row.tagline || "",
     avatarUrl: row.avatar_url || row.s_logo_url || void 0,
     coverUrl: row.cover_url || row.s_banner_url || void 0,
     bio: row.bio || row.s_bio || "",
+    locationState: row.location_state || row.s_location_state || void 0,
     campus: row.campus || row.s_campus || void 0,
     locationArea: row.location_area || row.s_area || void 0,
-    interests: Array.isArray(row.interests) ? row.interests : [],
+    interests: Array.isArray(parsedInterests) ? parsedInterests : [],
+    languages: Array.isArray(parsedLanguages) ? parsedLanguages : [],
     notificationPrefs: sanitizeNotificationPrefs(row.notification_prefs, DEFAULT_NOTIFICATION_PREFS),
     privacySettings: sanitizePrivacySettings(
       row.privacy_settings,
@@ -11608,8 +12379,18 @@ async function loadHydratedUserProfile(userId) {
       verificationStatus: currentStatus,
       isVerifiedSeller: isVerified,
       bio: row.s_bio || row.bio || "",
+      shopStory: row.shop_story || "",
+      craftMaterials: row.craft_materials || "",
+      processingTime: row.processing_time || "",
+      deliveryOptions: {
+        allowsPickup: parsedDeliveryOptions?.allowsPickup !== false,
+        allowsLocalDelivery: parsedDeliveryOptions?.allowsLocalDelivery !== false,
+        pickupSpots: Array.isArray(parsedDeliveryOptions?.pickupSpots) ? parsedDeliveryOptions.pickupSpots : []
+      },
+      locationState: row.s_location_state || row.location_state || "Lagos",
       campus: row.s_campus || row.campus || "Lagos Mainland",
       locationArea: row.s_area || row.location_area || "Yaba",
+      vacationMode: Boolean(row.vacation_mode),
       logoUrl: row.s_logo_url || row.avatar_url || void 0,
       bannerUrl: row.s_banner_url || row.cover_url || void 0,
       verifiedLegalName: row.verified_legal_name,
@@ -11827,7 +12608,7 @@ router4.patch("/admin/users/:id/moderate-profile", requireModerator, async (req,
         `INSERT INTO shopit_notifications (id, user_id, title, message, type, is_read, link, created_at)
          VALUES ($1, $2, 'Profile Moderated', $3, 'warning', false, '/profile', NOW())`,
         [
-          `notif_modprof_${Date.now()}_${crypto13.randomBytes(3).toString("hex")}`,
+          `notif_modprof_${Date.now()}_${crypto12.randomBytes(3).toString("hex")}`,
           targetId,
           `A moderator updated your profile (${action.replace("_", " ")}): ${reason}`
         ]
@@ -12763,7 +13544,7 @@ router4.get("/admin/export-data", requireAdmin, async (req, res) => {
       version: "3.0",
       exportedAt: (/* @__PURE__ */ new Date()).toISOString(),
       exportedBy: req.user.email,
-      platform: "Shop It Nigeria (TEEDS)",
+      platform: OPERATOR_INFO.platformLabel,
       summary: {
         totalUsers: usersRes.rows.length,
         totalSellers: sellersRes.rows.length,
@@ -13038,9 +13819,9 @@ router4.post("/payments/initialize", requirePaymentsEnabled, requireAuth, async 
         }
       }
       const grandTotalKobo = Math.max(1e4, subtotalKobo + serviceFeeKobo + deliveryTotalKobo - discountTotalKobo);
-      const orderId = `ORD-${Date.now()}-${crypto13.randomBytes(3).toString("hex").toUpperCase()}`;
-      const reference = `SHOPIT_${Date.now()}_${crypto13.randomBytes(4).toString("hex").toUpperCase()}`;
-      const handshakeOtp = String(crypto13.randomInt(1e3, 1e4));
+      const orderId = `ORD-${Date.now()}-${crypto12.randomBytes(3).toString("hex").toUpperCase()}`;
+      const reference = `SHOPIT_${Date.now()}_${crypto12.randomBytes(4).toString("hex").toUpperCase()}`;
+      const handshakeOtp = String(crypto12.randomInt(1e3, 1e4));
       const buyerDisplayRes = await client.query("SELECT display_name, name FROM shopit_users WHERE id = $1 LIMIT 1", [user.userId]);
       const buyerDisplayLabel = buyerDisplayRes.rows[0]?.display_name || extractFirstName(buyerDisplayRes.rows[0]?.name || user.name || "Buyer");
       await client.query(
@@ -13120,7 +13901,7 @@ router4.post("/payments/initialize", requirePaymentsEnabled, requireAuth, async 
             name: user.name || "Shop It Buyer"
           },
           customizations: {
-            title: "Shop It Escrow Checkout",
+            title: "Shop It Checkout",
             description: `Order #${initializedOrder.orderId} (${campus || "Nigeria"})`
           },
           meta: {
@@ -13315,7 +14096,7 @@ router4.get("/payments/verify/:reference", requirePaymentsEnabled, requireAuth, 
       amountNaira: koboToNaira(confirmedAmountKobo),
       currency: "NGN",
       channel,
-      message: "Payment verified with Flutterwave and committed to escrow."
+      message: "Payment verified with Flutterwave and held for order delivery."
     });
   } catch (err) {
     console.error("[Payment Verify Error]:", err.message);
@@ -13421,7 +14202,7 @@ router4.post("/payments/refund", requirePaymentsEnabled, requireAdmin, async (re
             `INSERT INTO shopit_order_status_history (id, order_id, previous_status, new_status, changed_by, notes, created_at)
              VALUES ($1, $2, $3, 'refunded', $4, $5, NOW())`,
             [
-              `osh_ref_${Date.now()}_${crypto13.randomBytes(3).toString("hex")}`,
+              `osh_ref_${Date.now()}_${crypto12.randomBytes(3).toString("hex")}`,
               order.id,
               prevStatus,
               user.email,
@@ -13508,7 +14289,7 @@ router4.post("/payments/refund", requirePaymentsEnabled, requireAdmin, async (re
       ip: req.ip,
       userAgent: req.get("user-agent")
     });
-    return res.json({ status: true, message: "Refund processed atomically and escrow debited.", data: refundData.data });
+    return res.json({ status: true, message: "Refund processed atomically.", data: refundData.data });
   } catch (err) {
     console.error("[Refund Error]:", err.message);
     return res.status(500).json({ status: false, message: `Refund processing failed: ${err.message}` });
@@ -13587,7 +14368,7 @@ router4.post("/payments/transfer", requirePayoutsEnabled, requireAuth, async (re
     const amountKobo = amountNum * 100;
     const feeKobo = 0;
     const totalDeductionKobo = amountKobo;
-    const transferCode = `TRF_${Date.now()}_${crypto13.randomBytes(4).toString("hex").toUpperCase()}`;
+    const transferCode = `TRF_${Date.now()}_${crypto12.randomBytes(4).toString("hex").toUpperCase()}`;
     const debitState = await withSellerWithdrawalLock(
       targetSellerId,
       () => withTransaction(async (client) => {
@@ -13681,7 +14462,7 @@ router4.post("/payments/transfer", requirePayoutsEnabled, requireAuth, async (re
             statusCode: 400
           });
         }
-        const ledgerId = `LEDGER-WTD-${Date.now()}-${crypto13.randomBytes(3).toString("hex")}`;
+        const ledgerId = `LEDGER-WTD-${Date.now()}-${crypto12.randomBytes(3).toString("hex")}`;
         await client.query(
           `INSERT INTO shopit_ledger_entries (
           id, wallet_id, type, balance_type, status,
@@ -13781,7 +14562,7 @@ router4.post("/payments/transfer", requirePayoutsEnabled, requireAuth, async (re
             ) VALUES ($1, $2, 'refund', 'available', 'completed', $3, 0, $4, $5, $6, $7, NOW())
             ON CONFLICT (idempotency_key) DO NOTHING`,
             [
-              `LEDGER-WTD-REV-${Date.now()}-${crypto13.randomBytes(3).toString("hex")}`,
+              `LEDGER-WTD-REV-${Date.now()}-${crypto12.randomBytes(3).toString("hex")}`,
               debitState.seller.id,
               totalDeductionKobo,
               restoredAvail,
@@ -13955,7 +14736,7 @@ router4.post("/auth/send-otp", async (req, res) => {
         });
       }
     }
-    const code = String(crypto13.randomInt(1e5, 1e6));
+    const code = String(crypto12.randomInt(1e5, 1e6));
     const codeHash = hashOtp(code);
     await saveHashedOtp(cleanEmail, cleanPurpose, codeHash, metadata);
     await recordRateLimit(cleanEmail, deviceId);
@@ -14075,7 +14856,7 @@ router4.post("/reports", optionalAuth, async (req, res) => {
     if (!targetType || !targetId || !reason) {
       return res.status(400).json({ status: false, message: "targetType, targetId, and reason are required" });
     }
-    const reportId = `REP_${Date.now()}_${crypto13.randomInt(1e3, 1e4)}`;
+    const reportId = `REP_${Date.now()}_${crypto12.randomInt(1e3, 1e4)}`;
     const resolvedEmail = req.user?.email || reporterEmail || void 0;
     let finalDetails = String(details || "").trim();
     if (String(targetType) === "chat" && req.user) {
@@ -14239,7 +15020,7 @@ router4.post(
         return res.status(429).json({ status: false, message: "Too many verification attempts today. Please try again later." });
       }
       const ninLast4 = cleanNin.slice(-4);
-      const reqId = `VERIF-${Date.now()}-${crypto13.randomBytes(2).toString("hex")}`;
+      const reqId = `VERIF-${Date.now()}-${crypto12.randomBytes(2).toString("hex")}`;
       await query(
         `INSERT INTO shopit_verifications (
           id, seller_id, user_id, shop_name, owner_name, id_type, id_number_masked, full_nin_last4,
@@ -14313,7 +15094,7 @@ router4.post(
         });
       }
       if (!ndpaConsentSigned) {
-        return res.status(400).json({ status: false, message: "NDPA 2023 consent is required." });
+        return res.status(400).json({ status: false, message: "Data protection consent is required." });
       }
       const maxDocChars = 7 * 1024 * 1024;
       if (String(idDocumentPhoto).length > maxDocChars || String(selfiePhoto).length > maxDocChars || guardianIdDocumentPhoto && String(guardianIdDocumentPhoto).length > maxDocChars) {
@@ -14365,7 +15146,7 @@ router4.post(
       const selfieDocUrl = `/api/verification/document/${encodeURIComponent(selfieDocId)}`;
       const apiResult = await verifyWithNigerianIdentityApi(cleanNin, fullName, dateOfBirth);
       const finalStatus = apiResult.success && apiResult.status === "match" && (Number(livenessScore) || 0) >= 70 ? "verified" : "pending";
-      const submissionId = `VERIF_${Date.now()}_${crypto13.randomBytes(3).toString("hex")}`;
+      const submissionId = `VERIF_${Date.now()}_${crypto12.randomBytes(3).toString("hex")}`;
       const fullNinLast4 = cleanNin.slice(-4);
       const maskedNin = `***-***-${fullNinLast4}`;
       await withTransaction(async (client) => {
@@ -14685,13 +15466,13 @@ router4.post(
         ip: req.ip,
         userAgent: req.get("user-agent")
       });
-      return res.json({ status: true, message: "Identification documents permanently purged under NDPA 2023." });
+      return res.json({ status: true, message: "Identification documents permanently purged." });
     } catch (err) {
       return res.status(500).json({ status: false, message: err.message });
     }
   }
 );
-router4.all(["/cron/daily", "/cron/escrow"], requireCronSecret, async (req, res) => {
+router4.all(["/cron/daily", "/cron/escrow"], async (req, res) => {
   const rl = await checkAndRecordRateLimit(`cron_daily:${req.ip || "unknown"}`, 30, 60 * 1e3);
   if (!rl.allowed) {
     res.setHeader("Retry-After", String(rl.retryAfterSeconds || 60));

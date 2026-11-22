@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { AlertTriangle, X, ShieldAlert, Upload, CheckCircle2, Lock, Loader2 } from 'lucide-react';
 import { uploadFileToServer } from '../utils/fileUpload';
+import { getTrustCopy } from '../../shared/trustAndLegalCopy';
 
 export const ReportProblemModal: React.FC = () => {
   const {
@@ -11,7 +12,9 @@ export const ReportProblemModal: React.FC = () => {
     orders,
     openDispute,
     notify,
+    paymentsEnabled,
   } = useApp();
+  const trustCopy = getTrustCopy(paymentsEnabled);
 
   const [reasonCategory, setReasonCategory] = useState<string>('damaged_in_transit');
   const [description, setDescription] = useState('');
@@ -69,7 +72,7 @@ export const ReportProblemModal: React.FC = () => {
             </div>
             <div>
               <h3 className="text-base sm:text-lg font-bold font-heading leading-tight text-white">
-                Open Escrow Dispute
+                {trustCopy.reportHeaderTitle}
               </h3>
               <p className="text-xs text-stone-300">
                 Order #{order.id} · ₦{order.grandTotal.toLocaleString()}
@@ -88,7 +91,7 @@ export const ReportProblemModal: React.FC = () => {
         <div className="px-4 py-2.5 bg-[#ecf5f0] border-b border-[#bce0cc] flex items-center gap-2 text-xs text-[#123524] font-medium">
           <Lock className="w-4 h-4 text-[#123524] shrink-0" />
           <span>
-            Escrow protection active: Funds are frozen immediately and will not be released to the seller until Admin Support resolves this dispute.
+            {trustCopy.reportBannerText}
           </span>
         </div>
 
@@ -194,7 +197,10 @@ export const ReportProblemModal: React.FC = () => {
                   onChange={() => setDesiredOutcome('refund')}
                   className="accent-[#f95700]"
                 />
-                <span>Full Escrow Refund (₦{order.grandTotal.toLocaleString()})</span>
+                <span>
+                  {trustCopy.reportRefundOptionLabel}
+                  {paymentsEnabled ? ` (₦${order.grandTotal.toLocaleString()})` : ''}
+                </span>
               </label>
               <label className="flex items-center gap-2 cursor-pointer text-xs sm:text-sm text-stone-800">
                 <input
@@ -223,7 +229,7 @@ export const ReportProblemModal: React.FC = () => {
               disabled={!description.trim() || isUploadingEvidence}
               className="px-5 py-2.5 rounded-xl bg-[#f95700] hover:bg-[#e04b00] text-white font-semibold text-xs transition-all shadow-sm active:scale-[0.98] disabled:opacity-50"
             >
-              {isUploadingEvidence ? 'Uploading Evidence...' : 'Submit & Freeze Escrow'}
+              {isUploadingEvidence ? 'Uploading Evidence...' : trustCopy.reportSubmitLabel}
             </button>
           </div>
         </form>

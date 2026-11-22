@@ -114,7 +114,7 @@ async function main() {
       '/api/payments/transfer',
       { amount: 5000, payoutAccountId: 'acc_123', otpCode: '123456' },
       undefined,
-      'Payouts are currently disabled by system safety switch'
+      'Seller withdrawals are currently paused by safety switch'
     )
   );
 

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useApp } from '../context/AppContext';
 import { UserRole } from '../types';
 import { NIGERIAN_STATES } from '../data/nigerianLocations';
+import { getTrustCopy } from '../../shared/trustAndLegalCopy';
 import {
   X,
   ShieldCheck,
@@ -41,7 +42,9 @@ export const AuthModal: React.FC = () => {
     login,
     notify,
     setActiveView,
+    paymentsEnabled,
   } = useApp();
+  const trustCopy = getTrustCopy(paymentsEnabled);
 
   // Login form state
   const [loginEmail, setLoginEmail] = useState('');
@@ -957,7 +960,7 @@ export const AuthModal: React.FC = () => {
               <p className="text-xs text-[#71717A] mt-1">
                 {role === 'seller'
                   ? 'Step 1 of 3: Account details -> Step 2: Email OTP -> Step 3: Shop setup.'
-                  : 'Marketplace for Nigerian teens and youth with escrow payment protection.'}
+                  : trustCopy.authTagline}
               </p>
             </div>
 

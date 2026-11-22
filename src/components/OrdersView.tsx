@@ -3,6 +3,7 @@ import { useApp } from '../context/AppContext';
 import { Order, OrderStatus } from '../types';
 import { formatNaira } from '../utils/pricing';
 import { safeStorageGet } from '../utils/safeStorage';
+import { getTrustCopy } from '../../shared/trustAndLegalCopy';
 import {
   Package,
   Clock,
@@ -42,7 +43,9 @@ export const OrdersView: React.FC = () => {
     notify,
     openChat,
     openReportProblemModal,
+    paymentsEnabled,
   } = useApp();
+  const trustCopy = getTrustCopy(paymentsEnabled);
 
   // Modal states for Dispute, Review, Safe Pass Receipt & Timeline Tracking
   const [selectedDisputeOrder, setSelectedDisputeOrder] = useState<Order | null>(null);
@@ -127,7 +130,10 @@ export const OrdersView: React.FC = () => {
       case 'pending_payment':
         return { label: 'Awaiting Payment', color: 'bg-amber-50 text-amber-800 border-amber-200' };
       case 'paid':
-        return { label: 'Paid · In Escrow', color: 'bg-blue-50 text-blue-800 border-blue-200' };
+        return {
+          label: paymentsEnabled ? 'Paid · Payment Held' : 'Paid · Confirmed',
+          color: 'bg-blue-50 text-blue-800 border-blue-200',
+        };
       case 'packed':
         return { label: 'Packed & Verified', color: 'bg-amber-50 text-amber-800 border-amber-200' };
       case 'shipped':
@@ -135,13 +141,19 @@ export const OrdersView: React.FC = () => {
       case 'delivered':
         return { label: 'Delivered · Awaiting Confirmation', color: 'bg-emerald-50 text-emerald-800 border-emerald-300 font-bold' };
       case 'completed':
-        return { label: 'Completed · Escrow Released', color: 'bg-slate-100 text-slate-800 border-slate-200' };
+        return {
+          label: paymentsEnabled ? 'Completed · Payment Released' : 'Completed',
+          color: 'bg-slate-100 text-slate-800 border-slate-200',
+        };
       case 'refunded':
         return { label: 'Refunded', color: 'bg-rose-50 text-rose-800 border-rose-200' };
       case 'cancelled':
         return { label: 'Cancelled & Refunded', color: 'bg-rose-50 text-rose-800 border-rose-200' };
       case 'disputed':
-        return { label: 'Disputed · Escrow Frozen', color: 'bg-rose-100 text-rose-900 border-rose-300 font-bold' };
+        return {
+          label: paymentsEnabled ? 'Disputed · Payout Paused' : 'Disputed · Under Review',
+          color: 'bg-rose-100 text-rose-900 border-rose-300 font-bold',
+        };
     }
   };
 
@@ -183,10 +195,10 @@ export const OrdersView: React.FC = () => {
             <span>Back to Marketplace</span>
           </button>
           <h1 className="text-xl sm:text-2xl font-black text-slate-900 dark:text-white">
-            My Orders & Escrow Tracking
+            {trustCopy.ordersHeaderTitle}
           </h1>
           <p className="text-xs text-slate-500 dark:text-[#A1A1AA] mt-0.5">
-            Track handmade shipments, confirm delivery to release funds, or report an issue.
+            {trustCopy.ordersHeaderSubtitle}
           </p>
         </div>
 
@@ -237,7 +249,7 @@ export const OrdersView: React.FC = () => {
                 Payment Verified by Flutterwave
               </span>
               <h3 className="font-bold text-sm text-slate-900 dark:text-white">
-                Transaction Confirmed · Funds Secured in Escrow
+                Transaction Confirmed · Payment Recorded
               </h3>
               <p className="text-slate-600 dark:text-slate-300">
                 Reference: <code className="font-mono bg-white dark:bg-stone-800 px-1.5 py-0.5 rounded border border-emerald-200">{verifiedPaymentBanner.reference}</code>
@@ -367,10 +379,10 @@ export const OrdersView: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Live Order Progress Tracker (Placed -> Escrow Held -> Pickup Ready -> Completed) */}
-                <OrderProgressTracker order={order} viewerRole="buyer" />
+                {/* Live Order Progress Tracker */}
+                <OrderProgressTracker order={order} viewerRole="buyer" paymentsEnabled={paymentsEnabled} />
 
-                {/* Handshake PIN for Campus Handover (Phase 4) */}
+                {/* Handshake PIN for Campus Handover */}
                 {order.status !== 'cancelled' && order.status !== 'completed' && (
                   <div className="p-3 bg-orange-50 dark:bg-[#1E2028] border border-orange-200 dark:border-[#FF6B00]/30 rounded-xl flex items-center justify-between text-xs">
                     <div className="flex items-center gap-2">
@@ -378,7 +390,7 @@ export const OrdersView: React.FC = () => {
                       <div>
                         <span className="font-bold text-slate-900 dark:text-white">Delivery Handshake PIN:</span>
                         <p className="text-[11px] text-slate-600 dark:text-[#A1A1AA]">
-                          Show this 4-digit code to seller or runner at your area safe spot upon craft inspection to unlock escrow.
+                          Show this 4-digit code to the seller or runner at your campus pickup spot upon craft inspection to complete the order.
                         </p>
                       </div>
                     </div>
@@ -417,7 +429,10 @@ export const OrdersView: React.FC = () => {
                     <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
                     <div>
                       <strong>Dispute Under Review: </strong>
-                      {order.disputeReason || 'Buyer reported an issue with this handmade order.'} Escrow payment is frozen safely until our student moderation team resolves the case.
+                      {order.disputeReason || 'Buyer reported an issue with this handmade order.'}{' '}
+                      {paymentsEnabled
+                        ? 'Payment release is paused while moderation reviews the case.'
+                        : 'Order review is in progress with moderation.'}
                     </div>
                   </div>
                 )}
@@ -472,7 +487,7 @@ export const OrdersView: React.FC = () => {
                     <strong className="text-slate-800">{order.deliveryArea}</strong>
                   </div>
                   <div className="text-right">
-                    <span>Total Paid (Escrow): </span>
+                    <span>{paymentsEnabled ? 'Total Paid: ' : 'Order Total: '}</span>
                     <strong className="text-base text-slate-900 font-mono-numbers">
                       {formatNaira(order.grandTotal)}
                     </strong>
@@ -508,7 +523,7 @@ export const OrdersView: React.FC = () => {
                     className="px-3.5 py-2 text-xs font-black text-stone-900 bg-white hover:bg-stone-50 rounded-xl transition-all border-2 border-[#111111] shadow-[0_2px_0_#111111] active:translate-y-0.5 flex items-center gap-1.5"
                   >
                     <FileText className="w-3.5 h-3.5 text-[#FF6B00]" />
-                    <span>Safe Pass & Receipt</span>
+                    <span>Order Pass & Receipt</span>
                   </button>
 
                   {/* Chat with Artisan */}
@@ -537,7 +552,7 @@ export const OrdersView: React.FC = () => {
                       className="px-4 py-2 bg-[#9FE870] hover:bg-[#aef084] text-[#111111] text-xs font-black rounded-xl transition-all border-2 border-[#111111] shadow-[0_3px_0_#111111] active:translate-y-0.5 active:shadow-[0_1px_0_#111111] flex items-center gap-1.5"
                     >
                       <CheckCircle2 className="w-4 h-4 text-[#111111]" />
-                      <span>Item Received · Release Payment</span>
+                      <span>{paymentsEnabled ? 'Item Received · Release Payment' : 'Confirm Item Received'}</span>
                     </button>
                   )}
 
@@ -587,7 +602,9 @@ export const OrdersView: React.FC = () => {
               Open Dispute on Order #{selectedDisputeOrder.id}
             </h3>
             <p className="text-xs text-slate-600">
-              Money remains safely held in escrow. Our campus finance and moderation team will contact you and the seller within 24 hours.
+              {paymentsEnabled
+                ? 'Held funds do not release while a dispute is open. Our moderation team will review details from both sides.'
+                : 'Our moderation team will review details from both sides.'}
             </p>
             <form onSubmit={handleDisputeSubmit} className="space-y-4 text-xs">
               <div>
@@ -616,7 +633,7 @@ export const OrdersView: React.FC = () => {
                   type="submit"
                   className="px-4 py-2 bg-rose-600 text-white font-bold rounded-xl hover:bg-rose-700"
                 >
-                  Submit Dispute (Freeze Funds)
+                  Submit Dispute
                 </button>
               </div>
             </form>

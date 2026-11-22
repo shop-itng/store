@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
+import { getTrustCopy } from '../../shared/trustAndLegalCopy';
 import {
   Send,
   Lock,
@@ -300,7 +301,9 @@ export const LockedChatView: React.FC = () => {
       msg.presetOffer.price !== targetProduct.sellerPrice
     ) {
       notify(
-        `Added to bag! Escrow checkout uses the verified listing price (₦${targetProduct.displayPrice.toLocaleString()}). Ask the seller to update the listing price if a discount was agreed.`,
+        paymentsEnabled
+          ? `Added to bag! Checkout uses the verified listing price (₦${targetProduct.displayPrice.toLocaleString()}). Ask the seller to update the listing price if a discount was agreed.`
+          : `Added to bag at the listing price (₦${targetProduct.displayPrice.toLocaleString()}). You can arrange directly with the seller here in chat.`,
         'info'
       );
     }
@@ -324,11 +327,13 @@ export const LockedChatView: React.FC = () => {
     }
   };
 
+  const trustCopy = getTrustCopy(paymentsEnabled);
+
   // Quick message chips without numbers
   const quickMessages = [
     'Is this item still available?',
     'Can you deliver to my area?',
-    'I want to pay with Escrow protection',
+    trustCopy.chatQuickActionLine,
     'Item received in good condition, thanks!',
   ];
 
@@ -349,7 +354,7 @@ export const LockedChatView: React.FC = () => {
 
         <div className="flex items-center gap-1 text-[11px] font-bold text-[#111111] bg-[#9FE870] px-3 py-1 rounded-full shadow-2xs">
           <ShieldCheck className="w-3.5 h-3.5 text-[#111111]" />
-          <span>Escrow Protected Chat</span>
+          <span>{trustCopy.chatHeaderBadge}</span>
         </div>
       </div>
 
@@ -428,7 +433,7 @@ export const LockedChatView: React.FC = () => {
                 <MessageSquare className="w-8 h-8 text-[#D4D4D8] dark:text-[#3F3F46] mx-auto mb-2" />
                 <p className="font-bold text-[#111111] dark:text-white">No active chats yet</p>
                 <p className="text-[11px] text-[#71717A] dark:text-[#A1A1AA] mt-1">
-                  Click &ldquo;Ask Seller&rdquo; on any item or shop to start an escrow-protected chat.
+                  {trustCopy.chatEmptyHint}
                 </p>
               </div>
             )}
@@ -637,7 +642,7 @@ export const LockedChatView: React.FC = () => {
                   {/* Summary & Submit */}
                   <div className="pt-2 border-t border-[#FED7AA] dark:border-[#27272A] flex items-center justify-between">
                     <div className="text-xs">
-                      <span className="text-[#71717A] dark:text-[#A1A1AA]">Total Escrow Offer: </span>
+                      <span className="text-[#71717A] dark:text-[#A1A1AA]">{trustCopy.chatOfferTotalLabel} </span>
                       <strong className="text-[#111111] dark:text-white text-sm font-black">
                         ₦{(selectedPrice * selectedQuantity).toLocaleString()}
                       </strong>
@@ -814,7 +819,7 @@ export const LockedChatView: React.FC = () => {
                           >
                             <div className="flex items-center justify-between mb-1 gap-3">
                               <span className="font-black text-[10px] uppercase tracking-wider text-[#FF6B00]">
-                                Official Escrow Offer
+                                {trustCopy.chatOfferCardHeader}
                               </span>
                               <span className="font-black text-xs">
                                 ₦{(msg.presetOffer.price * msg.presetOffer.quantity).toLocaleString()}
@@ -830,7 +835,7 @@ export const LockedChatView: React.FC = () => {
                                 className="mt-2 w-full py-2 bg-[#FF6B00] hover:bg-[#ff7a1a] text-[#111111] text-[11px] font-black rounded-lg transition-all border-2 border-[#111111] shadow-[0_2px_0_#111111] active:translate-y-0.5 flex items-center justify-center gap-1.5"
                               >
                                 <ShieldCheck className="w-3.5 h-3.5 text-[#111111]" />
-                                <span>Accept &amp; Pay with Escrow</span>
+                                <span>{trustCopy.chatOfferAcceptLabel}</span>
                               </button>
                             )}
                           </div>

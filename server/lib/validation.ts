@@ -1,27 +1,28 @@
 import crypto from 'crypto';
 import { MINOR_SAFETY_RULES } from '../config/minorSafety.js';
+import {
+  PROFILE_INTERESTS,
+  ALLOWED_LANGUAGES,
+  PROCESSING_TIME_OPTIONS,
+  DEFAULT_AVATAR_PRESETS,
+  MAX_TAGLINE_LENGTH,
+  MAX_BIO_LENGTH,
+  MAX_SHOP_STORY_LENGTH,
+  MAX_CRAFT_MATERIALS_LENGTH,
+} from '../../shared/profileOptions.js';
 
-export const PROFILE_INTERESTS = [
-  'Waist Beads & Jewelry',
-  'Crochet & Yarn',
-  'Perfume Oils & Scents',
-  'Thrift & Fashion',
-  'Room Decor & Candles',
-  'Art & Illustration',
-  'Phone Cases & Tech Crafts',
-  'Hair Accessories',
-  'Leather & Bags',
-  'Stationery & Gifts',
-] as const;
+export {
+  PROFILE_INTERESTS,
+  ALLOWED_LANGUAGES,
+  PROCESSING_TIME_OPTIONS,
+  DEFAULT_AVATAR_PRESETS,
+  MAX_TAGLINE_LENGTH,
+  MAX_BIO_LENGTH,
+  MAX_SHOP_STORY_LENGTH,
+  MAX_CRAFT_MATERIALS_LENGTH,
+};
 
-export const ALLOWED_AVATAR_PRESETS = [
-  '/avatars/avatar-1.svg',
-  '/avatars/avatar-2.svg',
-  '/avatars/avatar-3.svg',
-  '/avatars/avatar-4.svg',
-  '/avatars/avatar-5.svg',
-  '/avatars/avatar-6.svg',
-] as const;
+export const ALLOWED_AVATAR_PRESETS = DEFAULT_AVATAR_PRESETS.map(p => p.url);
 
 export interface NotificationPrefs {
   emailOrders: boolean;
@@ -131,9 +132,28 @@ export async function generateUniqueProfileSlug(
 
   while (counter <= 200) {
     const res = excludeUserId
-      ? await queryFn('SELECT id FROM shopit_users WHERE profile_slug = $1 AND id != $2 LIMIT 1', [candidate, excludeUserId])
-      : await queryFn('SELECT id FROM shopit_users WHERE profile_slug = $1 LIMIT 1', [candidate]);
+      ? await queryFn('SELECT id FROM shopit_users WHERE LOWER(profile_slug) = LOWER($1) AND id != $2 LIMIT 1', [
+          candidate,
+          excludeUserId,
+        ])
+      : await queryFn('SELECT id FROM shopit_users WHERE LOWER(profile_slug) = LOWER($1) LIMIT 1', [candidate]);
+    let histTaken = false;
     if (res.rows.length === 0) {
+      try {
+        const histRes = excludeUserId
+          ? await queryFn(
+              'SELECT slug FROM shopit_profile_slug_history WHERE LOWER(slug) = LOWER($1) AND user_id != $2 LIMIT 1',
+              [candidate, excludeUserId]
+            )
+          : await queryFn('SELECT slug FROM shopit_profile_slug_history WHERE LOWER(slug) = LOWER($1) LIMIT 1', [
+              candidate,
+            ]);
+        histTaken = histRes.rows.length > 0;
+      } catch {
+        histTaken = false;
+      }
+    }
+    if (res.rows.length === 0 && !histTaken) {
       return candidate;
     }
     candidate = `${baseSlug}-${counter}`;
@@ -141,6 +161,46 @@ export async function generateUniqueProfileSlug(
   }
 
   return `${baseSlug}-${crypto.randomBytes(2).toString('hex')}`;
+}
+
+export interface DeliveryOptionsConfig {
+  allowsPickup: boolean;
+  allowsLocalDelivery: boolean;
+  pickupSpots: string[];
+}
+
+export function sanitizeDeliveryOptions(
+  input: unknown
+): { valid: true; value: DeliveryOptionsConfig } | { valid: false; message: string } {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return { valid: false, message: 'Delivery options must be a valid object.' };
+  }
+  const src = input as Record<string, any>;
+  const allowsPickup = src.allowsPickup !== undefined ? Boolean(src.allowsPickup) : true;
+  const allowsLocalDelivery = src.allowsLocalDelivery !== undefined ? Boolean(src.allowsLocalDelivery) : true;
+
+  const rawSpots = Array.isArray(src.pickupSpots) ? src.pickupSpots : [];
+  const pickupSpots: string[] = [];
+  for (const item of rawSpots.slice(0, 5)) {
+    const spot = String(item || '').trim().replace(/\s+/g, ' ').slice(0, 80);
+    if (!spot) continue;
+    const contact = containsForbiddenContactInfo(spot);
+    if (contact.blocked) {
+      return { valid: false, message: `Pickup spot "${spot}": ${contact.reason}` };
+    }
+    if (!pickupSpots.includes(spot)) {
+      pickupSpots.push(spot);
+    }
+  }
+
+  return {
+    valid: true,
+    value: {
+      allowsPickup,
+      allowsLocalDelivery,
+      pickupSpots,
+    },
+  };
 }
 
 /**

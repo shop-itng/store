@@ -1,5 +1,6 @@
 import React from 'react';
 import { useApp } from '../context/AppContext';
+import { getTrustCopy } from '../../shared/trustAndLegalCopy';
 import { ShieldCheck, MapPin, Zap, Lock, LogOut, User, Sun, Moon } from 'lucide-react';
 
 export const RoleSwitcherBar: React.FC = () => {
@@ -14,7 +15,9 @@ export const RoleSwitcherBar: React.FC = () => {
     openAuthModal,
     theme,
     toggleTheme,
+    paymentsEnabled,
   } = useApp();
+  const trustCopy = getTrustCopy(paymentsEnabled);
 
   return (
     <div className="bg-[#111111] text-[#A1A1AA] text-xs py-1.5 px-3 sm:px-6 border-b border-[#27272A] w-full max-w-full overflow-hidden">
@@ -22,8 +25,8 @@ export const RoleSwitcherBar: React.FC = () => {
         <div className="flex items-center gap-2 min-w-0 shrink">
           <span className="flex items-center gap-1.5 text-white font-bold text-[10px] sm:text-[11px] shrink-0">
             <ShieldCheck className="w-3.5 h-3.5 text-[#9FE870] shrink-0" />
-            <span className="hidden xs:inline">Shop It Escrow Protected</span>
-            <span className="xs:hidden">Escrow Protected</span>
+            <span className="hidden xs:inline">{trustCopy.topBarBadgeLong}</span>
+            <span className="xs:hidden">{trustCopy.topBarBadgeShort}</span>
           </span>
 
           <span className="text-[#3F3F46] hidden sm:inline">|</span>

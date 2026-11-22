@@ -425,15 +425,9 @@ async function main() {
       assert.strictEqual(otpRes.status, 400);
     });
 
-    // Unified idempotent CRON_SECRET-protected daily cron endpoint check
-    await test('C8: /api/cron/daily rejects unauthorized (401) and runs idempotently with CRON_SECRET (200)', async () => {
-      const unauth = await fetch(`${baseUrl}/api/cron/daily`, { method: 'GET' });
-      assert.strictEqual(unauth.status, 401);
-
-      const r1 = await fetch(`${baseUrl}/api/cron/daily`, {
-        method: 'GET',
-        headers: { Authorization: `Bearer ${process.env.CRON_SECRET}` },
-      });
+    // Unified idempotent public-safe daily cron endpoint check
+    await test('C8: /api/cron/daily runs safely without CRON_SECRET (200), idempotently, and leaks zero PII', async () => {
+      const r1 = await fetch(`${baseUrl}/api/cron/daily`, { method: 'GET' });
       assert.strictEqual(r1.status, 200);
       const body1: any = await r1.json();
       assert.strictEqual(body1.ok, true);

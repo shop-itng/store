@@ -71,7 +71,6 @@ async function main() {
       const savedKvUrl = process.env.KV_REST_API_URL;
       const savedKvToken = process.env.KV_REST_API_TOKEN;
       const savedBrevoKey = process.env.BREVO_API_KEY;
-      const savedCronSecret = process.env.CRON_SECRET;
 
       process.env.KV_REST_API_URL = 'https://127.0.0.1:1';
       process.env.KV_REST_API_TOKEN = 'dead_redis_token';
@@ -222,7 +221,6 @@ async function main() {
         else process.env.KV_REST_API_TOKEN = savedKvToken;
         if (savedBrevoKey === undefined) delete process.env.BREVO_API_KEY;
         else process.env.BREVO_API_KEY = savedBrevoKey;
-        if (savedCronSecret !== undefined) process.env.CRON_SECRET = savedCronSecret;
       }
     });
 
@@ -337,35 +335,21 @@ async function main() {
     });
 
     // -------------------------------------------------------------------------
-    // TEST 4: /api/cron/escrow & /api/cron/daily enforce CRON_SECRET
+    // TEST 4: /api/cron/escrow & /api/cron/daily work without CRON_SECRET (idempotent & safe)
     // -------------------------------------------------------------------------
-    await test('4. /api/cron/escrow and /api/cron/daily reject unauth (401), reject unset secret (503), and allow valid CRON_SECRET (200)', async () => {
-      for (const cronPath of ['/api/cron/escrow', '/api/cron/daily']) {
-        const missingRes = await origFetch(`${baseUrl}${cronPath}`);
-        assert.strictEqual(missingRes.status, 401);
-
-        const wrongRes = await origFetch(`${baseUrl}${cronPath}`, {
-          headers: { Authorization: 'Bearer wrong_cron_secret_value' },
-        });
-        assert.strictEqual(wrongRes.status, 401);
-
-        const validRes = await origFetch(`${baseUrl}${cronPath}`, {
-          headers: { Authorization: `Bearer ${process.env.CRON_SECRET}` },
-        });
-        assert.strictEqual(validRes.status, 200);
-        const validJson: any = await validRes.json();
-        assert.strictEqual(validJson.ok, true);
-      }
-
+    await test('4. /api/cron/escrow and /api/cron/daily execute idempotently with 200 and no CRON_SECRET required', async () => {
       const savedCron = process.env.CRON_SECRET;
       delete process.env.CRON_SECRET;
       try {
-        const unsetRes = await origFetch(`${baseUrl}/api/cron/escrow`, {
-          headers: { Authorization: 'Bearer anything' },
-        });
-        assert.strictEqual(unsetRes.status, 503);
+        for (const cronPath of ['/api/cron/escrow', '/api/cron/daily']) {
+          const pubRes = await origFetch(`${baseUrl}${cronPath}`);
+          assert.strictEqual(pubRes.status, 200, `${cronPath} must return 200 without Authorization header`);
+          const pubJson: any = await pubRes.json();
+          assert.strictEqual(pubJson.ok, true);
+          assert.ok(pubJson.processed && typeof pubJson.processed.reconciliationOk === 'boolean');
+        }
       } finally {
-        process.env.CRON_SECRET = savedCron;
+        if (savedCron !== undefined) process.env.CRON_SECRET = savedCron;
       }
     });
 

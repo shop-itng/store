@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
+import { getTrustCopy } from '../../shared/trustAndLegalCopy';
 import { formatNaira } from '../utils/pricing';
 import { CAMPUSES } from '../data/mockData';
 import { Campus } from '../types';
@@ -41,6 +42,7 @@ export const CheckoutModal: React.FC = () => {
     emergencyControls,
     paymentsEnabled,
   } = useApp();
+  const trustCopy = getTrustCopy(paymentsEnabled);
 
   const [paymentMethod, setPaymentMethod] = useState<PaymentChannelChoice>('flutterwave_card');
   const [selectedCampus, setSelectedCampus] = useState<Campus>(
@@ -121,7 +123,7 @@ export const CheckoutModal: React.FC = () => {
     setAwaitingExternalPayment(null);
     closeCheckoutModal();
     setActiveView('orders');
-    notify(`Order #${assignedOrderId} payment confirmed and held in Escrow!`, 'success');
+    notify(`Order #${assignedOrderId} payment confirmed!`, 'success');
   };
 
   const pollVerification = async (
@@ -166,7 +168,7 @@ export const CheckoutModal: React.FC = () => {
 
   const handleCompletePayment = async () => {
     if (!paymentsEnabled) {
-      notify('Online payments are coming soon. Arrange directly with the seller', 'info');
+      notify(trustCopy.cartDisabledBanner, 'info');
       return;
     }
 
@@ -263,19 +265,19 @@ export const CheckoutModal: React.FC = () => {
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 className="text-base font-extrabold text-slate-900 dark:text-white">Flutterwave Escrow Checkout</h2>
-                {isLiveMode ? (
+                <h2 className="text-base font-extrabold text-slate-900 dark:text-white">{trustCopy.checkoutTitle}</h2>
+                {isLiveMode && paymentsEnabled ? (
                   <span className="text-[10px] font-black text-white bg-emerald-600 px-2 py-0.5 rounded-full border border-emerald-700 flex items-center gap-1">
-                    LIVE SECURE
+                    LIVE CHECKOUT
                   </span>
                 ) : (
                   <span className="text-[10px] font-black text-[#111111] bg-[#9FE870] px-2 py-0.5 rounded-full border border-[#111111]">
-                    ESCROW SECURED
+                    {trustCopy.checkoutStatusBadge}
                   </span>
                 )}
               </div>
               <p className="text-[11px] text-slate-500 dark:text-[#A1A1AA]">
-                Direct buyer payment · Zero stored cards · Funds held safely in Escrow
+                {trustCopy.checkoutSubtitle}
               </p>
             </div>
           </div>
@@ -351,36 +353,36 @@ export const CheckoutModal: React.FC = () => {
           </div>
         )}
 
-        {/* Buyer Protection Card */}
+        {/* Payment Handling Info Card */}
         <div className="p-4 bg-gradient-to-r from-emerald-50/90 to-teal-50/70 dark:from-[#15161C] dark:to-[#1E2028] border-2 border-emerald-500/30 dark:border-emerald-600/40 rounded-2xl text-xs space-y-2 shadow-xs">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 font-black text-emerald-950 dark:text-emerald-100">
               <ShieldCheck className="w-5 h-5 text-emerald-600 dark:text-[#9FE870] shrink-0" />
               <span className="text-xs sm:text-sm font-extrabold tracking-tight">
-                Shop It Buyer Protection
+                {trustCopy.checkoutBoxTitle}
               </span>
             </div>
             <span className="text-[10px] font-black uppercase tracking-wider text-emerald-800 dark:text-[#9FE870] bg-emerald-100 dark:bg-emerald-950/80 px-2.5 py-0.5 rounded-full border border-emerald-300 dark:border-emerald-800">
-              5-Day Hold
+              {trustCopy.checkoutBoxPill}
             </span>
           </div>
 
           <p className="text-[11px] text-slate-600 dark:text-slate-300 leading-relaxed">
-            Payments are processed by Flutterwave. Shop It holds your payment until you meet at the campus hub, inspect the craft, and tap <strong>&quot;Item received&quot;</strong>.
+            {trustCopy.checkoutBoxBody}
           </p>
 
           <div className="grid grid-cols-3 gap-2 pt-1 border-t border-emerald-200/50 dark:border-emerald-900/50 text-[10px] text-slate-600 dark:text-slate-300">
             <div className="flex items-center gap-1">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-              <span>Zero Card Storage</span>
+              <span>No Stored Cards</span>
             </div>
             <div className="flex items-center gap-1">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-              <span>Dispute Protection</span>
+              <span>Dispute Review</span>
             </div>
             <div className="flex items-center gap-1">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-              <span>Verified Makers</span>
+              <span>In-App Order Chat</span>
             </div>
           </div>
         </div>
@@ -392,7 +394,7 @@ export const CheckoutModal: React.FC = () => {
               <MapPin className="w-4 h-4 text-emerald-600 dark:text-[#9FE870]" />
               <span>Campus Delivery Destination</span>
             </span>
-            <span className="text-slate-500 dark:text-[#A1A1AA] text-[11px]">Protected Location</span>
+            <span className="text-slate-500 dark:text-[#A1A1AA] text-[11px]">Campus Pickup Point</span>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
@@ -485,7 +487,7 @@ export const CheckoutModal: React.FC = () => {
             <label className="text-xs font-black text-slate-900 dark:text-white">
               Preferred Payment Channel
             </label>
-            <span className="text-[11px] text-slate-500 font-medium">PCI-DSS Level 1 Certified</span>
+            <span className="text-[11px] text-slate-500 font-medium">{trustCopy.checkoutChannelLabel}</span>
           </div>
 
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
@@ -555,7 +557,7 @@ export const CheckoutModal: React.FC = () => {
           </div>
 
           <p className="text-[10px] text-slate-500 dark:text-[#A1A1AA] text-center pt-0.5">
-            Payments are processed securely via Flutterwave. Zero card details are saved on our servers.
+            {trustCopy.checkoutChannelFootnote}
           </p>
         </div>
 
@@ -566,11 +568,11 @@ export const CheckoutModal: React.FC = () => {
             <span className="font-mono font-bold text-slate-900 dark:text-white">{formatNaira(subtotalItems)}</span>
           </div>
           <div className="flex justify-between items-center text-emerald-800 dark:text-[#9FE870]">
-            <span>Shop It Buyer Escrow Protection</span>
+            <span>{trustCopy.checkoutFeeLabel}</span>
             <span className="font-mono font-bold">+{formatNaira(totalServiceFees)}</span>
           </div>
           <div className="flex justify-between items-center">
-            <span>Campus Delivery / Safe Hub Pickup</span>
+            <span>Campus Delivery / Pickup Spot</span>
             <span className="font-mono font-bold text-slate-900 dark:text-white">+{formatNaira(deliveryTotal)}</span>
           </div>
           {discountAmount > 0 && (
@@ -582,8 +584,10 @@ export const CheckoutModal: React.FC = () => {
 
           <div className="pt-2.5 border-t border-slate-200 dark:border-[#27272A] flex justify-between items-baseline text-slate-900 dark:text-white">
             <div>
-              <span className="text-sm font-black block">Total Payable via Flutterwave</span>
-              <span className="text-[10px] text-slate-400">Includes all fees &amp; escrow security</span>
+              <span className="text-sm font-black block">
+                {paymentsEnabled ? 'Total Payable via Flutterwave' : 'Estimated Order Total'}
+              </span>
+              <span className="text-[10px] text-slate-400">{trustCopy.checkoutTotalSubnote}</span>
             </div>
             <span className="text-2xl font-black font-mono tracking-tight text-slate-900 dark:text-white">
               {formatNaira(grandTotal)}
@@ -596,7 +600,7 @@ export const CheckoutModal: React.FC = () => {
           <div className="p-3 bg-amber-50 dark:bg-amber-950/40 border-2 border-amber-400 dark:border-amber-600 rounded-xl text-xs text-amber-900 dark:text-amber-200 flex items-center gap-2">
             <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
             <span className="font-bold">
-              Online payments are coming soon. Arrange directly with the seller
+              {trustCopy.cartDisabledBanner}
             </span>
           </div>
         )}
@@ -606,7 +610,7 @@ export const CheckoutModal: React.FC = () => {
           <div className="p-3 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 rounded-xl text-xs text-rose-900 dark:text-rose-200 flex items-center gap-2">
             <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
             <span>
-              <strong>Orders Temporarily Paused:</strong> System security review has temporarily paused new checkouts for network verification.
+              <strong>Orders Temporarily Paused:</strong> System maintenance has temporarily paused new checkouts.
             </span>
           </div>
         )}
@@ -618,7 +622,7 @@ export const CheckoutModal: React.FC = () => {
           className="w-full h-12 bg-[#FF6B00] hover:bg-[#ff7a1a] disabled:bg-stone-300 disabled:border-stone-400 disabled:text-stone-500 disabled:shadow-none text-[#111111] font-black text-xs sm:text-sm rounded-xl transition-all border-2 border-[#111111] shadow-[0_3px_0_#111111] active:translate-y-0.5 active:shadow-[0_1px_0_#111111] flex items-center justify-center gap-2"
         >
           {!paymentsEnabled ? (
-            <span className="font-bold text-center px-2">Online payments are coming soon. Arrange directly with the seller</span>
+            <span className="font-bold text-center px-2">{trustCopy.cartProceedLabel}</span>
           ) : emergencyControls?.pauseNewOrders ? (
             <span className="font-bold">Checkout Temporarily Disabled by Moderation</span>
           ) : isProcessing ? (
@@ -638,10 +642,10 @@ export const CheckoutModal: React.FC = () => {
           )}
         </button>
 
-        {/* Escrow Guarantee Footer Note */}
+        {/* Payment Mode Footer Note */}
         <div className="text-[11px] text-slate-400 dark:text-[#A1A1AA] text-center flex items-center justify-center gap-1.5">
-          <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-[#9FE870]" />
-          <span>Payment held safely in escrow until you inspect your handmade craft.</span>
+          <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-[#9FE870] shrink-0" />
+          <span>{trustCopy.checkoutFooterNote}</span>
         </div>
       </div>
     </div>

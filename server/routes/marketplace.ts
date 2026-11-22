@@ -357,7 +357,7 @@ router.get('/products', async (req, res) => {
       reviews: (Array.isArray(row.reviews) ? row.reviews : []).map((rv: any) => mapReviewWithUsers(rv, reviewerMap)),
       delivery: {
         allowsPickup: true,
-        pickupLocation: `${row.location_area || 'Hub'} Safe Handoff Spot`,
+        pickupLocation: `${row.location_area || 'Hub'} Campus Pickup Spot`,
         pickupFee: koboToNaira(row.delivery_pickup_fee_kobo || 0),
         allowsLocalDelivery: true,
         localDeliveryFee:
@@ -432,7 +432,7 @@ router.get('/products/mine', requireAuth, async (req: AuthenticatedRequest, res:
       reviews: Array.isArray(row.reviews) ? row.reviews : [],
       delivery: {
         allowsPickup: true,
-        pickupLocation: `${row.location_area || 'Hub'} Safe Handoff Spot`,
+        pickupLocation: `${row.location_area || 'Hub'} Campus Pickup Spot`,
         pickupFee: koboToNaira(row.delivery_pickup_fee_kobo || 0),
         allowsLocalDelivery: true,
         localDeliveryFee:
@@ -506,7 +506,7 @@ router.get('/products/:id', async (req, res) => {
         reviews: rawReviews.map((rv: any) => mapReviewWithUsers(rv, reviewerMap)),
         delivery: {
           allowsPickup: true,
-          pickupLocation: `${row.location_area || 'Hub'} Safe Handoff Spot`,
+          pickupLocation: `${row.location_area || 'Hub'} Campus Pickup Spot`,
           pickupFee: koboToNaira(row.delivery_pickup_fee_kobo || 0),
           allowsLocalDelivery: true,
           localDeliveryFee:
@@ -3123,7 +3123,7 @@ router.post('/chat/conversations/:id/messages', requireAuth, async (req: Authent
           : sMeta?.displayName || extractFirstName(user.name || 'Member');
 
     const savedContent = isBypass
-      ? '[Security Notice: Numbers, phone numbers, account numbers, and off-platform payments are prohibited to protect your escrow security.]'
+      ? '[Security Notice: Numbers, phone numbers, account numbers, and off-platform contact details are prohibited in chat.]'
       : cleanContent;
 
     const savedAttachment = isBypass ? undefined : attachmentMeta;
@@ -3252,7 +3252,7 @@ router.post('/chat/conversations/:id/messages', requireAuth, async (req: Authent
       },
       isChatLocked: nextViolations >= 2 || Boolean(conv.is_chat_locked),
       bypassViolationsCount: nextViolations,
-      warning: isBypass ? 'Anti-bypass trigger: Personal contact info or numbers redacted to ensure buyer/seller escrow safety.' : undefined,
+      warning: isBypass ? 'Anti-bypass trigger: Personal contact info or numbers redacted for marketplace safety.' : undefined,
     });
   } catch (err: any) {
     return res.status(500).json({ status: false, message: err.message });
@@ -3393,7 +3393,7 @@ router.post('/disputes', requireAuth, async (req: AuthenticatedRequest, res: Res
       userAgent: req.get('user-agent'),
     });
 
-    return res.status(201).json({ status: true, disputeId, message: 'Dispute opened. Funds held securely in escrow.' });
+    return res.status(201).json({ status: true, disputeId, message: 'Dispute opened. Held funds are paused until moderation resolves the case.' });
   } catch (err: any) {
     return res.status(500).json({ status: false, message: err.message });
   }

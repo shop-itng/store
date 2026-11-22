@@ -45,6 +45,13 @@ export interface CompletenessItem {
   key: string;
   label: string;
   done: boolean;
+  targetField?: string;
+}
+
+export interface DeliveryOptionsConfig {
+  allowsPickup: boolean;
+  allowsLocalDelivery: boolean;
+  pickupSpots: string[];
 }
 
 export interface PublicProfileData {
@@ -53,13 +60,18 @@ export interface PublicProfileData {
   fullName?: string;
   displayName: string;
   profileSlug: string;
+  canonicalSlug?: string;
+  redirectedFromSlug?: string;
+  tagline?: string;
   role: UserRole;
   avatarUrl?: string | null;
   coverUrl?: string | null;
   bio: string;
+  locationState?: string;
   campus: string;
   locationArea: string;
   interests: string[];
+  languages?: string[];
   isVerifiedEmail?: boolean;
   isUnder18?: boolean;
   memberSince: string;
@@ -95,6 +107,11 @@ export interface PublicProfileData {
     id: string;
     shopName: string;
     bio: string;
+    shopStory?: string;
+    craftMaterials?: string;
+    processingTime?: string;
+    deliveryOptions?: DeliveryOptionsConfig;
+    locationState?: string;
     campus: string;
     locationArea: string;
     logoUrl?: string | null;
@@ -112,6 +129,11 @@ export interface SellerProfile {
   ownerName?: string;
   email?: string;
   bio: string;
+  shopStory?: string;
+  craftMaterials?: string;
+  processingTime?: string;
+  deliveryOptions?: DeliveryOptionsConfig;
+  locationState?: string;
   campus?: Campus;
   location?: NigerianLocation;
   locationArea?: string; // Only Area shown publicly as required
@@ -166,11 +188,14 @@ export interface User {
   name: string;
   displayName?: string;
   profileSlug?: string;
+  tagline?: string;
   avatarUrl?: string;
   coverUrl?: string;
   bio?: string;
+  locationState?: string;
   campus?: string;
   interests?: string[];
+  languages?: string[];
   notificationPrefs?: NotificationPrefs;
   privacySettings?: PrivacySettings;
   lastSeenAt?: string;
@@ -686,7 +711,7 @@ export interface AntiBypassFlag {
 }
 
 // ==========================================
-// PHASE 4: CAMPUS LOGISTICS, SAFE SPOTS & HANDSHAKE OTP
+// PHASE 4: CAMPUS LOGISTICS, CAMPUS PICKUP SPOTS & HANDSHAKE OTP
 // ==========================================
 
 export interface SafePickupSpot {

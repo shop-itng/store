@@ -30,6 +30,7 @@ import { ResetPasswordPage } from './components/ResetPasswordPage';
 import { AccountSettingsView } from './components/AccountSettingsView';
 import { Store, ShieldCheck, MapPin, Star, ArrowRight, PackageOpen, ShoppingBag, ShieldAlert, ArrowLeft, Clock, Loader2, Users } from 'lucide-react';
 import { Product, SuggestedSellerItem, ProfileSearchResult } from './types';
+import { getTrustCopy } from '../shared/trustAndLegalCopy';
 
 
 const MarketplaceContent: React.FC = () => {
@@ -77,11 +78,13 @@ const MarketplaceContent: React.FC = () => {
     openAuthModal,
     userLocation,
     currentUser,
+    paymentsEnabled,
     emergencyControls,
     fetchFollowingFeed,
     fetchSuggestedSellers,
     searchProfiles,
   } = useApp();
+  const trustCopy = getTrustCopy(paymentsEnabled);
 
   const loadFollowingFeed = React.useCallback(async () => {
     if (!currentUser?.id) return;
@@ -162,7 +165,7 @@ const MarketplaceContent: React.FC = () => {
             </span>
             <h1 className="text-2xl font-black">Shop It Under Maintenance</h1>
             <p className="text-stone-400 text-xs sm:text-sm leading-relaxed">
-              Our safety moderation team is conducting a routine security & compliance review. All escrows, wallets, and orders remain 100% secured.
+              Our safety moderation team is conducting a routine security and maintenance check. Active orders and wallet records are preserved.
             </p>
           </div>
           <div className="pt-4 border-t border-stone-800 flex items-center justify-center gap-3">
@@ -362,13 +365,13 @@ const MarketplaceContent: React.FC = () => {
                   <div className="space-y-2">
                     <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-black uppercase tracking-wider bg-[#111111] text-[#9FE870] border border-[#FF6B00]">
                       <span className="w-1.5 h-1.5 rounded-full bg-[#FF6B00]" />
-                      <span>Safe Youth Marketplace</span>
+                      <span>{trustCopy.homeWelcomeBadge}</span>
                     </span>
                     <h3 className="text-xl sm:text-2xl font-black text-[#111111] dark:text-white tracking-tight">
                       Welcome to Shop It
                     </h3>
                     <p className="text-xs sm:text-sm text-[#52525B] dark:text-[#A1A1AA] leading-relaxed max-w-md mx-auto">
-                      Direct marketplace for Nigerian teens and youth to buy and sell handmade beads, scent oils, crochet wear, fashion, and crafts safely with escrow protection.
+                      {trustCopy.homeWelcomeSubtitle}
                     </p>
                   </div>
 
@@ -414,14 +417,14 @@ const MarketplaceContent: React.FC = () => {
                   </div>
 
                   <div className="pt-4 border-t border-[#E4E4E7] dark:border-[#27272A] flex flex-col sm:flex-row items-center justify-center gap-3 text-xs text-[#71717A] dark:text-[#A1A1AA]">
-                    <span className="flex items-center gap-1.5 font-bold text-[#111111] dark:text-white">
-                      <ShieldCheck className="w-4 h-4 text-[#16A34A] dark:text-[#9FE870]" />
-                      <span>Escrow payment protection</span>
+                    <span className="flex items-center gap-1.5 font-bold text-[#111111] dark:text-white text-center">
+                      <ShieldCheck className="w-4 h-4 text-[#16A34A] dark:text-[#9FE870] shrink-0" />
+                      <span>{trustCopy.homeTrustPrimary}</span>
                     </span>
                     <span className="hidden sm:inline">·</span>
                     <span className="flex items-center gap-1.5 font-bold text-[#111111] dark:text-white">
-                      <MapPin className="w-4 h-4 text-[#FF6B00]" />
-                      <span>Safe handoff in your area</span>
+                      <MapPin className="w-4 h-4 text-[#FF6B00] shrink-0" />
+                      <span>{trustCopy.homeTrustSecondary}</span>
                     </span>
                   </div>
                 </div>
@@ -732,10 +735,10 @@ const MarketplaceContent: React.FC = () => {
                   <span>Back to Marketplace</span>
                 </button>
                 <h1 className="text-xl sm:text-2xl font-black text-slate-900 dark:text-white">
-                  Verified Safe Campus Pickup Spots
+                  {trustCopy.pickupDirectoryTitle}
                 </h1>
                 <p className="text-xs text-slate-500 dark:text-[#A1A1AA] mt-0.5">
-                  Public, well-lit, security-patrolled campus hubs for inspecting crafts before releasing your 4-digit Handshake PIN.
+                  {trustCopy.pickupDirectorySubtitle}
                 </p>
               </div>
 

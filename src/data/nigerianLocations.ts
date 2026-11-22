@@ -501,7 +501,7 @@ export const NIGERIAN_STATES: StateData[] = [
 
 /**
  * Calculates delivery cost between two locations:
- * - Same area: ₦300 (or free local pickup safe spot)
+ * - Same area: ₦300 (or free local pickup spot)
  * - Same city, different area: ₦800 (local dispatch)
  * - Same state, different city: ₦1,500
  * - Different states: ₦2,500 (interstate)
@@ -517,7 +517,7 @@ export function calculateDeliveryFee(
   if (sellerLoc.state.toLowerCase() === buyerLoc.state.toLowerCase()) {
     if (sellerLoc.city.toLowerCase() === buyerLoc.city.toLowerCase()) {
       if (sellerLoc.area.toLowerCase() === buyerLoc.area.toLowerCase()) {
-        return { fee: 300, method: `Same Area (${sellerLoc.area}) safe handoff` };
+        return { fee: 300, method: `Same Area (${sellerLoc.area}) pickup` };
       }
       return { fee: 800, method: `Within ${sellerLoc.city} dispatch` };
     }

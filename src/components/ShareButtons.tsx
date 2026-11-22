@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Share2, Copy, Check, MessageCircle, Image as ImageIcon, ImageOff } from 'lucide-react';
 import { formatNaira } from '../utils/pricing';
 import { useApp } from '../context/AppContext';
+import { getTrustCopy } from '../../shared/trustAndLegalCopy';
 
 interface Props {
   title: string;
@@ -20,7 +21,8 @@ export const ShareButtons: React.FC<Props> = ({
   imageUrl,
   url,
 }) => {
-  const { notify } = useApp();
+  const { notify, paymentsEnabled } = useApp();
+  const trustCopy = getTrustCopy(paymentsEnabled);
   const [copied, setCopied] = useState(false);
   const [showStatusPreview, setShowStatusPreview] = useState(false);
   const [previewImgError, setPreviewImgError] = useState(false);
@@ -30,7 +32,10 @@ export const ShareButtons: React.FC<Props> = ({
   const sellerText = sellerShopName ? `by ${sellerShopName}` : '';
   const campusText = campus ? `at ${campus}` : '';
 
-  const shareMessage = `Check out "${title}" ${priceText} ${sellerText} ${campusText} on Shop It! Safe escrow payments & campus delivery: ${currentUrl}`;
+  const shareModeNote = paymentsEnabled
+    ? 'Order on Shop It with campus delivery'
+    : 'Arrange directly with the seller on Shop It';
+  const shareMessage = `Check out "${title}" ${priceText} ${sellerText} ${campusText} on Shop It! ${shareModeNote}: ${currentUrl}`;
   const whatsappUrl = `https://api.whatsapp.com/send?text=${encodeURIComponent(shareMessage)}`;
 
   const canNativeShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function';
@@ -154,7 +159,7 @@ export const ShareButtons: React.FC<Props> = ({
             )}
             <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent flex flex-col justify-end p-3 text-left">
               <span className="text-[10px] text-[#9FE870] font-black uppercase tracking-wider bg-black/60 px-2 py-0.5 rounded w-max border border-stone-700">
-                Escrow Protected
+                {trustCopy.productCardBadge}
               </span>
               <h4 className="text-sm font-black text-white mt-1 leading-snug line-clamp-1">{title}</h4>
               <div className="flex items-center justify-between mt-1 text-xs">
@@ -168,7 +173,7 @@ export const ShareButtons: React.FC<Props> = ({
 
           <div className="flex items-center justify-between text-[11px] text-stone-400 pt-1 border-t border-stone-800">
             <span>{typeof window !== 'undefined' && window.location.hostname ? window.location.hostname : 'shopitng.vercel.app'}</span>
-            <span className="text-white font-bold">Safe Youth Commerce</span>
+            <span className="text-white font-bold">{trustCopy.shareFooterTagline}</span>
           </div>
         </div>
       )}

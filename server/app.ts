@@ -3,6 +3,7 @@ import crypto from 'crypto';
 import cookieParser from 'cookie-parser';
 import paymentsWebhookHandler from './webhooks/flutterwave.js';
 import { renderTransactionalEmail, type EmailTemplateKey } from '../shared/transactionalEmails.js';
+import { OPERATOR_INFO } from '../shared/trustAndLegalCopy.js';
 import {
   checkRateLimit as checkOtpRateLimit,
   recordRateLimit as recordOtpRateLimit,
@@ -28,6 +29,9 @@ import {
   pingPostgres,
   pingRedis,
   runMigration,
+  verifyDatabaseSchema,
+  isProdRuntime,
+  EXPECTED_SCHEMA_VERSION,
   getDatabaseUrl,
   getDatabaseHealthStats,
   getAllPlatformConfig,
@@ -56,7 +60,6 @@ import {
   requirePaymentsEnabled,
   requirePayoutsEnabled,
   requireOwnershipOrAdmin,
-  requireCronSecret,
   optionalAuth,
   extractToken,
   type AuthenticatedRequest,
@@ -105,15 +108,29 @@ validateAppSecret();
 
 export const sendAdminAlert = dispatchAdminAlert;
 
-// Run database migrations on server boot
-runMigration().catch(err => {
-  console.error('[PostgreSQL Startup Migration Error]:', err.message);
-});
+const IS_PROD = process.env.NODE_ENV === 'production' || Boolean(process.env.VERCEL);
+
+// Run database migrations ONLY in non-production environments.
+// In production / Vercel, migrations run at deploy time (`npm run migrate` during `npm run build`);
+// cold starts only verify read-only that the schema matches EXPECTED_SCHEMA_VERSION.
+if (!isProdRuntime()) {
+  runMigration().catch(err => {
+    console.error('[PostgreSQL Startup Migration Error]:', err.message);
+  });
+} else {
+  verifyDatabaseSchema()
+    .then(status => {
+      if (!status.ok) {
+        console.error('[PostgreSQL Schema Check Failed]:', status.migrationError || status.error);
+      }
+    })
+    .catch(err => {
+      console.error('[PostgreSQL Schema Check Error]:', err.message);
+    });
+}
 
 const app = express();
 app.use(cookieParser());
-
-const IS_PROD = process.env.NODE_ENV === 'production' || Boolean(process.env.VERCEL);
 
 const PRODUCTION_APP_URL = 'https://shopitng.vercel.app';
 const REDIRECT_APP_URL = 'https://shop-itng-pied.vercel.app';
@@ -360,6 +377,10 @@ router.get(['/health', '/api/health'], async (_req, res) => {
   const paymentsEnabledFlag = String(process.env.PAYMENTS_ENABLED || '').toLowerCase() === 'true';
   const payoutsEnabledFlag = String(process.env.PAYOUTS_ENABLED || '').toLowerCase() === 'true';
 
+  const migrationError = pgPing.migrationError
+    ? String(pgPing.migrationError).replace(/postgres(ql)?:\/\/[^\s]+/gi, '[redacted-url]').slice(0, 240)
+    : null;
+
   if (isPgOk && isRedisOk) {
     return res.status(200).json({
       status: 'OK',
@@ -375,6 +396,10 @@ router.get(['/health', '/api/health'], async (_req, res) => {
       paymentsEnabled: paymentsEnabledFlag,
       payoutsEnabled: payoutsEnabledFlag,
       schemaOk: Boolean(pgPing.schemaOk),
+      schemaVersion: pgPing.schemaVersion ?? null,
+      expectedSchemaVersion: pgPing.expectedSchemaVersion ?? EXPECTED_SCHEMA_VERSION,
+      migrationError,
+      ...(pgPing.missingTables && pgPing.missingTables.length > 0 ? { missingTables: pgPing.missingTables } : {}),
       timestamp: new Date().toISOString(),
     });
   }
@@ -396,17 +421,27 @@ router.get(['/health', '/api/health'], async (_req, res) => {
     paymentsEnabled: paymentsEnabledFlag,
     payoutsEnabled: payoutsEnabledFlag,
     schemaOk: Boolean(pgPing.schemaOk),
+    schemaVersion: pgPing.schemaVersion ?? null,
+    expectedSchemaVersion: pgPing.expectedSchemaVersion ?? EXPECTED_SCHEMA_VERSION,
+    migrationError,
     ...(pgPing.missingTables && pgPing.missingTables.length > 0 ? { missingTables: pgPing.missingTables } : {}),
     ...(safeDbError ? { error: safeDbError } : {}),
     timestamp: new Date().toISOString(),
   });
 });
 
-// Public live platform configuration (PostgreSQL source of truth for broadcast banner, killswitches, and fee policy)
+// Public live platform configuration (PostgreSQL source of truth for broadcast banner, killswitches, fee policy, and payment flags)
 router.get('/platform/config', async (_req, res) => {
   try {
     const config = await getAllPlatformConfig();
-    return res.json({ status: true, ...config });
+    const paymentsEnabledFlag = String(process.env.PAYMENTS_ENABLED || '').toLowerCase() === 'true';
+    const payoutsEnabledFlag = String(process.env.PAYOUTS_ENABLED || '').toLowerCase() === 'true';
+    return res.json({
+      status: true,
+      ...config,
+      paymentsEnabled: paymentsEnabledFlag,
+      payoutsEnabled: payoutsEnabledFlag,
+    });
   } catch (err: any) {
     console.error('[Platform Config Read Error]:', err.message);
     return res.status(500).json({ status: false, message: 'Failed to load platform configuration from database.' });
@@ -1254,18 +1289,31 @@ router.post('/auth/change-email/confirm', requireAuth, async (req: Authenticated
   }
 });
 
+function parseJsonField<T>(val: any, fallback: T): T {
+  if (val === null || val === undefined) return fallback;
+  if (typeof val === 'string') {
+    try {
+      return JSON.parse(val) as T;
+    } catch {
+      return fallback;
+    }
+  }
+  return val as T;
+}
+
 async function loadHydratedUserProfile(userId: string): Promise<{
   sanitizedUser: any;
   isVerifiedSeller: boolean;
   verificationStatus: string;
 } | null> {
   const result = await dbQuery(
-    `SELECT u.id, u.email, u.name, u.display_name, u.profile_slug, u.avatar_url, u.cover_url, u.bio,
-            u.campus, u.location_area, u.interests, u.notification_prefs, u.privacy_settings, u.last_seen_at,
+    `SELECT u.id, u.email, u.name, u.display_name, u.profile_slug, u.tagline, u.avatar_url, u.cover_url, u.bio,
+            u.location_state, u.campus, u.location_area, u.interests, u.languages, u.notification_prefs, u.privacy_settings, u.last_seen_at,
             u.role, u.sub_role, u.is_verified_email, u.must_change_password, u.is_banned, u.ban_reason,
             u.age, u.has_guardian_consent, u.guardian_name, u.created_at, u.last_login_at, u.deleted_at,
-            s.id as seller_id, s.shop_name, s.bio as s_bio, s.campus as s_campus, s.location_area as s_area,
-            s.logo_url as s_logo_url, s.banner_url as s_banner_url, s.is_verified_seller as seller_is_verified,
+            s.id as seller_id, s.shop_name, s.bio as s_bio, s.shop_story, s.craft_materials, s.processing_time, s.delivery_options,
+            s.location_state as s_location_state, s.campus as s_campus, s.location_area as s_area,
+            s.vacation_mode, s.logo_url as s_logo_url, s.banner_url as s_banner_url, s.is_verified_seller as seller_is_verified,
             s.verification_status as seller_verification_status,
             s.verified_legal_name, s.verified_nin_last4, s.verified_at
      FROM shopit_users u
@@ -1287,6 +1335,13 @@ async function loadHydratedUserProfile(userId: string): Promise<{
   const currentStatus = isVerified ? 'verified' : row.seller_verification_status || 'not_started';
   const isMinor = row.age !== null && row.age !== undefined && Number(row.age) < 18;
   const displayName = row.display_name || extractFirstName(row.name || 'Member');
+  const parsedInterests = parseJsonField<string[]>(row.interests, []);
+  const parsedLanguages = parseJsonField<string[]>(row.languages, []);
+  const parsedDeliveryOptions = parseJsonField<{
+    allowsPickup?: boolean;
+    allowsLocalDelivery?: boolean;
+    pickupSpots?: string[];
+  }>(row.delivery_options, { allowsPickup: true, allowsLocalDelivery: true, pickupSpots: [] });
 
   const sanitizedUser: any = {
     id: row.id,
@@ -1294,12 +1349,15 @@ async function loadHydratedUserProfile(userId: string): Promise<{
     name: row.name,
     displayName,
     profileSlug: row.profile_slug || row.id,
+    tagline: row.tagline || '',
     avatarUrl: row.avatar_url || row.s_logo_url || undefined,
     coverUrl: row.cover_url || row.s_banner_url || undefined,
     bio: row.bio || row.s_bio || '',
+    locationState: row.location_state || row.s_location_state || undefined,
     campus: row.campus || row.s_campus || undefined,
     locationArea: row.location_area || row.s_area || undefined,
-    interests: Array.isArray(row.interests) ? row.interests : [],
+    interests: Array.isArray(parsedInterests) ? parsedInterests : [],
+    languages: Array.isArray(parsedLanguages) ? parsedLanguages : [],
     notificationPrefs: sanitizeNotificationPrefs(row.notification_prefs, DEFAULT_NOTIFICATION_PREFS),
     privacySettings: sanitizePrivacySettings(
       row.privacy_settings,
@@ -1330,8 +1388,18 @@ async function loadHydratedUserProfile(userId: string): Promise<{
       verificationStatus: currentStatus,
       isVerifiedSeller: isVerified,
       bio: row.s_bio || row.bio || '',
+      shopStory: row.shop_story || '',
+      craftMaterials: row.craft_materials || '',
+      processingTime: row.processing_time || '',
+      deliveryOptions: {
+        allowsPickup: parsedDeliveryOptions?.allowsPickup !== false,
+        allowsLocalDelivery: parsedDeliveryOptions?.allowsLocalDelivery !== false,
+        pickupSpots: Array.isArray(parsedDeliveryOptions?.pickupSpots) ? parsedDeliveryOptions.pickupSpots : [],
+      },
+      locationState: row.s_location_state || row.location_state || 'Lagos',
       campus: row.s_campus || row.campus || 'Lagos Mainland',
       locationArea: row.s_area || row.location_area || 'Yaba',
+      vacationMode: Boolean(row.vacation_mode),
       logoUrl: row.s_logo_url || row.avatar_url || undefined,
       bannerUrl: row.s_banner_url || row.cover_url || undefined,
       verifiedLegalName: row.verified_legal_name,
@@ -2612,7 +2680,7 @@ router.get('/admin/export-data', requireAdmin, async (req: AuthenticatedRequest,
       version: '3.0',
       exportedAt: new Date().toISOString(),
       exportedBy: req.user!.email,
-      platform: 'Shop It Nigeria (TEEDS)',
+      platform: OPERATOR_INFO.platformLabel,
       summary: {
         totalUsers: usersRes.rows.length,
         totalSellers: sellersRes.rows.length,
@@ -3031,7 +3099,7 @@ router.post('/payments/initialize', requirePaymentsEnabled, requireAuth, async (
             name: user.name || 'Shop It Buyer',
           },
           customizations: {
-            title: 'Shop It Escrow Checkout',
+            title: 'Shop It Checkout',
             description: `Order #${initializedOrder.orderId} (${campus || 'Nigeria'})`,
           },
           meta: {
@@ -3250,7 +3318,7 @@ router.get('/payments/verify/:reference', requirePaymentsEnabled, requireAuth, a
       amountNaira: koboToNaira(confirmedAmountKobo),
       currency: 'NGN',
       channel,
-      message: 'Payment verified with Flutterwave and committed to escrow.',
+      message: 'Payment verified with Flutterwave and held for order delivery.',
     });
   } catch (err: any) {
     console.error('[Payment Verify Error]:', err.message);
@@ -3469,7 +3537,7 @@ router.post('/payments/refund', requirePaymentsEnabled, requireAdmin, async (req
       userAgent: req.get('user-agent'),
     });
 
-    return res.json({ status: true, message: 'Refund processed atomically and escrow debited.', data: refundData.data });
+    return res.json({ status: true, message: 'Refund processed atomically.', data: refundData.data });
   } catch (err: any) {
     console.error('[Refund Error]:', err.message);
     return res.status(500).json({ status: false, message: `Refund processing failed: ${err.message}` });
@@ -4397,7 +4465,7 @@ router.post(
       }
 
       if (!ndpaConsentSigned) {
-        return res.status(400).json({ status: false, message: 'NDPA 2023 consent is required.' });
+        return res.status(400).json({ status: false, message: 'Data protection consent is required.' });
       }
 
       const maxDocChars = 7 * 1024 * 1024;
@@ -4833,7 +4901,7 @@ router.post(
         userAgent: req.get('user-agent'),
       });
 
-      return res.json({ status: true, message: 'Identification documents permanently purged under NDPA 2023.' });
+      return res.json({ status: true, message: 'Identification documents permanently purged.' });
     } catch (err: any) {
       return res.status(500).json({ status: false, message: err.message });
     }
@@ -4844,7 +4912,7 @@ router.post(
 // DAILY CRON ENDPOINT (Public-safe, Idempotent, Rate-Limited, Batch-Limited)
 // ============================================================================
 
-router.all(['/cron/daily', '/cron/escrow'], requireCronSecret, async (req, res) => {
+router.all(['/cron/daily', '/cron/escrow'], async (req, res) => {
   const rl = await checkAndRecordRateLimit(`cron_daily:${req.ip || 'unknown'}`, 30, 60 * 1000);
   if (!rl.allowed) {
     res.setHeader('Retry-After', String(rl.retryAfterSeconds || 60));
