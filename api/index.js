@@ -1913,7 +1913,9 @@ async function runMigration() {
           console.error("[Migration Column Error]:", alterErr.message);
           throw alterErr;
         }
-        console.warn("[Migration Column Note]:", alterErr.message);
+        if (!isPgMem || !stmt.includes("chk_shopit_wallet_non_negative")) {
+          console.warn("[Migration Column Note]:", alterErr.message);
+        }
       }
     }
     const legacyColumnMigrations = [
@@ -1959,152 +1961,154 @@ async function runMigration() {
     let orphanOrdersNullified = 0;
     let deletedOrphanProducts = 0;
     const deletedOrphanProductIds = [];
-    const qClient = await pool.connect();
-    try {
-      await qClient.query("BEGIN");
+    if (!isPgMem) {
+      const qClient = await pool.connect();
       try {
-        const orphanProdRes = await qClient.query(
-          `SELECT p.id FROM shopit_products p WHERE NOT EXISTS (SELECT 1 FROM shopit_sellers s WHERE s.id = p.seller_id)`
-        );
-        if (orphanProdRes.rows.length > 0) {
-          for (const r of orphanProdRes.rows) {
-            deletedOrphanProductIds.push(String(r.id));
+        await qClient.query("BEGIN");
+        try {
+          const orphanProdRes = await qClient.query(
+            `SELECT p.id FROM shopit_products p WHERE NOT EXISTS (SELECT 1 FROM shopit_sellers s WHERE s.id = p.seller_id)`
+          );
+          if (orphanProdRes.rows.length > 0) {
+            for (const r of orphanProdRes.rows) {
+              deletedOrphanProductIds.push(String(r.id));
+            }
+            await qClient.query(
+              `DELETE FROM shopit_products WHERE NOT EXISTS (SELECT 1 FROM shopit_sellers s WHERE s.id = shopit_products.seller_id)`
+            );
+            deletedOrphanProducts = deletedOrphanProductIds.length;
+            console.warn(
+              `[Migration Cleanup] Deleted ${deletedOrphanProducts} orphaned product row(s) with missing shopit_sellers parent: ${deletedOrphanProductIds.join(", ")}`
+            );
           }
+        } catch (prodErr) {
+          console.warn("[Migration Orphan Products Note]:", prodErr?.message);
+        }
+        try {
+          const orphanOrdRes = await qClient.query(
+            `SELECT id FROM shopit_orders WHERE buyer_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM shopit_users u WHERE u.id = shopit_orders.buyer_id)`
+          );
+          if (orphanOrdRes.rows.length > 0) {
+            orphanOrdersNullified = orphanOrdRes.rows.length;
+            await qClient.query(
+              `UPDATE shopit_orders SET buyer_id = NULL WHERE buyer_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM shopit_users u WHERE u.id = shopit_orders.buyer_id)`
+            );
+            console.warn(
+              `[Migration Repair] Preserved ${orphanOrdersNullified} order(s) by clearing dangling buyer_id references.`
+            );
+          }
+        } catch (ordErr) {
+          console.warn("[Migration Orphan Orders Note]:", ordErr?.message);
+        }
+        const insertQuarantineRow = /* @__PURE__ */ __name(async (sourceTable, sourcePk, reason, rowObj) => {
+          const qId = `q_${sourceTable}_${Date.now()}_${crypto2.randomBytes(4).toString("hex")}`;
           await qClient.query(
-            `DELETE FROM shopit_products WHERE NOT EXISTS (SELECT 1 FROM shopit_sellers s WHERE s.id = shopit_products.seller_id)`
+            `INSERT INTO shopit_migration_quarantine (id, source_table, source_pk, reason, row_data, quarantined_at, schema_version)
+           VALUES ($1, $2, $3, $4, $5::jsonb, NOW(), $6)`,
+            [qId, sourceTable, sourcePk, reason, JSON.stringify(rowObj), EXPECTED_SCHEMA_VERSION]
           );
-          deletedOrphanProducts = deletedOrphanProductIds.length;
-          console.warn(
-            `[Migration Cleanup] Deleted ${deletedOrphanProducts} orphaned product row(s) with missing shopit_sellers parent: ${deletedOrphanProductIds.join(", ")}`
+        }, "insertQuarantineRow");
+        try {
+          const orphanPayRes = await qClient.query(
+            `SELECT * FROM shopit_payments WHERE order_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM shopit_orders o WHERE o.id = shopit_payments.order_id)`
           );
+          for (const row of orphanPayRes.rows) {
+            const pk = String(row.reference || "");
+            await insertQuarantineRow(
+              "shopit_payments",
+              pk,
+              `Orphaned payment referencing missing order_id="${row.order_id}"`,
+              row
+            );
+            await qClient.query(`DELETE FROM shopit_payments WHERE reference = $1`, [row.reference]);
+            quarantined.payments++;
+          }
+        } catch (payErr) {
+          console.warn("[Migration Orphan Payments Note]:", payErr?.message);
         }
-      } catch (prodErr) {
-        console.warn("[Migration Orphan Products Note]:", prodErr?.message);
-      }
-      try {
-        const orphanOrdRes = await qClient.query(
-          `SELECT id FROM shopit_orders WHERE buyer_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM shopit_users u WHERE u.id = shopit_orders.buyer_id)`
-        );
-        if (orphanOrdRes.rows.length > 0) {
-          orphanOrdersNullified = orphanOrdRes.rows.length;
+        try {
           await qClient.query(
-            `UPDATE shopit_orders SET buyer_id = NULL WHERE buyer_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM shopit_users u WHERE u.id = shopit_orders.buyer_id)`
+            `UPDATE shopit_ledger_entries SET order_id = NULL WHERE order_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM shopit_orders o WHERE o.id = shopit_ledger_entries.order_id)`
           );
-          console.warn(
-            `[Migration Repair] Preserved ${orphanOrdersNullified} order(s) by clearing dangling buyer_id references.`
-          );
+        } catch (ledOrdErr) {
+          console.warn("[Migration Ledger Order Clean Note]:", ledOrdErr?.message);
         }
-      } catch (ordErr) {
-        console.warn("[Migration Orphan Orders Note]:", ordErr?.message);
-      }
-      const insertQuarantineRow = /* @__PURE__ */ __name(async (sourceTable, sourcePk, reason, rowObj) => {
-        const qId = `q_${sourceTable}_${Date.now()}_${crypto2.randomBytes(4).toString("hex")}`;
-        await qClient.query(
-          `INSERT INTO shopit_migration_quarantine (id, source_table, source_pk, reason, row_data, quarantined_at, schema_version)
-         VALUES ($1, $2, $3, $4, $5::jsonb, NOW(), $6)`,
-          [qId, sourceTable, sourcePk, reason, JSON.stringify(rowObj), EXPECTED_SCHEMA_VERSION]
-        );
-      }, "insertQuarantineRow");
-      try {
-        const orphanPayRes = await qClient.query(
-          `SELECT * FROM shopit_payments WHERE order_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM shopit_orders o WHERE o.id = shopit_payments.order_id)`
-        );
-        for (const row of orphanPayRes.rows) {
-          const pk = String(row.reference || "");
-          await insertQuarantineRow(
-            "shopit_payments",
-            pk,
-            `Orphaned payment referencing missing order_id="${row.order_id}"`,
-            row
+        try {
+          const orphanWalletRes = await qClient.query(
+            `SELECT * FROM shopit_wallets WHERE NOT EXISTS (SELECT 1 FROM shopit_sellers s WHERE s.id = shopit_wallets.seller_id)`
           );
-          await qClient.query(`DELETE FROM shopit_payments WHERE reference = $1`, [row.reference]);
-          quarantined.payments++;
-        }
-      } catch (payErr) {
-        console.warn("[Migration Orphan Payments Note]:", payErr?.message);
-      }
-      try {
-        await qClient.query(
-          `UPDATE shopit_ledger_entries SET order_id = NULL WHERE order_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM shopit_orders o WHERE o.id = shopit_ledger_entries.order_id)`
-        );
-      } catch (ledOrdErr) {
-        console.warn("[Migration Ledger Order Clean Note]:", ledOrdErr?.message);
-      }
-      try {
-        const orphanWalletRes = await qClient.query(
-          `SELECT * FROM shopit_wallets WHERE NOT EXISTS (SELECT 1 FROM shopit_sellers s WHERE s.id = shopit_wallets.seller_id)`
-        );
-        const orphanWalletIds = new Set(orphanWalletRes.rows.map((w) => String(w.seller_id)));
-        const allLedgerCandidates = await qClient.query(
-          `SELECT * FROM shopit_ledger_entries WHERE NOT EXISTS (SELECT 1 FROM shopit_wallets w WHERE w.seller_id = shopit_ledger_entries.wallet_id)`
-        );
-        for (const lRow of allLedgerCandidates.rows) {
-          await insertQuarantineRow(
-            "shopit_ledger_entries",
-            String(lRow.id),
-            `Orphaned ledger entry referencing missing wallet_id="${lRow.wallet_id}"`,
-            lRow
+          const orphanWalletIds = new Set(orphanWalletRes.rows.map((w) => String(w.seller_id)));
+          const allLedgerCandidates = await qClient.query(
+            `SELECT * FROM shopit_ledger_entries WHERE NOT EXISTS (SELECT 1 FROM shopit_wallets w WHERE w.seller_id = shopit_ledger_entries.wallet_id)`
           );
-          await qClient.query(`DELETE FROM shopit_ledger_entries WHERE id = $1`, [lRow.id]);
-          quarantined.ledgerEntries++;
-        }
-        if (orphanWalletIds.size > 0) {
-          for (const wId of orphanWalletIds) {
-            const wLedgerRes = await qClient.query(`SELECT * FROM shopit_ledger_entries WHERE wallet_id = $1`, [wId]);
-            for (const lRow of wLedgerRes.rows) {
-              await insertQuarantineRow(
-                "shopit_ledger_entries",
-                String(lRow.id),
-                `Ledger entry attached to orphaned wallet_id="${wId}" (missing seller)`,
-                lRow
-              );
-              await qClient.query(`DELETE FROM shopit_ledger_entries WHERE id = $1`, [lRow.id]);
-              quarantined.ledgerEntries++;
+          for (const lRow of allLedgerCandidates.rows) {
+            await insertQuarantineRow(
+              "shopit_ledger_entries",
+              String(lRow.id),
+              `Orphaned ledger entry referencing missing wallet_id="${lRow.wallet_id}"`,
+              lRow
+            );
+            await qClient.query(`DELETE FROM shopit_ledger_entries WHERE id = $1`, [lRow.id]);
+            quarantined.ledgerEntries++;
+          }
+          if (orphanWalletIds.size > 0) {
+            for (const wId of orphanWalletIds) {
+              const wLedgerRes = await qClient.query(`SELECT * FROM shopit_ledger_entries WHERE wallet_id = $1`, [wId]);
+              for (const lRow of wLedgerRes.rows) {
+                await insertQuarantineRow(
+                  "shopit_ledger_entries",
+                  String(lRow.id),
+                  `Ledger entry attached to orphaned wallet_id="${wId}" (missing seller)`,
+                  lRow
+                );
+                await qClient.query(`DELETE FROM shopit_ledger_entries WHERE id = $1`, [lRow.id]);
+                quarantined.ledgerEntries++;
+              }
             }
           }
+          for (const wRow of orphanWalletRes.rows) {
+            await insertQuarantineRow(
+              "shopit_wallets",
+              String(wRow.seller_id),
+              `Orphaned wallet referencing missing shopit_sellers.id="${wRow.seller_id}"`,
+              wRow
+            );
+            await qClient.query(`DELETE FROM shopit_wallets WHERE seller_id = $1`, [wRow.seller_id]);
+            quarantined.wallets++;
+          }
+        } catch (wallErr) {
+          console.warn("[Migration Orphan Wallets Note]:", wallErr?.message);
         }
-        for (const wRow of orphanWalletRes.rows) {
-          await insertQuarantineRow(
-            "shopit_wallets",
-            String(wRow.seller_id),
-            `Orphaned wallet referencing missing shopit_sellers.id="${wRow.seller_id}"`,
-            wRow
+        try {
+          await qClient.query(
+            `UPDATE shopit_disputes SET buyer_id = NULL WHERE buyer_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM shopit_users u WHERE u.id = shopit_disputes.buyer_id)`
           );
-          await qClient.query(`DELETE FROM shopit_wallets WHERE seller_id = $1`, [wRow.seller_id]);
-          quarantined.wallets++;
-        }
-      } catch (wallErr) {
-        console.warn("[Migration Orphan Wallets Note]:", wallErr?.message);
-      }
-      try {
-        await qClient.query(
-          `UPDATE shopit_disputes SET buyer_id = NULL WHERE buyer_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM shopit_users u WHERE u.id = shopit_disputes.buyer_id)`
-        );
-        const orphanDisputeRes = await qClient.query(
-          `SELECT * FROM shopit_disputes WHERE NOT EXISTS (SELECT 1 FROM shopit_orders o WHERE o.id = shopit_disputes.order_id) OR NOT EXISTS (SELECT 1 FROM shopit_sellers s WHERE s.id = shopit_disputes.seller_id)`
-        );
-        for (const dRow of orphanDisputeRes.rows) {
-          await insertQuarantineRow(
-            "shopit_disputes",
-            String(dRow.id),
-            `Orphaned dispute missing required order_id="${dRow.order_id}" or seller_id="${dRow.seller_id}"`,
-            dRow
+          const orphanDisputeRes = await qClient.query(
+            `SELECT * FROM shopit_disputes WHERE NOT EXISTS (SELECT 1 FROM shopit_orders o WHERE o.id = shopit_disputes.order_id) OR NOT EXISTS (SELECT 1 FROM shopit_sellers s WHERE s.id = shopit_disputes.seller_id)`
           );
-          await qClient.query(`DELETE FROM shopit_disputes WHERE id = $1`, [dRow.id]);
-          quarantined.disputes++;
+          for (const dRow of orphanDisputeRes.rows) {
+            await insertQuarantineRow(
+              "shopit_disputes",
+              String(dRow.id),
+              `Orphaned dispute missing required order_id="${dRow.order_id}" or seller_id="${dRow.seller_id}"`,
+              dRow
+            );
+            await qClient.query(`DELETE FROM shopit_disputes WHERE id = $1`, [dRow.id]);
+            quarantined.disputes++;
+          }
+        } catch (dispErr) {
+          console.warn("[Migration Orphan Disputes Note]:", dispErr?.message);
         }
-      } catch (dispErr) {
-        console.warn("[Migration Orphan Disputes Note]:", dispErr?.message);
+        await qClient.query("COMMIT");
+      } catch (qErr) {
+        try {
+          await qClient.query("ROLLBACK");
+        } catch {
+        }
+        throw qErr;
+      } finally {
+        qClient.release();
       }
-      await qClient.query("COMMIT");
-    } catch (qErr) {
-      try {
-        await qClient.query("ROLLBACK");
-      } catch {
-      }
-      throw qErr;
-    } finally {
-      qClient.release();
     }
     console.log(
       `[Database Migration] Quarantine summary: payments=${quarantined.payments}, wallets=${quarantined.wallets}, ledgerEntries=${quarantined.ledgerEntries}, disputes=${quarantined.disputes}, orphanOrdersNullified=${orphanOrdersNullified}, deletedOrphanProducts=${deletedOrphanProducts}`
