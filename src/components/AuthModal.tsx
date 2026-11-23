@@ -163,7 +163,12 @@ export const AuthModal: React.FC = () => {
     setForgotStep('otp_and_reset');
     setResetCooldown(60);
     setForgotOtpInput('');
-    notify(`[Password Reset] 6-digit verification code sent to ${cleanEmail}. Valid for 10 minutes.`, 'success');
+    if (otpResult.devCode) {
+      setForgotOtpInput(otpResult.devCode);
+      notify(`[Test Mode] Reset code generated & auto-filled: ${otpResult.devCode}`, 'success');
+    } else {
+      notify(`[Password Reset] 6-digit verification code sent to ${cleanEmail}. Valid for 10 minutes.`, 'success');
+    }
   };
 
   const handleResendResetOtp = async () => {
@@ -176,7 +181,12 @@ export const AuthModal: React.FC = () => {
       return;
     }
     setResetCooldown(60);
-    notify(`[Password Reset] A new 6-digit code was sent to ${cleanEmail}. Valid for 10 minutes.`, 'info');
+    if (otpResult.devCode) {
+      setForgotOtpInput(otpResult.devCode);
+      notify(`[Test Mode] New reset code generated & auto-filled: ${otpResult.devCode}`, 'success');
+    } else {
+      notify(`[Password Reset] A new 6-digit code was sent to ${cleanEmail}. Valid for 10 minutes.`, 'info');
+    }
   };
 
   const handleResetPasswordSubmit = async (e: React.FormEvent) => {

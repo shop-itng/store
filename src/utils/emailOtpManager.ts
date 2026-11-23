@@ -105,6 +105,7 @@ export async function generateEmailOtp(
   emailDelivered?: boolean;
   error?: string;
   waitSeconds?: number;
+  devCode?: string;
 }> {
   const cleanEmail = email.trim().toLowerCase();
   if (!cleanEmail || !cleanEmail.includes('@')) {
@@ -139,6 +140,7 @@ export async function generateEmailOtp(
     return {
       success: true,
       emailDelivered: data.emailDelivered !== false,
+      devCode: data.devCode,
     };
   } catch (err: any) {
     return {

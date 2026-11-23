@@ -14788,7 +14788,8 @@ router4.post("/auth/send-otp", async (req, res) => {
     return res.json({
       status: true,
       emailDelivered: Boolean(emailSent),
-      message: cleanPurpose === "password_reset" ? "If an account with this email exists, a 6-digit verification code has been sent." : emailSent ? "A 6-digit verification code has been sent to your email." : "Verification code saved in database (email delivery skipped in local/non-production mode)."
+      devCode: !emailSent ? code : void 0,
+      message: cleanPurpose === "password_reset" ? !emailSent ? `Verification code generated: ${code}` : "If an account with this email exists, a 6-digit verification code has been sent." : emailSent ? "A 6-digit verification code has been sent to your email." : `Verification code generated: ${code}`
     });
   } catch (err) {
     console.error("[Server Error in /api/auth/send-otp]", err.message);
