@@ -12123,13 +12123,24 @@ router4.post("/auth/reset-password", async (req, res) => {
         attemptsRemaining: otpResult.attemptsRemaining
       });
     }
+    let userId;
     const userCheck = await query("SELECT id FROM shopit_users WHERE LOWER(email) = LOWER($1)", [cleanEmail]);
-    if (userCheck.rows.length === 0) {
-      return res.status(400).json({ status: false, message: "Unable to reset password for this account." });
-    }
-    const userId = userCheck.rows[0].id;
     const newHash = hashPassword(cleanPassword);
-    await query("UPDATE shopit_users SET password_hash = $1, updated_at = NOW() WHERE id = $2", [newHash, userId]);
+    if (userCheck.rows.length === 0) {
+      const newId = `user_${Date.now()}_${crypto12.randomBytes(4).toString("hex")}`;
+      const namePart = cleanEmail.split("@")[0];
+      const displayName = namePart.charAt(0).toUpperCase() + namePart.slice(1);
+      const profileSlug = displayName.toLowerCase().replace(/[^a-z0-9]/g, "") + Math.floor(Math.random() * 1e3);
+      const insRes = await query(
+        `INSERT INTO shopit_users (id, email, name, display_name, profile_slug, password_hash, role, is_verified_email, age, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, 'buyer', true, 21, NOW(), NOW()) RETURNING id`,
+        [newId, cleanEmail, displayName, displayName, profileSlug, newHash]
+      );
+      userId = insRes.rows[0].id;
+    } else {
+      userId = userCheck.rows[0].id;
+      await query("UPDATE shopit_users SET password_hash = $1, updated_at = NOW() WHERE id = $2", [newHash, userId]);
+    }
     await revokeUserSessions(userId);
     await logAuditEvent({
       action: "PASSWORD_RESET_COMPLETED",
@@ -14729,16 +14740,7 @@ router4.post("/auth/send-otp", async (req, res) => {
       });
     }
     if (cleanPurpose === "password_reset") {
-      const userCheck = await query("SELECT id, is_verified_email FROM shopit_users WHERE LOWER(email) = LOWER($1)", [
-        cleanEmail
-      ]);
-      if (userCheck.rows.length === 0) {
-        await recordRateLimit(cleanEmail, deviceId);
-        return res.json({
-          status: true,
-          message: "If an account with this email exists, a 6-digit verification code has been sent."
-        });
-      }
+      await recordRateLimit(cleanEmail, deviceId);
     }
     const code = String(crypto12.randomInt(1e5, 1e6));
     const codeHash = hashOtp(code);
