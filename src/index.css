@@ -301,7 +301,33 @@ button:active:not(:disabled) {
   animation: shimmerWave 1.4s infinite linear;
 }
 
-/* 8. Reduced Motion Rule (Respects prefers-reduced-motion) */
+/* 8. Additional Standout Animations */
+@keyframes floatAnim {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-4px); }
+}
+.animate-float {
+  animation: floatAnim 3s ease-in-out infinite;
+}
+
+@keyframes pulseGlow {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 107, 0, 0.4); }
+  50% { box-shadow: 0 0 0 8px rgba(255, 107, 0, 0); }
+}
+.animate-pulse-glow {
+  animation: pulseGlow 2s infinite ease-in-out;
+}
+
+@keyframes popIn {
+  0% { transform: scale(0.9); opacity: 0; }
+  70% { transform: scale(1.03); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
+.animate-pop-in {
+  animation: popIn 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* 9. Reduced Motion Rule (Respects prefers-reduced-motion) */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
