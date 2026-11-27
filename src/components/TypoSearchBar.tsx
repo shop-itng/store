@@ -363,7 +363,7 @@ export const TypoSearchBar: React.FC = () => {
       )}
 
       {/* Category Pills with Mixture of Green, Orange, and Black */}
-      <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-none text-xs">
+      <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 text-xs w-full">
         {CATEGORIES.map(cat => {
           const isActive = selectedCategory === cat.id;
           return (

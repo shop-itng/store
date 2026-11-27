@@ -204,15 +204,15 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product, index = 0 }) 
           </div>
 
           {/* Ask Seller & Share Quick Actions */}
-          <div className="flex items-center gap-1.5 pt-1">
+          <div className="flex items-center gap-1.5 pt-1 w-full">
             <button
               type="button"
               onClick={handleAskSeller}
-              className="flex-1 h-8 px-2.5 rounded-xl bg-[#111111] hover:bg-[#18181B] text-[#9FE870] border border-[#111111] dark:border-[#27272A] text-[11px] font-black transition-all flex items-center justify-center gap-1 whitespace-nowrap shrink-0 active:scale-95"
+              className="flex-1 min-w-0 h-8 px-2 rounded-xl bg-[#111111] hover:bg-[#18181B] text-[#9FE870] border border-[#111111] dark:border-[#27272A] text-[10px] sm:text-[11px] font-black transition-all flex items-center justify-center gap-1 truncate active:scale-95"
               title={isOwnProduct ? 'Manage this item in Seller Dashboard' : `Ask ${product.sellerShopName} about this item`}
             >
-              <MessageSquare className="w-3.5 h-3.5 text-[#FF6B00] shrink-0" />
-              <span>{isOwnProduct ? 'Your Item' : 'Ask Seller'}</span>
+              <MessageSquare className="w-3 h-3 text-[#FF6B00] shrink-0" />
+              <span className="truncate">{isOwnProduct ? 'Your Item' : 'Ask Seller'}</span>
             </button>
 
             <button
@@ -220,16 +220,16 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product, index = 0 }) 
               onClick={handleShareCard}
               aria-label={`Share ${product.title}`}
               title="Share product link"
-              className="h-8 px-2.5 rounded-xl bg-[#FAFAFA] hover:bg-[#FFF4EC] dark:bg-[#1E2028] dark:hover:bg-[#27272A] text-[#111111] dark:text-white border border-[#E4E4E7] dark:border-[#27272A] text-[11px] font-bold transition-all flex items-center justify-center gap-1 whitespace-nowrap shrink-0 active:scale-95"
+              className="h-8 px-2 rounded-xl bg-[#FAFAFA] hover:bg-[#FFF4EC] dark:bg-[#1E2028] dark:hover:bg-[#27272A] text-[#111111] dark:text-white border border-[#E4E4E7] dark:border-[#27272A] text-[10px] sm:text-[11px] font-bold transition-all flex items-center justify-center gap-1 shrink-0 active:scale-95"
             >
               {copiedShare ? (
                 <>
-                  <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                  <Check className="w-3 h-3 text-emerald-600 shrink-0" />
                   <span>Copied</span>
                 </>
               ) : (
                 <>
-                  <Share2 className="w-3.5 h-3.5 text-[#FF6B00] shrink-0" />
+                  <Share2 className="w-3 h-3 text-[#FF6B00] shrink-0" />
                   <span>Share</span>
                 </>
               )}
