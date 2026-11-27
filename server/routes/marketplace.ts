@@ -2069,7 +2069,17 @@ export async function processEscrowAutoRelease(batchLimit = 50): Promise<{ relea
         );
         if (disputeCheck.rows.length > 0) return false;
 
-        const items = Array.isArray(order.items) ? order.items : [];
+        const items: any[] = Array.isArray(order.items)
+          ? order.items
+          : typeof order.items === 'string'
+            ? (() => {
+                try {
+                  return JSON.parse(order.items);
+                } catch {
+                  return [];
+                }
+              })()
+            : [];
         const sellerTotals: Record<string, number> = {};
         for (const item of items) {
           if (item.sellerId) {

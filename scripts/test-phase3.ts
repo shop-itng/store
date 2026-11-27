@@ -2,13 +2,16 @@ import './testEnv.js';
 import { runMigration, query as dbQuery } from '../server/db/postgres.js';
 import { processEscrowAutoRelease } from '../server/routes/marketplace.js';
 import { hashOtp, saveHashedOtp, getOtpRecord, verifyOtpHash } from '../server/db/otpStore.js';
-import flwWebhookHandler from '../server/webhooks/flutterwave.js';
+import paystackWebhookHandler from '../server/webhooks/paystack.js';
+import crypto from 'crypto';
 
 interface MockResponse {
   statusCode: number;
   headers: Record<string, string>;
   body: string;
   setHeader: (key: string, val: string) => void;
+  status: (code: number) => MockResponse;
+  json: (data: any) => void;
   end: (data?: string) => void;
 }
 
@@ -20,6 +23,13 @@ function createMockRes(): MockResponse {
     setHeader(key: string, val: string) {
       this.headers[key.toLowerCase()] = val;
     },
+    status(code: number) {
+      this.statusCode = code;
+      return this;
+    },
+    json(data: any) {
+      this.body = JSON.stringify(data);
+    },
     end(data?: string) {
       if (data) this.body = data;
     },
@@ -29,7 +39,7 @@ function createMockRes(): MockResponse {
 
 async function runPhase3Tests() {
   console.log('====================================================');
-  console.log('🧪 SHOP IT - FLUTTERWAVE WEBHOOK & ESCROW VERIFICATION');
+  console.log('🧪 SHOP IT - PAYSTACK WEBHOOK & ESCROW VERIFICATION');
   console.log('====================================================\n');
 
   await runMigration();
@@ -48,38 +58,39 @@ async function runPhase3Tests() {
   }
 
   process.env.PAYMENTS_ENABLED = 'true';
-  process.env.FLW_SECRET_KEY = 'FLWSECK_TEST-phase3-mock-secret';
-  process.env.FLW_WEBHOOK_SECRET_HASH = 'test_flw_webhook_hash_123';
+  process.env.PAYSTACK_SECRET_KEY = 'sk_test_phase3_mock_secret_key';
 
-  // TEST 1: Flutterwave Webhook rejects missing verif-hash with 401
+  const paystackSecret = process.env.PAYSTACK_SECRET_KEY;
+
+  // TEST 1: Paystack Webhook rejects missing x-paystack-signature with 401
   {
     const req: any = {
       method: 'POST',
       headers: {},
-      rawBody: Buffer.from(JSON.stringify({ event: 'charge.completed', data: { tx_ref: 'TEST_REF_1' } })),
+      rawBody: Buffer.from(JSON.stringify({ event: 'charge.success', data: { reference: 'TEST_REF_1' } })),
     };
     const res = createMockRes();
-    await flwWebhookHandler(req, res);
-    assert(res.statusCode === 401, 'Webhook rejects missing verif-hash header with HTTP 401');
+    await paystackWebhookHandler(req, res);
+    assert(res.statusCode === 401, 'Webhook rejects missing x-paystack-signature header with HTTP 401');
   }
 
-  // TEST 2: Flutterwave Webhook rejects invalid verif-hash with 401
+  // TEST 2: Paystack Webhook rejects invalid x-paystack-signature with 401
   {
     const req: any = {
       method: 'POST',
       headers: {
-        'verif-hash': 'invalid_forged_hash_value',
+        'x-paystack-signature': 'invalid_forged_hash_value',
       },
-      rawBody: Buffer.from(JSON.stringify({ event: 'charge.completed', data: { tx_ref: 'TEST_REF_2' } })),
+      rawBody: Buffer.from(JSON.stringify({ event: 'charge.success', data: { reference: 'TEST_REF_2' } })),
     };
     const res = createMockRes();
-    await flwWebhookHandler(req, res);
-    assert(res.statusCode === 401, 'Webhook rejects invalid verif-hash header with HTTP 401');
+    await paystackWebhookHandler(req, res);
+    assert(res.statusCode === 401, 'Webhook rejects invalid x-paystack-signature header with HTTP 401');
   }
 
-  // TEST 3: Flutterwave Webhook accepts valid verif-hash + Flutterwave verify and processes 5-day escrow
+  // TEST 3: Paystack Webhook accepts valid signature + Paystack verify and processes 5-day escrow
   {
-    const testRef = `FLW_TEST_${Date.now()}`;
+    const testRef = `PSTK_TEST_${Date.now()}`;
     const testOrderId = `ORD_ESCROW_${Date.now()}`;
     const testSellerId = `seller_escrow_${Date.now()}`;
     const testBuyerId = `buyer_123_${Date.now()}`;
@@ -105,7 +116,7 @@ async function runPhase3Tests() {
       ) VALUES (
         $1, $4, 'Emeka Okafor', 'emeka@futo.edu.ng',
         $2, 1000000, 50000, 100000, 0, 1150000,
-        'flutterwave_card', $3, 'FUTO', 'pending_payment', NULL, NOW(), NOW()
+        'paystack_card', $3, 'FUTO', 'pending_payment', NULL, NOW(), NOW()
       )
     `, [
       testOrderId,
@@ -123,19 +134,19 @@ async function runPhase3Tests() {
     const origFetch = globalThis.fetch;
     globalThis.fetch = (async (input: any, init?: any) => {
       const url = typeof input === 'string' ? input : input.toString();
-      if (url.includes('api.flutterwave.com/v3/transactions')) {
+      if (url.includes('api.paystack.co/transaction/verify')) {
         return new Response(
           JSON.stringify({
-            status: 'success',
+            status: true,
             data: {
               id: 9876543,
-              tx_ref: testRef,
-              amount: 11500,
+              reference: testRef,
+              amount: 1150000, // in kobo
               currency: 'NGN',
-              status: 'successful',
-              payment_type: 'card',
+              status: 'success',
+              channel: 'card',
               customer: { email: 'emeka@futo.edu.ng' },
-              meta: { orderId: testOrderId },
+              gateway_response: 'Approved',
             },
           }),
           { status: 200, headers: { 'Content-Type': 'application/json' } }
@@ -146,31 +157,31 @@ async function runPhase3Tests() {
 
     try {
       const payloadObj = {
-        event: 'charge.completed',
+        event: 'charge.success',
         data: {
           id: 9876543,
-          tx_ref: testRef,
-          amount: 11500,
+          reference: testRef,
+          amount: 1150000,
           currency: 'NGN',
-          status: 'successful',
-          payment_type: 'card',
-          meta: { orderId: testOrderId },
+          status: 'success',
+          channel: 'card',
           customer: { email: 'emeka@futo.edu.ng' },
         },
       };
       const rawBuffer = Buffer.from(JSON.stringify(payloadObj), 'utf-8');
+      const computedSig = crypto.createHmac('sha512', paystackSecret!).update(rawBuffer).digest('hex');
 
       const req: any = {
         method: 'POST',
         headers: {
-          'verif-hash': process.env.FLW_WEBHOOK_SECRET_HASH,
+          'x-paystack-signature': computedSig,
         },
         rawBody: rawBuffer,
       };
       const res = createMockRes();
 
-      await flwWebhookHandler(req, res);
-      assert(res.statusCode === 200, 'Webhook processes valid verif-hash with HTTP 200');
+      await paystackWebhookHandler(req, res);
+      assert(res.statusCode === 200, 'Webhook processes valid signature with HTTP 200');
 
       const orderCheck = await dbQuery('SELECT status, auto_release_at FROM shopit_orders WHERE id = $1', [testOrderId]);
       assert(orderCheck.rows[0]?.status === 'paid', 'Order status moved to "paid" in PostgreSQL');
@@ -185,9 +196,9 @@ async function runPhase3Tests() {
 
       // TEST 4: Idempotency (replay attack prevention)
       const replayRes = createMockRes();
-      await flwWebhookHandler(req, replayRes);
+      await paystackWebhookHandler(req, replayRes);
       const replayBody = JSON.parse(replayRes.body || '{}');
-      assert(replayBody.alreadyProcessed === true || replayBody.status === true, 'Duplicate webhook event handled idempotently without duplicate credit');
+      assert(replayBody.status === true, 'Duplicate webhook event handled idempotently without duplicate credit');
     } finally {
       globalThis.fetch = origFetch;
     }
@@ -222,12 +233,12 @@ async function runPhase3Tests() {
       (
         $1, $6, 'Chidi', 'chidi@unn.edu.ng',
         $2, 800000, 40000, 0, 0, 840000,
-        'flutterwave_card', $3, 'UNN', 'shipped', NOW() - INTERVAL '1 hour', NOW() - INTERVAL '6 days', NOW()
+        'paystack_card', $3, 'UNN', 'shipped', NOW() - INTERVAL '1 hour', NOW() - INTERVAL '6 days', NOW()
       ),
       (
         $4, $6, 'Chidi', 'chidi@unn.edu.ng',
         $2, 800000, 40000, 0, 0, 840000,
-        'flutterwave_card', $5, 'UNN', 'paid', NOW() - INTERVAL '1 hour', NOW() - INTERVAL '6 days', NOW()
+        'paystack_card', $5, 'UNN', 'paid', NOW() - INTERVAL '1 hour', NOW() - INTERVAL '6 days', NOW()
       )
     `, [
       autoReleaseOrderId,
@@ -280,7 +291,7 @@ async function runPhase3Tests() {
   }
 
   console.log(`\n====================================================`);
-  console.log(`📊 ESCROW & WEBHOOK TEST RESULTS: ${passed}/${total} PASSED`);
+  console.log(`📊 ESCROW & PAYSTACK WEBHOOK TEST RESULTS: ${passed}/${total} PASSED`);
   console.log(`====================================================\n`);
 
   if (passed === total) {

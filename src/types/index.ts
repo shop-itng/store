@@ -347,7 +347,7 @@ export interface Order {
   couponCode?: string;
   grandTotal: number;
   status: OrderStatus;
-  paymentMethod: 'flutterwave_card' | 'flutterwave_transfer' | 'flutterwave_ussd' | 'flutterwave_opay' | 'online';
+  paymentMethod: 'paystack_card' | 'paystack_transfer' | 'paystack_ussd' | 'paystack_bank' | 'paystack_qr' | 'online';
   paymentReference: string;
   packedPhotoUrl?: string; // Uploaded by seller before dispatch
   createdAt: string;
@@ -376,10 +376,10 @@ export interface Coupon {
 }
 
 export type LedgerEntryType =
-  | 'sale_pending'      // Credit pending balance when buyer pays via Flutterwave
+  | 'sale_pending'      // Credit pending balance when buyer pays via Paystack
   | 'escrow_release'    // Debit pending balance, Credit available balance upon buyer confirmation or 5-day timeout
-  | 'withdrawal'        // Debit available balance when seller withdraws via Flutterwave Transfers API
-  | 'fee_deduction'     // Flutterwave transfer network fee
+  | 'withdrawal'        // Debit available balance when seller withdraws via Paystack Transfers API
+  | 'fee_deduction'     // Paystack transfer network fee
   | 'refund';           // Debit pending balance when order cancelled/refunded to buyer's card/bank
 
 export interface LedgerEntry {

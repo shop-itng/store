@@ -2,9 +2,9 @@ import { LedgerEntry, PayoutAccount } from '../types';
 import { safeStorageGet } from './safeStorage';
 
 /**
- * Flutterwave v3 Configuration for Shop It
+ * Paystack Configuration for Shop It
  * Secrets are strictly handled on the server.
- * Public key is accessed via import.meta.env.VITE_FLW_PUBLIC_KEY or /api/payments/config.
+ * Public key is accessed via import.meta.env.VITE_PAYSTACK_PUBLIC_KEY or /api/payments/config.
  */
 function getAuthHeaders(): Record<string, string> {
   const token = safeStorageGet('shopit_session_token');
@@ -12,7 +12,7 @@ function getAuthHeaders(): Record<string, string> {
 }
 
 export const PAYMENT_CONFIG = {
-  publicKey: (import.meta as any).env?.VITE_FLW_PUBLIC_KEY || '',
+  publicKey: (import.meta as any).env?.VITE_PAYSTACK_PUBLIC_KEY || '',
   minWithdrawal: 1000, // ₦1,000 minimum rule
   coolingPeriodHours: 24, // 24-hour cooling period for newly added payout accounts
 };
@@ -78,7 +78,7 @@ export async function initializePaymentOnServer(payload: {
 }
 
 /**
- * Queries server to verify transaction status directly confirmed with Flutterwave v3
+ * Queries server to verify transaction status directly confirmed with Paystack
  */
 export async function verifyPaymentOnServer(
   reference: string,
@@ -127,12 +127,12 @@ export async function getPaymentServerConfig(): Promise<{
     return await res.json();
   } catch {
     return {
-      provider: 'flutterwave',
+      provider: 'paystack',
       publicKey: PAYMENT_CONFIG.publicKey,
       isSecretConfigured: false,
       isWebhookSecretConfigured: false,
-      webhookPath: '/api/webhooks/flutterwave',
-      webhookUrl: 'https://shopitng.vercel.app/api/webhooks/flutterwave',
+      webhookPath: '/api/webhooks/paystack',
+      webhookUrl: 'https://shop-itng-pied.vercel.app/api/webhooks/paystack',
     };
   }
 }
@@ -154,7 +154,7 @@ export async function getPaymentServerEvents(): Promise<any[]> {
 }
 
 /**
- * Fetches live list of Flutterwave NG supported payout banks from /api/payments/banks
+ * Fetches live list of NG supported payout banks from /api/payments/banks
  */
 export async function fetchSupportedBanks(): Promise<{
   status: boolean;
@@ -182,7 +182,7 @@ export async function fetchSupportedBanks(): Promise<{
 }
 
 /**
- * Resolves a Nigerian bank account name via Flutterwave /v3/accounts/resolve on the server
+ * Resolves a Nigerian bank account name via Paystack / bank resolution on the server
  */
 export async function resolveBankAccount(
   bankCode: string,
@@ -239,7 +239,7 @@ export function calculateBalancesFromLedger(entries: LedgerEntry[]): {
   for (const entry of sorted) {
     switch (entry.type) {
       case 'sale_pending':
-        // New order paid via Flutterwave webhook -> held in escrow
+        // New order paid via Paystack webhook -> held in escrow
         pending += entry.amount;
         break;
 
@@ -250,7 +250,7 @@ export function calculateBalancesFromLedger(entries: LedgerEntry[]): {
         break;
 
       case 'withdrawal':
-        // Payout to Nigerian Bank through Flutterwave Transfers API
+        // Payout to Nigerian Bank through Paystack Transfers API
         const totalDeduction = entry.amount + (entry.fee || 0);
         available = Math.max(0, available - totalDeduction);
         totalWithdrawn += entry.amount;
@@ -260,64 +260,44 @@ export function calculateBalancesFromLedger(entries: LedgerEntry[]): {
         // Order cancelled or disputed refund returned directly to buyer's account
         pending = Math.max(0, pending - entry.amount);
         break;
-
-      case 'fee_deduction':
-        break;
     }
   }
 
   return {
     pendingBalance: Math.max(0, pending),
     availableBalance: Math.max(0, available),
-    totalWithdrawn,
+    totalWithdrawn: Math.max(0, totalWithdrawn),
   };
 }
 
 /**
- * Checks if a payout account has passed the 24-hour security cooling period.
- * A new payout account waits 24 hours before it can be used.
+ * Checks if a newly added payout account has completed the 24-hour cooling period
  */
-export function isPayoutAccountCooled(account: PayoutAccount): {
-  isCooled: boolean;
-  hoursRemaining: number;
-} {
-  const coolingEndTime = new Date(account.coolingPeriodEndsAt).getTime();
+export function isPayoutAccountCooled(account: PayoutAccount): { isCooled: boolean; hoursRemaining: number } {
+  const createdAt = account.createdAt || (account as any).addedAt || new Date().toISOString();
+  const added = new Date(createdAt).getTime();
   const now = Date.now();
-  const diffMs = coolingEndTime - now;
-
-  if (diffMs <= 0) {
-    return { isCooled: true, hoursRemaining: 0 };
-  }
-
-  const hoursRemaining = Math.max(1, Math.ceil(diffMs / (1000 * 60 * 60)));
-  return { isCooled: false, hoursRemaining };
+  const diffHours = (now - added) / (1000 * 60 * 60);
+  const remaining = Math.max(0, Math.ceil(24 - diffHours));
+  return {
+    isCooled: diffHours >= PAYMENT_CONFIG.coolingPeriodHours,
+    hoursRemaining: remaining,
+  };
 }
 
 /**
- * Validates that the bank account name matches the seller's verified ID name.
+ * Validates whether resolved bank account name roughly matches the seller's name
  */
-export function validateAccountNameMatch(
-  accountName: string,
-  verifiedSellerName: string
-): { isMatch: boolean; reason?: string } {
-  const normalize = (str: string) =>
-    str
-      .toLowerCase()
-      .replace(/[^a-z0-9]/g, ' ')
-      .trim()
-      .split(/\s+/);
-
-  const accParts = normalize(accountName);
-  const sellerParts = normalize(verifiedSellerName);
-
-  const hasSharedName = accParts.some(part => part.length >= 2 && sellerParts.includes(part));
-
-  if (!hasSharedName) {
-    return {
-      isMatch: false,
-      reason: `Account name "${accountName.toUpperCase()}" does not match verified seller identity "${verifiedSellerName.toUpperCase()}". KYC requires the recipient bank account name to match your registered ID.`,
-    };
-  }
-
-  return { isMatch: true };
+export function validateAccountNameMatch(accountName: string, sellerName: string): { isMatch: boolean; reason?: string } {
+  if (!accountName || !sellerName) return { isMatch: true };
+  const cleanAcc = accountName.trim().toLowerCase();
+  const cleanSell = sellerName.trim().toLowerCase();
+  const accParts = cleanAcc.split(/\s+/);
+  const match = accParts.some(part => part.length > 2 && cleanSell.includes(part));
+  return {
+    isMatch: match,
+    reason: match ? undefined : `Account name (${accountName}) does not closely match seller name (${sellerName}).`,
+  };
 }
+
+

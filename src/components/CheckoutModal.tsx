@@ -20,10 +20,11 @@ import {
 } from 'lucide-react';
 
 type PaymentChannelChoice =
-  | 'flutterwave_card'
-  | 'flutterwave_transfer'
-  | 'flutterwave_ussd'
-  | 'flutterwave_opay';
+  | 'paystack_card'
+  | 'paystack_transfer'
+  | 'paystack_ussd'
+  | 'paystack_bank'
+  | 'paystack_qr';
 
 export const CheckoutModal: React.FC = () => {
   const {
@@ -44,7 +45,7 @@ export const CheckoutModal: React.FC = () => {
   } = useApp();
   const trustCopy = getTrustCopy(paymentsEnabled);
 
-  const [paymentMethod, setPaymentMethod] = useState<PaymentChannelChoice>('flutterwave_card');
+  const [paymentMethod, setPaymentMethod] = useState<PaymentChannelChoice>('paystack_card');
   const [selectedCampus, setSelectedCampus] = useState<Campus>(
     (currentUser?.savedDeliveryArea as Campus) || 'UNILAG (Akoka)'
   );
@@ -191,7 +192,7 @@ export const CheckoutModal: React.FC = () => {
     }
 
     setIsProcessing(true);
-    setProcessingStage('1/3 Reserving stock & creating secure Flutterwave session...');
+    setProcessingStage('1/3 Reserving stock & creating secure Paystack session...');
 
     try {
       const token = typeof localStorage !== 'undefined' ? localStorage.getItem('shopit_session_token') : null;
@@ -245,7 +246,7 @@ export const CheckoutModal: React.FC = () => {
       });
 
       if (authorizationUrl) {
-        notify('Checkout session ready. Tap "Open Flutterwave Checkout" to pay securely, then verify status.', 'info');
+        notify('Checkout session ready. Tap "Open Paystack Checkout" to pay securely, then verify status.', 'info');
       }
     } catch (err: any) {
       setIsProcessing(false);
@@ -317,7 +318,7 @@ export const CheckoutModal: React.FC = () => {
             </div>
 
             <p className="text-[11px] text-emerald-800 dark:text-emerald-300 leading-relaxed">
-              Your items are reserved for 60 minutes. Complete payment securely via Flutterwave (Card, Bank Transfer, USSD, or OPay where enabled), then return here or tap Check Payment Status.
+              Your items are reserved for 60 minutes. Complete payment securely via Paystack (Card, Bank Transfer, USSD, Pay with Bank, or Visa QR), then return here or tap Check Payment Status.
             </p>
 
             <div className="flex flex-wrap items-center gap-2 pt-1">
@@ -329,7 +330,7 @@ export const CheckoutModal: React.FC = () => {
                   className="px-4 py-2.5 bg-[#9FE870] hover:bg-[#AEF083] text-[#111111] font-black rounded-xl text-xs flex items-center gap-1.5 border border-[#111111] shadow-[0_2px_0_#111111] active:translate-y-0.5"
                 >
                   <ExternalLink className="w-4 h-4 text-[#111111]" />
-                  <span>Open Flutterwave Checkout</span>
+                  <span>Open Paystack Checkout</span>
                 </a>
               )}
 
@@ -490,68 +491,84 @@ export const CheckoutModal: React.FC = () => {
             <span className="text-[11px] text-slate-500 font-medium">{trustCopy.checkoutChannelLabel}</span>
           </div>
 
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
             <button
               type="button"
-              onClick={() => setPaymentMethod('flutterwave_card')}
+              onClick={() => setPaymentMethod('paystack_card')}
               className={`p-2.5 rounded-2xl border-2 flex flex-col items-center justify-center gap-1 text-center transition-all cursor-pointer ${
-                paymentMethod === 'flutterwave_card'
+                paymentMethod === 'paystack_card'
                   ? 'border-[#111111] dark:border-white bg-[#111111] text-[#9FE870] shadow-[0_3px_0_#FF6B00]'
                   : 'border-slate-200 dark:border-[#27272A] bg-white dark:bg-[#15161C] text-slate-700 dark:text-[#A1A1AA] hover:border-slate-400'
               }`}
             >
-              <CreditCard className={`w-4 h-4 ${paymentMethod === 'flutterwave_card' ? 'text-[#9FE870]' : 'text-slate-500'}`} />
+              <CreditCard className={`w-4 h-4 ${paymentMethod === 'paystack_card' ? 'text-[#9FE870]' : 'text-slate-500'}`} />
               <span className="text-xs font-black tracking-tight">Card</span>
-              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${paymentMethod === 'flutterwave_card' ? 'bg-[#9FE870]/20 text-[#9FE870]' : 'bg-slate-100 dark:bg-stone-800 text-slate-500'}`}>
+              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${paymentMethod === 'paystack_card' ? 'bg-[#9FE870]/20 text-[#9FE870]' : 'bg-slate-100 dark:bg-stone-800 text-slate-500'}`}>
                 Verve / Visa / MC
               </span>
             </button>
 
             <button
               type="button"
-              onClick={() => setPaymentMethod('flutterwave_transfer')}
+              onClick={() => setPaymentMethod('paystack_transfer')}
               className={`p-2.5 rounded-2xl border-2 flex flex-col items-center justify-center gap-1 text-center transition-all cursor-pointer ${
-                paymentMethod === 'flutterwave_transfer'
+                paymentMethod === 'paystack_transfer'
                   ? 'border-[#111111] dark:border-white bg-[#111111] text-[#9FE870] shadow-[0_3px_0_#FF6B00]'
                   : 'border-slate-200 dark:border-[#27272A] bg-white dark:bg-[#15161C] text-slate-700 dark:text-[#A1A1AA] hover:border-slate-400'
               }`}
             >
-              <Building2 className={`w-4 h-4 ${paymentMethod === 'flutterwave_transfer' ? 'text-[#9FE870]' : 'text-slate-500'}`} />
+              <Building2 className={`w-4 h-4 ${paymentMethod === 'paystack_transfer' ? 'text-[#9FE870]' : 'text-slate-500'}`} />
               <span className="text-xs font-black tracking-tight">Bank Transfer</span>
-              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${paymentMethod === 'flutterwave_transfer' ? 'bg-[#9FE870]/20 text-[#9FE870]' : 'bg-slate-100 dark:bg-stone-800 text-slate-500'}`}>
-                One-Time Account
+              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${paymentMethod === 'paystack_transfer' ? 'bg-[#9FE870]/20 text-[#9FE870]' : 'bg-slate-100 dark:bg-stone-800 text-slate-500'}`}>
+                Acct Number
               </span>
             </button>
 
             <button
               type="button"
-              onClick={() => setPaymentMethod('flutterwave_ussd')}
+              onClick={() => setPaymentMethod('paystack_ussd')}
               className={`p-2.5 rounded-2xl border-2 flex flex-col items-center justify-center gap-1 text-center transition-all cursor-pointer ${
-                paymentMethod === 'flutterwave_ussd'
+                paymentMethod === 'paystack_ussd'
                   ? 'border-[#111111] dark:border-white bg-[#111111] text-[#9FE870] shadow-[0_3px_0_#FF6B00]'
                   : 'border-slate-200 dark:border-[#27272A] bg-white dark:bg-[#15161C] text-slate-700 dark:text-[#A1A1AA] hover:border-slate-400'
               }`}
             >
-              <PhoneCall className={`w-4 h-4 ${paymentMethod === 'flutterwave_ussd' ? 'text-[#9FE870]' : 'text-slate-500'}`} />
+              <PhoneCall className={`w-4 h-4 ${paymentMethod === 'paystack_ussd' ? 'text-[#9FE870]' : 'text-slate-500'}`} />
               <span className="text-xs font-black tracking-tight">USSD</span>
-              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${paymentMethod === 'flutterwave_ussd' ? 'bg-[#9FE870]/20 text-[#9FE870]' : 'bg-slate-100 dark:bg-stone-800 text-slate-500'}`}>
+              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${paymentMethod === 'paystack_ussd' ? 'bg-[#9FE870]/20 text-[#9FE870]' : 'bg-slate-100 dark:bg-stone-800 text-slate-500'}`}>
                 Dial Code
               </span>
             </button>
 
             <button
               type="button"
-              onClick={() => setPaymentMethod('flutterwave_opay')}
+              onClick={() => setPaymentMethod('paystack_bank')}
               className={`p-2.5 rounded-2xl border-2 flex flex-col items-center justify-center gap-1 text-center transition-all cursor-pointer ${
-                paymentMethod === 'flutterwave_opay'
+                paymentMethod === 'paystack_bank'
                   ? 'border-[#111111] dark:border-white bg-[#111111] text-[#9FE870] shadow-[0_3px_0_#FF6B00]'
                   : 'border-slate-200 dark:border-[#27272A] bg-white dark:bg-[#15161C] text-slate-700 dark:text-[#A1A1AA] hover:border-slate-400'
               }`}
             >
-              <Wallet className={`w-4 h-4 ${paymentMethod === 'flutterwave_opay' ? 'text-[#9FE870]' : 'text-slate-500'}`} />
-              <span className="text-xs font-black tracking-tight">OPay</span>
-              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${paymentMethod === 'flutterwave_opay' ? 'bg-[#9FE870]/20 text-[#9FE870]' : 'bg-slate-100 dark:bg-stone-800 text-slate-500'}`}>
-                Wallet Checkout
+              <Building2 className={`w-4 h-4 ${paymentMethod === 'paystack_bank' ? 'text-[#9FE870]' : 'text-slate-500'}`} />
+              <span className="text-xs font-black tracking-tight">Pay with Bank</span>
+              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${paymentMethod === 'paystack_bank' ? 'bg-[#9FE870]/20 text-[#9FE870]' : 'bg-slate-100 dark:bg-stone-800 text-slate-500'}`}>
+                Direct Bank
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setPaymentMethod('paystack_qr')}
+              className={`p-2.5 rounded-2xl border-2 flex flex-col items-center justify-center gap-1 text-center transition-all cursor-pointer ${
+                paymentMethod === 'paystack_qr'
+                  ? 'border-[#111111] dark:border-white bg-[#111111] text-[#9FE870] shadow-[0_3px_0_#FF6B00]'
+                  : 'border-slate-200 dark:border-[#27272A] bg-white dark:bg-[#15161C] text-slate-700 dark:text-[#A1A1AA] hover:border-slate-400'
+              }`}
+            >
+              <Wallet className={`w-4 h-4 ${paymentMethod === 'paystack_qr' ? 'text-[#9FE870]' : 'text-slate-500'}`} />
+              <span className="text-xs font-black tracking-tight">Visa QR</span>
+              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${paymentMethod === 'paystack_qr' ? 'bg-[#9FE870]/20 text-[#9FE870]' : 'bg-slate-100 dark:bg-stone-800 text-slate-500'}`}>
+                Scan &amp; Pay
               </span>
             </button>
           </div>

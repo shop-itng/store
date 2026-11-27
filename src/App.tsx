@@ -204,8 +204,49 @@ const MarketplaceContent: React.FC = () => {
       <main className="flex-1">
         {activeView === 'catalog' && (
           <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6 animate-fade-in-up">
+            {/* ViVA Style Promotional Hero Banner with Top Selling / New Products */}
+            <div className="relative overflow-hidden rounded-3xl bg-gradient-to-r from-[#FFF4EC] via-[#FAF3EC] to-[#E6F4EA] dark:from-[#15161C] dark:to-[#121815] border-2 border-[#111111]/10 dark:border-[#27272A] p-6 sm:p-8 shadow-sm space-y-6">
+              <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+                <div className="space-y-2">
+                  <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-wider bg-[#022c22] text-[#9FE870]">
+                    🔥 Top Selling &amp; New Campus Products
+                  </span>
+                  <h1 className="text-2xl sm:text-3xl font-black text-neutral-900 dark:text-white tracking-tight">
+                    Elevate Your Everyday
+                  </h1>
+                  <p className="text-xs sm:text-sm text-neutral-600 dark:text-[#A1A1AA]">
+                    Handmade crafts, fashion, and tech essentials posted by top campus makers.
+                  </p>
+                </div>
+                <button
+                  onClick={() => {
+                    const el = document.getElementById('marketplace-grid');
+                    el?.scrollIntoView({ behavior: 'smooth' });
+                  }}
+                  className="px-5 py-2.5 bg-[#022c22] hover:bg-[#064e3b] text-[#9FE870] font-black text-xs rounded-xl shadow-md transition-all flex items-center gap-2 group cursor-pointer shrink-0"
+                >
+                  <span>View All ({products.length})</span>
+                  <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+                </button>
+              </div>
+
+              {products.length > 0 ? (
+                <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-3.5 pt-2">
+                  {products.slice(0, 4).map((product, idx) => (
+                    <ProductCard key={product.id} product={product} index={idx} />
+                  ))}
+                </div>
+              ) : (
+                <div className="py-8 text-center text-xs text-neutral-500">
+                  No products posted yet. Be the first to list a craft!
+                </div>
+              )}
+            </div>
+
             {/* Search & Location Filter Bar (State > City > Area) */}
-            <TypoSearchBar />
+            <div id="marketplace-grid">
+              <TypoSearchBar />
+            </div>
 
             {/* Product Feed Grid */}
             <section className="space-y-4">

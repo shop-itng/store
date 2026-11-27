@@ -2585,24 +2585,22 @@ export const AdminPanel: React.FC = () => {
             </div>
           </div>
 
-          {/* Flutterwave Gateway System Overview */}
+          {/* Paystack Gateway System Overview */}
           <div className="bg-[#111111] text-white p-5 rounded-2xl border-2 border-[#111111] shadow-[0_3px_0_#9FE870] space-y-4">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-3 border-b border-stone-800 gap-2">
               <div className="flex items-center gap-2.5">
                 <div className="w-8 h-8 rounded-lg bg-[#9FE870] text-[#111111] font-black flex items-center justify-center text-xs">
-                  FW
+                  PS
                 </div>
                 <div>
                   <div className="flex items-center gap-2">
-                    <h3 className="text-sm font-black text-white">Flutterwave Integration Status</h3>
+                    <h3 className="text-sm font-black text-white">Paystack Integration Status</h3>
                     <span className="text-[10px] font-black text-[#111111] bg-[#9FE870] px-2 py-0.5 rounded-full border border-[#111111]">
-                      {PAYMENT_CONFIG.publicKey?.startsWith('FLWPUBK-') && !PAYMENT_CONFIG.publicKey.startsWith('FLWPUBK_TEST')
-                        ? 'LIVE KEYS ACTIVE'
-                        : 'API v3 CONFIGURED'}
+                      API CONFIGURED
                     </span>
                   </div>
                   <p className="text-[11px] text-stone-400">
-                    Flutterwave API v3 Standard Checkout &amp; Transfers (₦0 seller withdrawal fee under Option 1).
+                    Paystack API Checkout &amp; Transfers (₦0 seller withdrawal fee under Option 1).
                   </p>
                 </div>
               </div>
@@ -3051,50 +3049,50 @@ export const AdminPanel: React.FC = () => {
             </div>
           </div>
 
-          {/* Flutterwave Integration & Live Webhook Configuration Info */}
+          {/* Paystack Integration & Live Webhook Configuration Info */}
           <div className="bg-[#111111] text-white p-5 rounded-2xl border-2 border-[#111111] shadow-[0_4px_0_#FF6B00] space-y-4">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-stone-800 pb-3">
               <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 rounded-lg bg-[#F5A623] text-[#111111] font-black flex items-center justify-center text-xs shadow-xs">
-                  FW
+                <div className="w-8 h-8 rounded-lg bg-[#9FE870] text-[#111111] font-black flex items-center justify-center text-xs shadow-xs">
+                  PS
                 </div>
                 <div>
                   <h4 className="text-sm font-extrabold text-white flex items-center gap-2">
-                    <span>Flutterwave Webhook &amp; Payment Server Integration</span>
+                    <span>Paystack Webhook &amp; Payment Server Integration</span>
                     <span className="text-[10px] bg-[#9FE870] text-[#111111] px-2 py-0.5 rounded-full font-bold">
                       ACTIVE
                     </span>
                   </h4>
                   <p className="text-[11px] text-stone-400">
-                    Server-authoritative kobo calculation · verif-hash constant-time check · Strict idempotency
+                    Server-authoritative kobo calculation · x-paystack-signature HMAC SHA512 check · Strict idempotency
                   </p>
                 </div>
               </div>
 
               <div className="flex items-center gap-2">
                 <span className="text-[11px] font-mono text-[#9FE870] bg-emerald-950/60 px-2.5 py-1 rounded-lg border border-emerald-800">
-                  Dual-Check: Webhook + Flutterwave v3 Verify
+                  Dual-Check: Webhook + Paystack Verify API
                 </span>
               </div>
             </div>
 
             <div className="space-y-2">
               <label className="text-[11px] font-bold text-stone-300 block">
-                Your Exact Flutterwave Webhook URL (Copy &amp; paste into Flutterwave Dashboard):
+                Your Exact Paystack Webhook URL (Copy &amp; paste into Paystack Dashboard):
               </label>
               <div className="flex items-center gap-2">
                 <input
                   type="text"
                   readOnly
-                  value="https://shopitng.vercel.app/api/webhooks/flutterwave"
+                  value="https://shop-itng-pied.vercel.app/api/webhooks/paystack"
                   className="flex-1 bg-stone-900 border border-stone-700 text-xs text-[#9FE870] font-mono px-3 py-2 rounded-xl select-all focus:outline-hidden"
                 />
                 <button
                   onClick={() => {
                     navigator.clipboard.writeText(
-                      'https://shopitng.vercel.app/api/webhooks/flutterwave'
+                      'https://shop-itng-pied.vercel.app/api/webhooks/paystack'
                     );
-                    notify('Flutterwave Webhook URL copied to clipboard!', 'success');
+                    notify('Paystack Webhook URL copied to clipboard!', 'success');
                   }}
                   className="px-3.5 py-2 bg-[#FF6B00] hover:bg-[#ff7a1a] text-[#111111] font-black rounded-xl text-xs border border-[#111111] shadow-[0_2px_0_#ffffff] shrink-0"
                 >
@@ -3102,25 +3100,25 @@ export const AdminPanel: React.FC = () => {
                 </button>
               </div>
               <p className="text-[11px] text-stone-400 leading-relaxed">
-                <strong>Flutterwave Setup:</strong> Go to Flutterwave Dashboard → <strong>Settings</strong> → <strong>Webhooks</strong> → Paste the URL above, set your <strong>Secret Hash</strong> (<code>FLW_WEBHOOK_SECRET_HASH</code>), and click <strong>Save</strong>.
+                <strong>Paystack Setup:</strong> Go to Paystack Dashboard → <strong>Settings</strong> → <strong>API Keys &amp; Webhooks</strong> → Paste the URL above, and ensure your <strong>Secret Key</strong> (<code>PAYSTACK_SECRET_KEY</code>) is configured.
               </p>
             </div>
           </div>
 
-          {/* Flutterwave Webhook Ingestion Log */}
+          {/* Paystack Webhook Ingestion Log */}
           <div className="bg-white rounded-2xl border border-stone-200 overflow-hidden shadow-xs">
             <div className="p-4 sm:p-5 border-b border-stone-200 bg-stone-50/60 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
               <div>
                 <h3 className="text-base font-bold font-heading text-stone-900 flex items-center gap-2">
                   <ShieldCheck className="w-4 h-4 text-[#FF6B00]" />
-                  <span>Flutterwave Webhook Verification &amp; Idempotency Log</span>
+                  <span>Paystack Webhook Verification &amp; Idempotency Log</span>
                 </h3>
                 <p className="text-xs text-stone-500 mt-0.5">
-                  Payment status changes only when Flutterwave confirms via verif-hash webhook + server transaction verify. Never trust the browser.
+                  Payment status changes only when Paystack confirms via x-paystack-signature webhook + server transaction verify. Never trust the browser.
                 </p>
               </div>
               <span className="text-xs font-mono text-emerald-700 font-bold bg-emerald-50 px-2 py-1 rounded border border-emerald-200">
-                Secret Hash Verification
+                HMAC SHA512 Signature Verification
               </span>
             </div>
 

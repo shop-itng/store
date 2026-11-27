@@ -1,7 +1,7 @@
 import express from 'express';
 import crypto from 'crypto';
 import cookieParser from 'cookie-parser';
-import paymentsWebhookHandler from './webhooks/flutterwave.js';
+import paystackWebhookHandler from './webhooks/paystack.js';
 import { renderTransactionalEmail, type EmailTemplateKey } from '../shared/transactionalEmails.js';
 import { OPERATOR_INFO } from '../shared/trustAndLegalCopy.js';
 import {
@@ -236,7 +236,7 @@ app.use((_req, res, next) => {
   res.setHeader('Permissions-Policy', 'camera=(self), microphone=(), geolocation=(self)');
   res.setHeader(
     'Content-Security-Policy',
-    "default-src 'self'; script-src 'self'; frame-src 'self' https://checkout.flutterwave.com https://checkout-v2.flutterwave.com https://*.flutterwave.com; connect-src 'self' https://api.flutterwave.com https://checkout.flutterwave.com https://api.brevo.com https://*.ingest.sentry.io https://*.upstash.io https://vitals.vercel-insights.com; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline' https:; font-src 'self' data: https:;"
+    "default-src 'self'; script-src 'self'; frame-src 'self' https://checkout.paystack.com https://*.paystack.co; connect-src 'self' https://api.paystack.co https://checkout.paystack.com https://api.brevo.com https://*.ingest.sentry.io https://*.upstash.io https://vitals.vercel-insights.com; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline' https:; font-src 'self' data: https:;"
   );
   next();
 });
@@ -251,13 +251,13 @@ app.use(
   })
 );
 
-// Strict CORS + CSRF Origin enforcement (never blocks Flutterwave server-to-server webhook POSTs)
+// Strict CORS + CSRF Origin enforcement (never blocks Paystack server-to-server webhook POSTs)
 app.use((req, res, next) => {
   const originHeader = req.headers.origin ? normalizeOriginUrl(String(req.headers.origin)) : '';
   const allowedOrigins = getAllowedOrigins(req);
   const isWebhookPath =
-    req.path === '/webhooks/flutterwave' ||
-    req.path === '/api/webhooks/flutterwave';
+    req.path === '/webhooks/paystack' ||
+    req.path === '/api/webhooks/paystack';
 
   if (isWebhookPath) {
     return next();
@@ -312,16 +312,12 @@ app.use((req, res, next) => {
   next();
 });
 
-function getFlwSecretKey(): string {
-  return (process.env.FLW_SECRET_KEY || '').trim().replace(/^["']|["']$/g, '');
+function getPaystackSecretKey(): string {
+  return (process.env.PAYSTACK_SECRET_KEY || '').trim().replace(/^["']|["']$/g, '');
 }
 
-function getFlwWebhookHash(): string {
-  return (process.env.FLW_WEBHOOK_SECRET_HASH || '').trim().replace(/^["']|["']$/g, '');
-}
-
-function getFlwPublicKey(): string {
-  return (process.env.FLW_PUBLIC_KEY || process.env.VITE_FLW_PUBLIC_KEY || '').trim().replace(/^["']|["']$/g, '');
+function getPaystackPublicKey(): string {
+  return (process.env.PAYSTACK_PUBLIC_KEY || process.env.VITE_PAYSTACK_PUBLIC_KEY || '').trim().replace(/^["']|["']$/g, '');
 }
 
 function hashNin(nin: string): string {
@@ -371,9 +367,9 @@ router.get(['/health', '/api/health'], async (_req, res) => {
     getDatabaseHealthStats(),
   ]);
   const isPgOk = pgPing.ok;
+  const isRedisOk = redisPing.ok;
   const hasRedisConfig = Boolean(process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL);
-  const isRedisOk = !hasRedisConfig || redisPing.ok;
-  const flutterwaveConfigured = Boolean(getFlwSecretKey() && getFlwPublicKey() && getFlwWebhookHash());
+  const paystackConfigured = Boolean(getPaystackSecretKey() && getPaystackPublicKey());
   const paymentsEnabledFlag = String(process.env.PAYMENTS_ENABLED || '').toLowerCase() === 'true';
   const payoutsEnabledFlag = String(process.env.PAYOUTS_ENABLED || '').toLowerCase() === 'true';
 
@@ -381,7 +377,7 @@ router.get(['/health', '/api/health'], async (_req, res) => {
     ? String(pgPing.migrationError).replace(/postgres(ql)?:\/\/[^\s]+/gi, '[redacted-url]').slice(0, 240)
     : null;
 
-  if (isPgOk && isRedisOk) {
+  if (isPgOk) {
     return res.status(200).json({
       status: 'OK',
       database: pgPing.provider,
@@ -392,7 +388,7 @@ router.get(['/health', '/api/health'], async (_req, res) => {
       fileStorageBytes: dbStats.fileStorageBytes,
       fileStorageMb: dbStats.fileStorageMb,
       fileCount: dbStats.fileCount,
-      flutterwaveConfigured,
+      paystackConfigured,
       paymentsEnabled: paymentsEnabledFlag,
       payoutsEnabled: payoutsEnabledFlag,
       schemaOk: Boolean(pgPing.schemaOk),
@@ -417,7 +413,7 @@ router.get(['/health', '/api/health'], async (_req, res) => {
     databaseHost: dbStats.databaseHost,
     tableCount: dbStats.tableCount,
     databaseSizeMb: dbStats.databaseSizeMb,
-    flutterwaveConfigured,
+    paystackConfigured,
     paymentsEnabled: paymentsEnabledFlag,
     payoutsEnabled: payoutsEnabledFlag,
     schemaOk: Boolean(pgPing.schemaOk),
@@ -2740,12 +2736,11 @@ router.get('/admin/export-data', requireAdmin, async (req: AuthenticatedRequest,
 router.get('/payments/config', (_req, res) => {
   res.json({
     status: true,
-    gateway: 'flutterwave',
-    publicKey: getFlwPublicKey(),
-    isSecretConfigured: Boolean(getFlwSecretKey()),
-    isWebhookSecretConfigured: Boolean(getFlwWebhookHash()),
-    webhookPath: '/api/webhooks/flutterwave',
-    webhookUrl: `${APP_URL}/api/webhooks/flutterwave`,
+    gateway: 'paystack',
+    publicKey: getPaystackPublicKey(),
+    isSecretConfigured: Boolean(getPaystackSecretKey()),
+    webhookPath: '/api/webhooks/paystack',
+    webhookUrl: `${APP_URL}/api/webhooks/paystack`,
     minWithdrawal: 1000,
     coolingPeriodHours: 24,
   });
@@ -2753,22 +2748,22 @@ router.get('/payments/config', (_req, res) => {
 
 router.get('/payments/webhook-info', (_req, res) => {
   res.json({
-    gateway: 'flutterwave',
-    webhookPath: '/api/webhooks/flutterwave',
-    webhookUrl: `${APP_URL}/api/webhooks/flutterwave`,
+    gateway: 'paystack',
+    webhookPath: '/api/webhooks/paystack',
+    webhookUrl: `${APP_URL}/api/webhooks/paystack`,
     method: 'POST',
-    signatureHeader: 'verif-hash',
-    isConfigured: Boolean(getFlwSecretKey() && getFlwWebhookHash()),
+    signatureHeader: 'x-paystack-signature',
+    isConfigured: Boolean(getPaystackSecretKey()),
   });
 });
 
 router.get('/payments/banks', requireAuth, async (_req: AuthenticatedRequest, res) => {
-  const flwSecret = getFlwSecretKey();
-  if (!flwSecret) {
+  const paystackSecret = getPaystackSecretKey();
+  if (!paystackSecret) {
     return res.status(503).json({
       status: false,
       error: 'PAYMENT_GATEWAY_NOT_CONFIGURED',
-      message: 'Bank directory is unavailable because FLW_SECRET_KEY is not configured.',
+      message: 'Bank directory is unavailable because PAYSTACK_SECRET_KEY is not configured.',
     });
   }
 
@@ -2778,10 +2773,10 @@ router.get('/payments/banks', requireAuth, async (_req: AuthenticatedRequest, re
     let bankRes: Response;
     let bankData: any;
     try {
-      bankRes = await fetch('https://api.flutterwave.com/v3/banks/NG', {
+      bankRes = await fetch('https://api.paystack.co/bank', {
         method: 'GET',
         headers: {
-          Authorization: `Bearer ${flwSecret}`,
+          Authorization: `Bearer ${paystackSecret}`,
           'Content-Type': 'application/json',
         },
         signal: controller.signal,
@@ -2791,10 +2786,10 @@ router.get('/payments/banks', requireAuth, async (_req: AuthenticatedRequest, re
       clearTimeout(timeout);
     }
 
-    if (!bankRes.ok || bankData?.status !== 'success' || !Array.isArray(bankData?.data)) {
+    if (!bankRes.ok || !bankData?.status || !Array.isArray(bankData?.data)) {
       return res.status(502).json({
         status: false,
-        message: bankData?.message || 'Unable to load supported Nigerian banks from Flutterwave.',
+        message: bankData?.message || 'Unable to load supported Nigerian banks from Paystack.',
       });
     }
 
@@ -2813,12 +2808,12 @@ router.get('/payments/banks', requireAuth, async (_req: AuthenticatedRequest, re
 });
 
 router.post('/payments/resolve-account', requireAuth, async (req: AuthenticatedRequest, res) => {
-  const flwSecret = getFlwSecretKey();
-  if (!flwSecret) {
+  const paystackSecret = getPaystackSecretKey();
+  if (!paystackSecret) {
     return res.status(503).json({
       status: false,
       error: 'PAYMENT_GATEWAY_NOT_CONFIGURED',
-      message: 'Account resolution requires FLW_SECRET_KEY.',
+      message: 'Account resolution requires PAYSTACK_SECRET_KEY.',
     });
   }
 
@@ -2835,16 +2830,12 @@ router.post('/payments/resolve-account', requireAuth, async (req: AuthenticatedR
     let resolveRes: Response;
     let resolveData: any;
     try {
-      resolveRes = await fetch('https://api.flutterwave.com/v3/accounts/resolve', {
-        method: 'POST',
+      resolveRes = await fetch(`https://api.paystack.co/bank/resolve?account_number=${encodeURIComponent(accountNumber)}&bank_code=${encodeURIComponent(bankCode)}`, {
+        method: 'GET',
         headers: {
-          Authorization: `Bearer ${flwSecret}`,
+          Authorization: `Bearer ${paystackSecret}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          account_number: accountNumber,
-          account_bank: bankCode,
-        }),
         signal: controller.signal,
       });
       resolveData = await resolveRes.json().catch(() => ({}));
@@ -2852,10 +2843,10 @@ router.post('/payments/resolve-account', requireAuth, async (req: AuthenticatedR
       clearTimeout(timeout);
     }
 
-    if (!resolveRes.ok || resolveData?.status !== 'success' || !resolveData?.data?.account_name) {
+    if (!resolveRes.ok || !resolveData?.status || !resolveData?.data?.account_name) {
       return res.status(400).json({
         status: false,
-        message: resolveData?.message || 'Could not resolve Nigerian bank account with Flutterwave.',
+        message: resolveData?.message || 'Could not resolve Nigerian bank account with Paystack.',
       });
     }
 
@@ -2887,8 +2878,8 @@ router.post('/payments/initialize', requirePaymentsEnabled, requireAuth, async (
       return res.status(429).json({ status: false, message: 'Too many checkout attempts. Please wait a minute.' });
     }
 
-    const flwSecret = getFlwSecretKey();
-    if (!flwSecret) {
+    const paystackSecret = getPaystackSecretKey();
+    if (!paystackSecret) {
       return res.status(503).json({
         status: false,
         error: 'PAYMENT_GATEWAY_NOT_CONFIGURED',
@@ -3055,7 +3046,7 @@ router.post('/payments/initialize', requirePaymentsEnabled, requireAuth, async (
           discountTotalKobo,
           appliedCouponCode,
           grandTotalKobo,
-          paymentMethod || 'flutterwave_card',
+          paymentMethod || 'paystack_card',
           reference,
           handshakeOtp,
           campus || 'Lagos Mainland',
@@ -3086,33 +3077,26 @@ router.post('/payments/initialize', requirePaymentsEnabled, requireAuth, async (
       };
     });
 
-    // Call official Flutterwave v3 Standard Hosted Checkout API
+    // Call Paystack Initialize Transaction API
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 12000);
-    let flwRes: Response | null = null;
-    let flwData: any = {};
+    let paystackRes: Response | null = null;
+    let paystackData: any = {};
     try {
-      flwRes = await fetch('https://api.flutterwave.com/v3/payments', {
+      paystackRes = await fetch('https://api.paystack.co/transaction/initialize', {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${flwSecret}`,
+          Authorization: `Bearer ${paystackSecret}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          tx_ref: initializedOrder.reference,
-          amount: initializedOrder.pricing.grandTotalNaira,
+          email: buyerEmail,
+          amount: initializedOrder.pricing.amountInKobo,
           currency: 'NGN',
-          redirect_url: `${APP_URL}/?view=orders&payment_ref=${encodeURIComponent(initializedOrder.reference)}`,
-          payment_options: 'card, banktransfer, ussd, opay',
-          customer: {
-            email: buyerEmail,
-            name: user.name || 'Shop It Buyer',
-          },
-          customizations: {
-            title: 'Shop It Checkout',
-            description: `Order #${initializedOrder.orderId} (${campus || 'Nigeria'})`,
-          },
-          meta: {
+          reference: initializedOrder.reference,
+          callback_url: `https://shop-itng-pied.vercel.app/?view=orders&payment_ref=${encodeURIComponent(initializedOrder.reference)}`,
+          channels: ['card', 'bank', 'ussd', 'bank_transfer', 'qr'],
+          metadata: {
             orderId: initializedOrder.orderId,
             buyerId: user.userId,
             campus: campus || 'Nigeria',
@@ -3120,14 +3104,14 @@ router.post('/payments/initialize', requirePaymentsEnabled, requireAuth, async (
         }),
         signal: controller.signal,
       });
-      flwData = await flwRes.json().catch(() => ({}));
+      paystackData = await paystackRes.json().catch(() => ({}));
     } catch (gatewayErr: any) {
-      flwData = { message: gatewayErr?.message || 'Flutterwave API timeout or connection error.' };
+      paystackData = { message: gatewayErr?.message || 'Paystack API timeout or connection error.' };
     } finally {
       clearTimeout(timeout);
     }
 
-    if (!flwRes || !flwRes.ok || flwData?.status !== 'success' || !flwData?.data?.link) {
+    if (!paystackRes || !paystackRes.ok || !paystackData?.status || !paystackData?.data?.authorization_url) {
       await withTransaction(async client => {
         await restoreOrderStockInTx(client, {
           id: initializedOrder.orderId,
@@ -3145,7 +3129,7 @@ router.post('/payments/initialize', requirePaymentsEnabled, requireAuth, async (
 
       return res.status(502).json({
         status: false,
-        message: flwData?.message || 'Unable to initialize payment with Flutterwave. Please try again.',
+        message: paystackData?.message || 'Unable to initialize payment with Paystack. Please try again.',
       });
     }
 
@@ -3164,15 +3148,15 @@ router.post('/payments/initialize', requirePaymentsEnabled, requireAuth, async (
     });
 
     const responseData = {
-      gateway: 'flutterwave',
+      gateway: 'paystack',
       reference: initializedOrder.reference,
       orderId: initializedOrder.orderId,
       amountInKobo: initializedOrder.pricing.amountInKobo,
       amountNaira: initializedOrder.pricing.grandTotalNaira,
       grandTotalNaira: initializedOrder.pricing.grandTotalNaira,
-      authorizationUrl: flwData.data.link,
-      authorization_url: flwData.data.link,
-      publicKey: getFlwPublicKey(),
+      authorizationUrl: paystackData.data.authorization_url,
+      authorization_url: paystackData.data.authorization_url,
+      publicKey: getPaystackPublicKey(),
       pricing: initializedOrder.pricing,
     };
 
@@ -3184,12 +3168,12 @@ router.post('/payments/initialize', requirePaymentsEnabled, requireAuth, async (
   }
 });
 
-router.get('/webhooks/flutterwave', (_req, res) => {
+router.get('/webhooks/paystack', (_req, res) => {
   return res.status(200).json({ status: 'ok', message: 'POST only' });
 });
 
-router.all('/webhooks/flutterwave', requirePaymentsEnabled, async (req: any, res: any) => {
-  return paymentsWebhookHandler(req, res);
+router.all('/webhooks/paystack', requirePaymentsEnabled, async (req: any, res: any) => {
+  return paystackWebhookHandler(req, res);
 });
 
 router.get('/payments/verify/:reference', requirePaymentsEnabled, requireAuth, async (req: AuthenticatedRequest, res) => {
@@ -3227,14 +3211,12 @@ router.get('/payments/verify/:reference', requirePaymentsEnabled, requireAuth, a
       });
     }
 
-    const flwSecret = getFlwSecretKey();
-    if (!flwSecret) {
+    const paystackSecret = getPaystackSecretKey();
+    if (!paystackSecret) {
       return res.status(503).json({ status: false, message: 'Payment verification secret not configured.' });
     }
 
-    const verifyUrl = transactionId
-      ? `https://api.flutterwave.com/v3/transactions/${encodeURIComponent(transactionId)}/verify`
-      : `https://api.flutterwave.com/v3/transactions/verify_by_reference?tx_ref=${encodeURIComponent(reference)}`;
+    const verifyUrl = `https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`;
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10000);
@@ -3243,7 +3225,7 @@ router.get('/payments/verify/:reference', requirePaymentsEnabled, requireAuth, a
     try {
       verifyRes = await fetch(verifyUrl, {
         method: 'GET',
-        headers: { Authorization: `Bearer ${flwSecret}`, 'Content-Type': 'application/json' },
+        headers: { Authorization: `Bearer ${paystackSecret}`, 'Content-Type': 'application/json' },
         signal: controller.signal,
       });
       verifyData = await verifyRes.json().catch(() => ({}));
@@ -3251,7 +3233,7 @@ router.get('/payments/verify/:reference', requirePaymentsEnabled, requireAuth, a
       clearTimeout(timeout);
     }
 
-    if (!verifyRes.ok || verifyData?.status !== 'success' || verifyData?.data?.status !== 'successful') {
+    if (!verifyRes.ok || !verifyData?.status || verifyData?.data?.status !== 'success') {
       if (order.status === 'cancelled') {
         return res.status(409).json({
           status: false,
@@ -3266,29 +3248,29 @@ router.get('/payments/verify/:reference', requirePaymentsEnabled, requireAuth, a
         isPaid: false,
         orderStatus: order.status,
         gatewayStatus: verifyData?.data?.status || 'pending',
-        message: verifyData?.message || 'Payment not yet confirmed with Flutterwave.',
+        message: verifyData?.message || 'Payment not yet confirmed with Paystack.',
       });
     }
 
-    if (String(verifyData.data.tx_ref || '').trim() !== reference) {
-      return res.status(400).json({ status: false, isPaid: false, message: 'Verified tx_ref mismatch.' });
+    if (String(verifyData.data.reference || '').trim() !== reference) {
+      return res.status(400).json({ status: false, isPaid: false, message: 'Verified reference mismatch.' });
     }
 
-    const confirmedAmountKobo = Math.round(Number(verifyData.data.amount || 0) * 100);
-    const channel = String(verifyData.data.payment_type || 'card');
+    const confirmedAmountKobo = Math.round(Number(verifyData.data.amount || 0));
+    const channel = String(verifyData.data.channel || 'card');
 
     const settlement = await commitPaidOrderTransaction({
       reference,
       confirmedAmountKobo,
-      currency: String(verifyData.data.currency || '').toUpperCase(),
+      currency: String(verifyData.data.currency || 'NGN').toUpperCase(),
       channel,
       webhookReceived: false,
       customerEmail: verifyData.data.customer?.email || user.email,
       gatewayData: {
-        flwTransactionId: verifyData.data.id,
-        flwRef: verifyData.data.flw_ref,
-        processorResponse: verifyData.data.processor_response,
-        paymentType: channel,
+        paystackTransactionId: verifyData.data.id,
+        gatewayResponse: verifyData.data.gateway_response,
+        channel,
+        fees: verifyData.data.fees,
       },
       source: 'verify_endpoint',
     });
@@ -3328,11 +3310,11 @@ router.get('/payments/verify/:reference', requirePaymentsEnabled, requireAuth, a
       amountNaira: koboToNaira(confirmedAmountKobo),
       currency: 'NGN',
       channel,
-      message: 'Payment verified with Flutterwave and held for order delivery.',
+      message: 'Payment verified with Paystack and held for order delivery.',
     });
   } catch (err: any) {
     console.error('[Payment Verify Error]:', err.message);
-    return res.status(502).json({ status: false, message: 'Could not verify payment with Flutterwave.' });
+    return res.status(502).json({ status: false, message: 'Could not verify payment with Paystack.' });
   }
 });
 
@@ -3345,8 +3327,8 @@ router.post('/payments/refund', requirePaymentsEnabled, requireAdmin, async (req
   }
 
   try {
-    const flwSecret = getFlwSecretKey();
-    if (!flwSecret) {
+    const paystackSecret = getPaystackSecretKey();
+    if (!paystackSecret) {
       return res.status(503).json({ status: false, message: 'Payment gateway secret is not configured.' });
     }
 
@@ -3371,47 +3353,17 @@ router.post('/payments/refund', requirePaymentsEnabled, requireAdmin, async (req
       });
     }
 
-    let flwTxId = paymentRow?.data?.flwTransactionId || paymentRow?.data?.gatewayId || '';
-    if (!flwTxId && effectiveRef) {
-      const lookController = new AbortController();
-      const lookTimeout = setTimeout(() => lookController.abort(), 8000);
-      try {
-        const lookRes = await fetch(
-          `https://api.flutterwave.com/v3/transactions/verify_by_reference?tx_ref=${encodeURIComponent(effectiveRef)}`,
-          {
-            method: 'GET',
-            headers: { Authorization: `Bearer ${flwSecret}`, 'Content-Type': 'application/json' },
-            signal: lookController.signal,
-          }
-        );
-        const lookData: any = await lookRes.json().catch(() => ({}));
-        if (lookRes.ok && lookData?.status === 'success' && lookData?.data?.id) {
-          flwTxId = String(lookData.data.id);
-        }
-      } catch {
-      } finally {
-        clearTimeout(lookTimeout);
-      }
-    }
-
-    if (!flwTxId) {
-      return res.status(400).json({
-        status: false,
-        message: 'Cannot execute Flutterwave refund: missing verified Flutterwave transaction ID for this reference.',
-      });
-    }
-
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10000);
     let refundRes: Response;
     let refundData: any;
     try {
-      refundRes = await fetch(`https://api.flutterwave.com/v3/transactions/${encodeURIComponent(String(flwTxId))}/refund`, {
+      refundRes = await fetch('https://api.paystack.co/refund', {
         method: 'POST',
-        headers: { Authorization: `Bearer ${flwSecret}`, 'Content-Type': 'application/json' },
+        headers: { Authorization: `Bearer ${paystackSecret}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          ...(amountKobo ? { amount: koboToNaira(Number(amountKobo)) } : {}),
-          comments: reason || 'Customer refund approved by Shop It Admin',
+          transaction: effectiveRef,
+          ...(amountKobo ? { amount: Number(amountKobo) } : {}),
         }),
         signal: controller.signal,
       });
@@ -3420,8 +3372,8 @@ router.post('/payments/refund', requirePaymentsEnabled, requireAdmin, async (req
       clearTimeout(timeout);
     }
 
-    if (!refundRes.ok || refundData?.status !== 'success') {
-      return res.status(502).json({ status: false, message: refundData?.message || 'Flutterwave refund call failed.' });
+    if (!refundRes.ok || !refundData?.status) {
+      return res.status(502).json({ status: false, message: refundData?.message || 'Paystack refund call failed.' });
     }
 
     await withTransaction(async client => {
@@ -3452,7 +3404,7 @@ router.post('/payments/refund', requirePaymentsEnabled, requireAdmin, async (req
               order.id,
               prevStatus,
               user.email,
-              `Refund processed via Flutterwave: ${reason || 'Admin approval'}`,
+              `Refund processed via Paystack: ${reason || 'Admin approval'}`,
             ]
           );
 
@@ -3525,7 +3477,7 @@ router.post('/payments/refund', requirePaymentsEnabled, requireAdmin, async (req
         const mergedPayData = {
           ...existingPayData,
           refundId: refundData?.data?.id,
-          flwTransactionId: flwTxId,
+          paystackRefundReference: refundData?.data?.reference,
         };
         await client.query(
           `UPDATE shopit_payments
@@ -3542,7 +3494,8 @@ router.post('/payments/refund', requirePaymentsEnabled, requireAdmin, async (req
       action: 'PAYMENT_REFUND_EXECUTED',
       actor: { id: user.userId, email: user.email, role: user.role },
       target: { type: 'payment', id: effectiveRef || orderId },
-      details: { amountKobo, reason, orderId: targetOrder?.id || orderId, flwTxId },
+      details: { amountKobo, reason, orderId: targetOrder?.id || orderId, paystackReference: refundData?.data?.reference },
+
       ip: req.ip,
       userAgent: req.get('user-agent'),
     });
@@ -3608,8 +3561,8 @@ router.post('/payments/transfer', requirePayoutsEnabled, requireAuth, async (req
     return res.status(403).json({ status: false, message: 'Forbidden: you can only withdraw from your own wallet.' });
   }
 
-  const flwSecret = getFlwSecretKey();
-  if (!flwSecret) {
+  const paystackSecret = getPaystackSecretKey();
+  if (!paystackSecret) {
     return res.status(503).json({ status: false, message: 'Payout gateway secret is not configured.' });
   }
 
@@ -3792,41 +3745,66 @@ router.post('/payments/transfer', requirePayoutsEnabled, requireAuth, async (req
       })
     );
 
-    // 3. Call Flutterwave Transfers API v3; compensate atomically if gateway call fails or times out
+    // 3. Call Paystack Transfer API; compensate atomically if gateway call fails or times out
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 12000);
-      let transRes: Response;
-      let transData: any;
+      let recipientRes: Response;
+      let recipientData: any;
       try {
-        transRes = await fetch('https://api.flutterwave.com/v3/transfers', {
+        recipientRes = await fetch('https://api.paystack.co/transferrecipient', {
           method: 'POST',
-          headers: { Authorization: `Bearer ${flwSecret}`, 'Content-Type': 'application/json' },
+          headers: { Authorization: `Bearer ${paystackSecret}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            account_bank: String(debitState.account.bankCode),
+            type: 'nuban',
+            name: debitState.account.accountName || debitState.seller.shop_name,
             account_number: debitState.account.accountNumber,
-            amount: amountNum,
+            bank_code: debitState.account.bankCode,
             currency: 'NGN',
-            narration: `Shop It Withdrawal - ${debitState.seller.shop_name}`,
-            reference: transferCode,
-            debit_currency: 'NGN',
           }),
           signal: controller.signal,
         });
-        transData = await transRes.json().catch(() => ({}));
+        recipientData = await recipientRes.json().catch(() => ({}));
       } finally {
         clearTimeout(timeout);
       }
 
-      if (!transRes.ok || transData?.status !== 'success') {
-        throw new Error(transData?.message || 'Flutterwave transfer rejected.');
+      const recipientCode = recipientData?.data?.recipient_code;
+      if (!recipientRes.ok || !recipientCode) {
+        throw new Error(recipientData?.message || 'Failed to create Paystack transfer recipient.');
+      }
+
+      const transController = new AbortController();
+      const transTimeout = setTimeout(() => transController.abort(), 12000);
+      let transRes: Response;
+      let transData: any;
+      try {
+        transRes = await fetch('https://api.paystack.co/transfer', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${paystackSecret}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            source: 'balance',
+            amount: amountKobo, // Paystack transfer amount is in kobo
+            recipient: recipientCode,
+            reference: transferCode,
+            reason: `Shop It Withdrawal - ${debitState.seller.shop_name}`,
+          }),
+          signal: transController.signal,
+        });
+        transData = await transRes.json().catch(() => ({}));
+      } finally {
+        clearTimeout(transTimeout);
+      }
+
+      if (!transRes.ok || !transData?.status) {
+        throw new Error(transData?.message || 'Paystack transfer rejected.');
       }
 
       await dbQuery(
-        "UPDATE shopit_payouts SET status = 'processing', transfer_code = $1, flw_transfer_id = $2, provider_response = $3, updated_at = NOW() WHERE id = $4",
+        "UPDATE shopit_payouts SET status = 'processing', transfer_code = $1, paystack_transfer_code = $2, provider_response = $3, updated_at = NOW() WHERE id = $4",
         [
           transData.data?.reference || transferCode,
-          transData.data?.id ? String(transData.data.id) : null,
+          transData.data?.transfer_code || null,
           JSON.stringify(transData.data || {}),
           transferCode,
         ]

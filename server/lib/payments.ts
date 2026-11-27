@@ -165,8 +165,8 @@ export async function sendAdminAlert(
 ): Promise<void> {
   try {
     const ins = await dbQuery(
-      'INSERT INTO shopit_admin_alerts (alert_key, created_at) VALUES ($1, NOW()) ON CONFLICT (alert_key) DO NOTHING RETURNING alert_key',
-      [key]
+      'INSERT INTO shopit_admin_alerts (alert_key, alert_type, title, message, created_at) VALUES ($1, $2, $3, $4, NOW()) ON CONFLICT (alert_key) DO NOTHING RETURNING alert_key',
+      [key, 'security', subject, htmlDetails]
     );
     if (ins.rows.length === 0) return;
   } catch {
@@ -508,7 +508,17 @@ export async function commitPaidOrderTransaction(params: {
     );
 
     // 3. Decrement product stock atomically ONLY if not already reserved at init; mark coupon usage
-    const items: any[] = Array.isArray(order.items) ? order.items : [];
+    const items: any[] = Array.isArray(order.items)
+      ? order.items
+      : typeof order.items === 'string'
+        ? (() => {
+            try {
+              return JSON.parse(order.items);
+            } catch {
+              return [];
+            }
+          })()
+        : [];
     const sellerTotalsKobo: Record<string, number> = {};
 
     for (const item of items) {
@@ -795,78 +805,43 @@ export async function processUnshippedOrders(batchLimit = 50): Promise<{
       [fiveDaysAgo, safeLimit]
     );
 
-    const flwSecret = (process.env.FLW_SECRET_KEY || '').trim().replace(/^["']|["']$/g, '');
+    const paystackSecret = (process.env.PAYSTACK_SECRET_KEY || '').trim().replace(/^["']|["']$/g, '');
     const paymentsEnabled = process.env.PAYMENTS_ENABLED === 'true';
 
     for (const candidate of refundCandidates.rows) {
-      if (!paymentsEnabled || !flwSecret) {
-        console.warn(`[Unshipped Cron] Skipped Day-5 auto-refund for ${candidate.id}: payments or FLW_SECRET_KEY disabled.`);
+      if (!paymentsEnabled || !paystackSecret) {
+        console.warn(`[Unshipped Cron] Skipped Day-5 auto-refund for ${candidate.id}: payments or PAYSTACK_SECRET_KEY disabled.`);
         continue;
       }
 
-      const payRes = await dbQuery('SELECT * FROM shopit_payments WHERE reference = $1 OR order_id = $2 LIMIT 1', [
-        candidate.payment_reference,
-        candidate.id,
-      ]);
-      const paymentRow = payRes.rows[0];
-      let payData: any = {};
-      if (paymentRow?.data) {
-        payData =
-          typeof paymentRow.data === 'string'
-            ? (() => {
-                try {
-                  return JSON.parse(paymentRow.data);
-                } catch {
-                  return {};
-                }
-              })()
-            : paymentRow.data;
-      }
-
-      const flwTxId = payData?.flwTransactionId || payData?.id;
-      if (!flwTxId) {
-        console.warn(`[Unshipped Cron] Missing Flutterwave transaction ID for order ${candidate.id}; alerting admin.`);
-        await sendAdminAlert(
-          `unshipped_missing_tx_${candidate.id}`,
-          `Unshipped Order #${candidate.id} Missing Flutterwave TX ID`,
-          `Order #${escapeHtmlSafe(candidate.id)} exceeded 5 days unshipped but has no stored Flutterwave transaction ID for automatic refund.`
-        ).catch(() => {});
-        continue;
-      }
-
-      const refundNaira = koboToNaira(candidate.grand_total_kobo || 0);
-
-      // Call Flutterwave v3 refund endpoint BEFORE mutating escrow balances
+      // Call Paystack Refund API BEFORE mutating escrow balances
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 12000);
-      let flwOk = false;
-      let flwRefundData: any = {};
+      let paystackOk = false;
+      let paystackRefundData: any = {};
       try {
-        const flwRes = await fetch(
-          `https://api.flutterwave.com/v3/transactions/${encodeURIComponent(String(flwTxId))}/refund`,
-          {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${flwSecret}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              amount: refundNaira,
-              comments: `Auto-refund: Order #${candidate.id} not shipped within 5 days`,
-            }),
-            signal: controller.signal,
-          }
-        );
-        flwRefundData = await flwRes.json().catch(() => ({}));
-        flwOk = flwRes.ok && flwRefundData?.status === 'success';
+        const refundRes = await fetch('https://api.paystack.co/refund', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${paystackSecret}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            transaction: candidate.payment_reference,
+            amount: Number(candidate.grand_total_kobo || 0),
+          }),
+          signal: controller.signal,
+        });
+        paystackRefundData = await refundRes.json().catch(() => ({}));
+        paystackOk = refundRes.ok && Boolean(paystackRefundData?.status);
       } catch (err: any) {
-        console.warn(`[Unshipped Cron] Flutterwave refund timeout/error for ${candidate.id}:`, err.message);
+        console.warn(`[Unshipped Cron] Paystack refund timeout/error for ${candidate.id}:`, err.message);
       } finally {
         clearTimeout(timeout);
       }
 
-      if (!flwOk) {
+      if (!paystackOk) {
         await sendAdminAlert(
-          `unshipped_flw_fail_${candidate.id}`,
+          `unshipped_paystack_fail_${candidate.id}`,
           `Auto-Refund Failed for Unshipped Order #${candidate.id}`,
-          `Order #${escapeHtmlSafe(candidate.id)} exceeded 5 days unshipped, but Flutterwave refund returned: ${escapeHtmlSafe(flwRefundData?.message || 'Gateway error')}`
+          `Order #${escapeHtmlSafe(candidate.id)} exceeded 5 days unshipped, but Paystack refund returned: ${escapeHtmlSafe(paystackRefundData?.message || 'Gateway error')}`
         ).catch(() => {});
         continue;
       }
@@ -885,7 +860,17 @@ export async function processUnshippedOrders(batchLimit = 50): Promise<{
 
         await restoreOrderStockInTx(client, ord);
 
-        const items: any[] = Array.isArray(ord.items) ? ord.items : [];
+        const items: any[] = Array.isArray(ord.items)
+          ? ord.items
+          : typeof ord.items === 'string'
+            ? (() => {
+                try {
+                  return JSON.parse(ord.items);
+                } catch {
+                  return [];
+                }
+              })()
+            : [];
         const sellerTotalsKobo: Record<string, number> = {};
         for (const item of items) {
           if (item.sellerId) {
@@ -944,13 +929,25 @@ export async function processUnshippedOrders(batchLimit = 50): Promise<{
         );
 
         if (ord.payment_reference) {
+          const payRes = await client.query('SELECT data FROM shopit_payments WHERE reference = $1', [ord.payment_reference]);
+          let existingData: any = {};
+          if (payRes.rows.length > 0) {
+            try {
+              existingData = typeof payRes.rows[0].data === 'string' ? JSON.parse(payRes.rows[0].data) : (payRes.rows[0].data || {});
+            } catch {}
+          }
+          const mergedData = {
+            ...existingData,
+            refundId: paystackRefundData?.data?.id,
+            paystackRefundReference: paystackRefundData?.data?.reference,
+          };
           await client.query(
             `UPDATE shopit_payments
              SET status = 'refunded',
                  data = $1,
                  updated_at = NOW()
              WHERE reference = $2`,
-            [JSON.stringify({ ...payData, refundId: flwRefundData?.data?.id, flwTransactionId: flwTxId }), ord.payment_reference]
+            [JSON.stringify(mergedData), ord.payment_reference]
           );
         }
 
@@ -966,6 +963,7 @@ export async function processUnshippedOrders(batchLimit = 50): Promise<{
       if (txCommitted) {
         refundedOrderIds.push(candidate.id);
         if (candidate.buyer_email) {
+          const refundNaira = koboToNaira(Number(candidate.grand_total_kobo || 0));
           await sendBrevoDirect(
             candidate.buyer_email,
             `Full Refund Issued for Unshipped Order #${candidate.id}`,
