@@ -559,8 +559,11 @@ import express4 from "express";
 import crypto12 from "crypto";
 import cookieParser from "cookie-parser";
 
-// server/webhooks/flutterwave.ts
+// server/webhooks/paystack.ts
 import crypto6 from "crypto";
+
+// server/lib/payments.ts
+import crypto4 from "crypto";
 
 // server/db/postgres.ts
 import dotenv from "dotenv";
@@ -2464,9 +2467,6 @@ async function getAllPlatformConfig() {
 }
 __name(getAllPlatformConfig, "getAllPlatformConfig");
 
-// server/lib/payments.ts
-import crypto4 from "crypto";
-
 // server/lib/secrets.ts
 import crypto3 from "crypto";
 var HKDF_SALT = Buffer.from("shopit-hkdf-v1-salt", "utf8");
@@ -2928,6 +2928,20 @@ function koboToNaira(kobo) {
   return (Number.isFinite(num) ? num : 0) / 100;
 }
 __name(koboToNaira, "koboToNaira");
+function isPaymentsActive() {
+  const envVal = String(process.env.PAYMENTS_ENABLED || "").toLowerCase();
+  if (envVal === "false") return false;
+  if (envVal === "true") return true;
+  return Boolean(process.env.PAYSTACK_SECRET_KEY && process.env.PAYSTACK_SECRET_KEY.trim().length > 0);
+}
+__name(isPaymentsActive, "isPaymentsActive");
+function isPayoutsActive() {
+  const envVal = String(process.env.PAYOUTS_ENABLED || "").toLowerCase();
+  if (envVal === "false") return false;
+  if (envVal === "true") return true;
+  return Boolean(process.env.PAYSTACK_SECRET_KEY && process.env.PAYSTACK_SECRET_KEY.trim().length > 0);
+}
+__name(isPayoutsActive, "isPayoutsActive");
 function calculateConfiguredServiceFeeKobo(sellerPriceKobo, feeSettings) {
   const safeKobo = Math.max(0, Math.round(Number(sellerPriceKobo) || 0));
   if (feeSettings?.firstMonthPromoFree) {
@@ -3014,8 +3028,8 @@ __name(escapeHtmlSafe, "escapeHtmlSafe");
 async function sendAdminAlert(key, subject, htmlDetails) {
   try {
     const ins = await query(
-      "INSERT INTO shopit_admin_alerts (alert_key, created_at) VALUES ($1, NOW()) ON CONFLICT (alert_key) DO NOTHING RETURNING alert_key",
-      [key]
+      "INSERT INTO shopit_admin_alerts (alert_key, alert_type, title, message, created_at) VALUES ($1, $2, $3, $4, NOW()) ON CONFLICT (alert_key) DO NOTHING RETURNING alert_key",
+      [key, "security", subject, htmlDetails]
     );
     if (ins.rows.length === 0) return;
   } catch {
@@ -3287,7 +3301,13 @@ async function commitPaidOrderTransaction(params) {
       ) VALUES ($1, $2, 'pending_payment', 'paid', $3, 'Payment verified via Flutterwave into 5-day escrow', NOW())`,
       [`osh_${Date.now()}_${crypto4.randomBytes(3).toString("hex")}`, order.id, params.source]
     );
-    const items = Array.isArray(order.items) ? order.items : [];
+    const items = Array.isArray(order.items) ? order.items : typeof order.items === "string" ? (() => {
+      try {
+        return JSON.parse(order.items);
+      } catch {
+        return [];
+      }
+    })() : [];
     const sellerTotalsKobo = {};
     for (const item of items) {
       const qty = Math.max(1, Math.floor(Number(item.quantity) || 1));
@@ -3533,69 +3553,39 @@ async function processUnshippedOrders(batchLimit = 50) {
        LIMIT $2`,
       [fiveDaysAgo, safeLimit]
     );
-    const flwSecret = (process.env.FLW_SECRET_KEY || "").trim().replace(/^["']|["']$/g, "");
+    const paystackSecret = (process.env.PAYSTACK_SECRET_KEY || "").trim().replace(/^["']|["']$/g, "");
     const paymentsEnabled = process.env.PAYMENTS_ENABLED === "true";
     for (const candidate of refundCandidates.rows) {
-      if (!paymentsEnabled || !flwSecret) {
-        console.warn(`[Unshipped Cron] Skipped Day-5 auto-refund for ${candidate.id}: payments or FLW_SECRET_KEY disabled.`);
+      if (!paymentsEnabled || !paystackSecret) {
+        console.warn(`[Unshipped Cron] Skipped Day-5 auto-refund for ${candidate.id}: payments or PAYSTACK_SECRET_KEY disabled.`);
         continue;
       }
-      const payRes = await query("SELECT * FROM shopit_payments WHERE reference = $1 OR order_id = $2 LIMIT 1", [
-        candidate.payment_reference,
-        candidate.id
-      ]);
-      const paymentRow = payRes.rows[0];
-      let payData = {};
-      if (paymentRow?.data) {
-        payData = typeof paymentRow.data === "string" ? (() => {
-          try {
-            return JSON.parse(paymentRow.data);
-          } catch {
-            return {};
-          }
-        })() : paymentRow.data;
-      }
-      const flwTxId = payData?.flwTransactionId || payData?.id;
-      if (!flwTxId) {
-        console.warn(`[Unshipped Cron] Missing Flutterwave transaction ID for order ${candidate.id}; alerting admin.`);
-        await sendAdminAlert(
-          `unshipped_missing_tx_${candidate.id}`,
-          `Unshipped Order #${candidate.id} Missing Flutterwave TX ID`,
-          `Order #${escapeHtmlSafe(candidate.id)} exceeded 5 days unshipped but has no stored Flutterwave transaction ID for automatic refund.`
-        ).catch(() => {
-        });
-        continue;
-      }
-      const refundNaira = koboToNaira(candidate.grand_total_kobo || 0);
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 12e3);
-      let flwOk = false;
-      let flwRefundData = {};
+      let paystackOk = false;
+      let paystackRefundData = {};
       try {
-        const flwRes = await fetch(
-          `https://api.flutterwave.com/v3/transactions/${encodeURIComponent(String(flwTxId))}/refund`,
-          {
-            method: "POST",
-            headers: { Authorization: `Bearer ${flwSecret}`, "Content-Type": "application/json" },
-            body: JSON.stringify({
-              amount: refundNaira,
-              comments: `Auto-refund: Order #${candidate.id} not shipped within 5 days`
-            }),
-            signal: controller.signal
-          }
-        );
-        flwRefundData = await flwRes.json().catch(() => ({}));
-        flwOk = flwRes.ok && flwRefundData?.status === "success";
+        const refundRes = await fetch("https://api.paystack.co/refund", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${paystackSecret}`, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            transaction: candidate.payment_reference,
+            amount: Number(candidate.grand_total_kobo || 0)
+          }),
+          signal: controller.signal
+        });
+        paystackRefundData = await refundRes.json().catch(() => ({}));
+        paystackOk = refundRes.ok && Boolean(paystackRefundData?.status);
       } catch (err) {
-        console.warn(`[Unshipped Cron] Flutterwave refund timeout/error for ${candidate.id}:`, err.message);
+        console.warn(`[Unshipped Cron] Paystack refund timeout/error for ${candidate.id}:`, err.message);
       } finally {
         clearTimeout(timeout);
       }
-      if (!flwOk) {
+      if (!paystackOk) {
         await sendAdminAlert(
-          `unshipped_flw_fail_${candidate.id}`,
+          `unshipped_paystack_fail_${candidate.id}`,
           `Auto-Refund Failed for Unshipped Order #${candidate.id}`,
-          `Order #${escapeHtmlSafe(candidate.id)} exceeded 5 days unshipped, but Flutterwave refund returned: ${escapeHtmlSafe(flwRefundData?.message || "Gateway error")}`
+          `Order #${escapeHtmlSafe(candidate.id)} exceeded 5 days unshipped, but Paystack refund returned: ${escapeHtmlSafe(paystackRefundData?.message || "Gateway error")}`
         ).catch(() => {
         });
         continue;
@@ -3611,7 +3601,13 @@ async function processUnshippedOrders(batchLimit = 50) {
         );
         if (dispCheck.rows.length > 0) return false;
         await restoreOrderStockInTx(client, ord);
-        const items = Array.isArray(ord.items) ? ord.items : [];
+        const items = Array.isArray(ord.items) ? ord.items : typeof ord.items === "string" ? (() => {
+          try {
+            return JSON.parse(ord.items);
+          } catch {
+            return [];
+          }
+        })() : [];
         const sellerTotalsKobo = {};
         for (const item of items) {
           if (item.sellerId) {
@@ -3667,13 +3663,26 @@ async function processUnshippedOrders(batchLimit = 50) {
           [ord.id]
         );
         if (ord.payment_reference) {
+          const payRes = await client.query("SELECT data FROM shopit_payments WHERE reference = $1", [ord.payment_reference]);
+          let existingData = {};
+          if (payRes.rows.length > 0) {
+            try {
+              existingData = typeof payRes.rows[0].data === "string" ? JSON.parse(payRes.rows[0].data) : payRes.rows[0].data || {};
+            } catch {
+            }
+          }
+          const mergedData = {
+            ...existingData,
+            refundId: paystackRefundData?.data?.id,
+            paystackRefundReference: paystackRefundData?.data?.reference
+          };
           await client.query(
             `UPDATE shopit_payments
              SET status = 'refunded',
                  data = $1,
                  updated_at = NOW()
              WHERE reference = $2`,
-            [JSON.stringify({ ...payData, refundId: flwRefundData?.data?.id, flwTransactionId: flwTxId }), ord.payment_reference]
+            [JSON.stringify(mergedData), ord.payment_reference]
           );
         }
         await client.query(
@@ -3686,6 +3695,7 @@ async function processUnshippedOrders(batchLimit = 50) {
       if (txCommitted) {
         refundedOrderIds.push(candidate.id);
         if (candidate.buyer_email) {
+          const refundNaira = koboToNaira(Number(candidate.grand_total_kobo || 0));
           await sendBrevoDirect(
             candidate.buyer_email,
             `Full Refund Issued for Unshipped Order #${candidate.id}`,
@@ -4118,32 +4128,11 @@ async function logAuditEvent(params) {
 }
 __name(logAuditEvent, "logAuditEvent");
 
-// server/webhooks/flutterwave.ts
-var KV_URL = (process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || "").trim();
-var KV_TOKEN = (process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || "").trim();
-async function runKvCommand2(command, ...args) {
-  if (!KV_URL || !KV_TOKEN) return null;
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3e3);
-    const res = await fetch(KV_URL.replace(/\/$/, ""), {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${KV_TOKEN}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify([command.toUpperCase(), ...args.map((a) => String(a))]),
-      signal: controller.signal
-    });
-    clearTimeout(timeout);
-    if (!res.ok) return null;
-    const json = await res.json();
-    return json.result;
-  } catch {
-    return null;
-  }
+// server/webhooks/paystack.ts
+function getPaystackSecretKey() {
+  return (process.env.PAYSTACK_SECRET_KEY || "").trim().replace(/^["']|["']$/g, "");
 }
-__name(runKvCommand2, "runKvCommand");
+__name(getPaystackSecretKey, "getPaystackSecretKey");
 async function getRawBodyBuffer(req) {
   if (req.rawBody && Buffer.isBuffer(req.rawBody)) return req.rawBody;
   if (req.body && Buffer.isBuffer(req.body)) return req.body;
@@ -4162,16 +4151,10 @@ async function getRawBodyBuffer(req) {
   return Buffer.from("");
 }
 __name(getRawBodyBuffer, "getRawBodyBuffer");
-function timingSafeCompareHash(provided, expected) {
-  const a = crypto6.createHash("sha256").update(provided).digest();
-  const b = crypto6.createHash("sha256").update(expected).digest();
-  return crypto6.timingSafeEqual(a, b);
-}
-__name(timingSafeCompareHash, "timingSafeCompareHash");
-function logWebhookLine(event, txRef, result) {
+function logWebhookLine(event, reference, result) {
   const safeEvent = String(event || "unknown").replace(/[\r\n\s]+/g, "_").slice(0, 60);
-  const safeRef = String(txRef || "none").replace(/[\r\n\s]+/g, "_").slice(0, 100);
-  console.log(`[FLW Webhook] event=${safeEvent} tx_ref=${safeRef} result=${result}`);
+  const safeRef = String(reference || "none").replace(/[\r\n\s]+/g, "_").slice(0, 100);
+  console.log(`[Paystack Webhook] event=${safeEvent} reference=${safeRef} result=${result}`);
 }
 __name(logWebhookLine, "logWebhookLine");
 async function handler(req, res) {
@@ -4181,7 +4164,7 @@ async function handler(req, res) {
     return res.end(
       JSON.stringify({
         status: "ok",
-        message: "POST only"
+        message: "Paystack Webhook Endpoint Active"
       })
     );
   }
@@ -4191,335 +4174,120 @@ async function handler(req, res) {
     return res.end(JSON.stringify({ status: false, message: "Method Not Allowed" }));
   }
   let logEvent = "unknown";
-  let logTxRef = "none";
+  let logReference = "none";
   if (process.env.PAYMENTS_ENABLED !== "true") {
-    logWebhookLine(logEvent, logTxRef, "payments-disabled");
+    logWebhookLine(logEvent, logReference, "payments-disabled");
     res.setHeader("Content-Type", "application/json");
     res.statusCode = 503;
     return res.end(
       JSON.stringify({
         status: false,
-        error: "PAYMENTS_DISABLED",
-        message: "Online payments are coming soon. Arrange directly with the seller"
+        message: "Payments are currently disabled on this instance."
       })
     );
   }
-  const secretKey = (process.env.FLW_SECRET_KEY || "").trim().replace(/^["']|["']$/g, "");
-  const webhookSecretHash = (process.env.FLW_WEBHOOK_SECRET_HASH || "").trim().replace(/^["']|["']$/g, "");
-  if (!webhookSecretHash || !secretKey) {
-    logWebhookLine(logEvent, logTxRef, "missing-config");
+  const paystackSecret = getPaystackSecretKey();
+  if (!paystackSecret) {
+    logWebhookLine(logEvent, logReference, "secret-missing");
     res.setHeader("Content-Type", "application/json");
     res.statusCode = 503;
     return res.end(
       JSON.stringify({
         status: false,
-        message: "Flutterwave webhook verification hash or secret key is not configured."
+        message: "Paystack webhook secret key is not configured."
       })
     );
   }
   try {
-    const providedHash = String(req.headers["verif-hash"] || "").trim();
-    if (!providedHash) {
-      logWebhookLine(logEvent, logTxRef, "rejected-signature");
-      res.setHeader("Content-Type", "application/json");
-      res.statusCode = 401;
-      return res.end(JSON.stringify({ status: false, message: "Missing verif-hash webhook signature" }));
+    const rawBodyBuf = await getRawBodyBuffer(req);
+    const signature = String(req.headers["x-paystack-signature"] || "").trim();
+    if (!signature) {
+      logWebhookLine("unknown", "none", "signature-missing");
+      return res.status(401).json({ status: false, message: "Missing x-paystack-signature header" });
     }
-    if (!timingSafeCompareHash(providedHash, webhookSecretHash)) {
-      logWebhookLine(logEvent, logTxRef, "rejected-signature");
-      await logAuditEvent({
-        action: "WEBHOOK_SIGNATURE_REJECTED",
-        actor: { id: "flutterwave_webhook", email: "webhook@flutterwave", role: "system" },
-        target: { type: "webhook", id: "flutterwave" },
-        details: { reason: "Invalid verif-hash signature" },
-        ip: req.ip,
-        userAgent: req.headers?.["user-agent"]
-      });
+    const computedHash = crypto6.createHmac("sha512", paystackSecret).update(rawBodyBuf).digest("hex");
+    let isValidSignature = false;
+    try {
+      isValidSignature = signature.length === computedHash.length && crypto6.timingSafeEqual(Buffer.from(signature, "utf8"), Buffer.from(computedHash, "utf8"));
+    } catch {
+      isValidSignature = false;
+    }
+    if (!isValidSignature) {
+      console.warn("[Paystack Webhook Warning] Forged signature blocked.");
       await sendAdminAlert(
-        `forged_webhook_${Math.floor(Date.now() / 6e4)}`,
-        "Forged Flutterwave Webhook Attempt Blocked",
-        `A webhook request failed <code>verif-hash</code> validation and was rejected with HTTP 401.`
-      ).catch(() => {
-      });
-      res.setHeader("Content-Type", "application/json");
-      res.statusCode = 401;
-      return res.end(JSON.stringify({ status: false, message: "Invalid webhook verif-hash signature" }));
+        `paystack_forged_sig_${Date.now()}`,
+        "Forged Paystack Webhook Attempt Blocked",
+        `A webhook request with invalid signature was blocked.<br/>Provided signature: <code>${signature.slice(0, 16)}...</code>`
+      );
+      return res.status(401).json({ status: false, message: "Invalid webhook signature" });
     }
-    const rawBuffer = await getRawBodyBuffer(req);
-    const payload = JSON.parse(rawBuffer.toString("utf-8") || "{}");
+    let payload = {};
+    try {
+      payload = JSON.parse(rawBodyBuf.toString("utf-8"));
+    } catch {
+      return res.status(400).json({ status: false, message: "Invalid JSON payload" });
+    }
     const event = String(payload.event || "").trim();
     const data = payload.data || {};
     logEvent = event || "unknown";
-    logTxRef = String(data.tx_ref || data.reference || "none").trim() || "none";
-    if (event === "transfer.completed") {
-      const flwTransferStatus = String(data.status || "").toUpperCase();
-      const transferRef = String(data.reference || "").trim();
-      const flwTransferId = data.id ? String(data.id) : "";
-      logTxRef = transferRef || flwTransferId || "none";
-      if (!transferRef && !flwTransferId) {
-        logWebhookLine(logEvent, logTxRef, "ignored");
-        res.setHeader("Content-Type", "application/json");
-        res.statusCode = 200;
-        return res.end(JSON.stringify({ status: true, message: "Transfer webhook missing reference; acknowledged." }));
+    const reference = String(data.reference || "").trim();
+    logReference = reference || "none";
+    if (event !== "charge.success" || !reference) {
+      logWebhookLine(logEvent, logReference, "ignored-event-or-ref");
+      return res.status(200).json({ status: true, received: true });
+    }
+    const verifyRes = await fetch(`https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${paystackSecret}`,
+        "Content-Type": "application/json"
       }
-      const transferOutcome = await withTransaction(async (client) => {
-        const pRes = await client.query(
-          `SELECT * FROM shopit_payouts
-           WHERE reference = $1 OR flw_transfer_id = $2
-           FOR UPDATE`,
-          [transferRef, flwTransferId]
-        );
-        if (pRes.rows.length === 0) {
-          return { found: false };
-        }
-        const payout = pRes.rows[0];
-        if (flwTransferStatus === "SUCCESSFUL") {
-          await client.query(
-            `UPDATE shopit_payouts
-             SET status = 'success',
-                 provider_response = $1,
-                 updated_at = NOW()
-             WHERE id = $2`,
-            [JSON.stringify(data), payout.id]
-          );
-          await client.query(
-            `UPDATE shopit_ledger_entries
-             SET status = 'completed'
-             WHERE reference = $1 AND type = 'withdrawal'`,
-            [payout.reference]
-          );
-          return { found: true, outcome: "success", reference: payout.reference };
-        }
-        if (flwTransferStatus === "FAILED") {
-          if (payout.status === "failed") {
-            return { found: true, outcome: "already_reversed", reference: payout.reference };
-          }
-          const amountKobo = Number(payout.amount_kobo || 0);
-          const feeKobo = Number(payout.fee_kobo || 0);
-          const totalRestoreKobo = Number(payout.total_deduction_kobo || amountKobo + feeKobo);
-          const wRes = await client.query(
-            "SELECT available_balance_kobo, total_withdrawn_kobo FROM shopit_wallets WHERE seller_id = $1 FOR UPDATE",
-            [payout.seller_id]
-          );
-          if (wRes.rows.length > 0) {
-            const curAvail = parseInt(String(wRes.rows[0].available_balance_kobo || "0"), 10);
-            const curWtd = parseInt(String(wRes.rows[0].total_withdrawn_kobo || "0"), 10);
-            const restoredAvail = curAvail + totalRestoreKobo;
-            const restoredWtd = Math.max(0, curWtd - amountKobo);
-            const idempotencyKey = `transfer_failed:${payout.reference}`;
-            const ledIns = await client.query(
-              `INSERT INTO shopit_ledger_entries (
-                id, wallet_id, type, balance_type, status,
-                amount_kobo, fee_kobo, balance_after_kobo, description, reference, idempotency_key, created_at
-              ) VALUES ($1, $2, 'refund', 'available', 'completed', $3, 0, $4, $5, $6, $7, NOW())
-              ON CONFLICT (idempotency_key) DO NOTHING
-              RETURNING id`,
-              [
-                `LEDGER-WTD-REV-${Date.now()}-${crypto6.randomBytes(3).toString("hex")}`,
-                payout.seller_id,
-                totalRestoreKobo,
-                restoredAvail,
-                `Failed payout reversal \xB7 ${payout.reference}`,
-                payout.reference,
-                idempotencyKey
-              ]
-            );
-            if (ledIns.rows.length > 0) {
-              await client.query(
-                `UPDATE shopit_wallets
-                 SET available_balance_kobo = $1,
-                     total_withdrawn_kobo = $2, updated_at = NOW()
-                 WHERE seller_id = $3`,
-                [restoredAvail, restoredWtd, payout.seller_id]
-              );
-            }
-          }
-          await client.query(
-            `UPDATE shopit_payouts
-             SET status = 'failed',
-                 provider_response = $1,
-                 updated_at = NOW()
-             WHERE id = $2`,
-            [JSON.stringify(data), payout.id]
-          );
-          return { found: true, outcome: "reversed", reference: payout.reference };
-        }
-        return { found: true, outcome: flwTransferStatus, reference: payout.reference };
-      });
-      const tResult = !transferOutcome.found ? "not-found" : transferOutcome.outcome === "already_reversed" ? "duplicate" : transferOutcome.outcome === "reversed" ? "payout-reversed" : transferOutcome.outcome === "success" ? "accepted" : String(transferOutcome.outcome || "ignored");
-      logWebhookLine(logEvent, logTxRef, tResult);
-      await logAuditEvent({
-        action: "PAYOUT_WEBHOOK_PROCESSED",
-        actor: { id: "flutterwave_webhook", email: "webhook@flutterwave", role: "system" },
-        target: { type: "payout", id: transferRef || flwTransferId },
-        details: { status: flwTransferStatus, outcome: transferOutcome.outcome },
-        ip: req.ip,
-        userAgent: req.headers?.["user-agent"]
-      });
-      res.setHeader("Content-Type", "application/json");
-      res.statusCode = 200;
-      return res.end(JSON.stringify({ status: true, ...transferOutcome }));
+    });
+    const verifyData = await verifyRes.json().catch(() => ({}));
+    if (!verifyRes.ok || !verifyData?.status || verifyData?.data?.status !== "success") {
+      logWebhookLine(logEvent, logReference, "upstream-verify-failed");
+      return res.status(200).json({ status: false, message: "Paystack transaction not successful upon re-verify" });
     }
-    const reference = String(data.tx_ref || "").trim();
-    const flwTransactionId = data.id ? String(data.id).trim() : "";
-    logTxRef = reference || flwTransactionId || "none";
-    if (event !== "charge.completed" || !reference && !flwTransactionId) {
-      logWebhookLine(logEvent, logTxRef, "ignored");
-      res.setHeader("Content-Type", "application/json");
-      res.statusCode = 200;
-      return res.end(JSON.stringify({ status: true, message: "Event ignored or ping acknowledged." }));
-    }
-    if (data.status && String(data.status).toLowerCase() !== "successful") {
-      if (reference) {
-        await query(
-          `UPDATE shopit_payments
-           SET status = $1, webhook_received = true, data = $2, updated_at = NOW()
-           WHERE reference = $3 AND status IN ('pending', 'pending_payment')`,
-          [String(data.status).toLowerCase(), JSON.stringify({ flwTransactionId, rawStatus: data.status }), reference]
-        ).catch(() => {
-        });
-      }
-      logWebhookLine(logEvent, logTxRef, "non-successful");
-      res.setHeader("Content-Type", "application/json");
-      res.statusCode = 200;
-      return res.end(
-        JSON.stringify({
-          status: true,
-          isPaid: false,
-          message: `Non-successful charge status (${data.status}) recorded without settlement.`
-        })
-      );
-    }
-    const verifyUrl = flwTransactionId ? `https://api.flutterwave.com/v3/transactions/${encodeURIComponent(flwTransactionId)}/verify` : `https://api.flutterwave.com/v3/transactions/verify_by_reference?tx_ref=${encodeURIComponent(reference)}`;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 1e4);
-    let verifyRes;
-    let verifyData;
-    try {
-      verifyRes = await fetch(verifyUrl, {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${secretKey}`,
-          "Content-Type": "application/json"
-        },
-        signal: controller.signal
-      });
-      verifyData = await verifyRes.json().catch(() => ({}));
-    } finally {
-      clearTimeout(timeout);
-    }
-    if (verifyRes.status >= 500) {
-      logWebhookLine(logEvent, logTxRef, "upstream-error");
-      res.setHeader("Content-Type", "application/json");
-      res.statusCode = 502;
-      return res.end(JSON.stringify({ status: false, message: "Flutterwave verification upstream temporarily unavailable." }));
-    }
-    if (!verifyRes.ok || verifyData?.status !== "success" || verifyData?.data?.status !== "successful") {
-      logWebhookLine(logEvent, logTxRef, "verify-failed");
-      res.setHeader("Content-Type", "application/json");
-      res.statusCode = 400;
-      return res.end(
-        JSON.stringify({
-          status: false,
-          message: "Flutterwave verification failed or transaction status is not successful."
-        })
-      );
-    }
-    const verifiedRef = String(verifyData.data.tx_ref || reference).trim();
-    logTxRef = verifiedRef || logTxRef;
-    if (!verifiedRef || reference && verifiedRef !== reference) {
-      logWebhookLine(logEvent, logTxRef, "tx-ref-mismatch");
-      res.setHeader("Content-Type", "application/json");
-      res.statusCode = 400;
-      return res.end(JSON.stringify({ status: false, message: "Verified tx_ref mismatch." }));
-    }
-    const verifiedCurrency = String(verifyData.data.currency || "").toUpperCase();
-    const verifiedAmountKobo = Math.round(Number(verifyData.data.amount || 0) * 100);
-    const channel = String(verifyData.data.payment_type || data.payment_type || "card");
+    const confirmedAmountKobo = Math.round(Number(verifyData.data.amount || 0));
+    const channel = String(verifyData.data.channel || "card");
+    const customerEmail = verifyData.data.customer?.email || "";
     const settlement = await commitPaidOrderTransaction({
-      reference: verifiedRef,
-      confirmedAmountKobo: verifiedAmountKobo,
-      currency: verifiedCurrency,
+      reference,
+      confirmedAmountKobo,
+      currency: String(verifyData.data.currency || "NGN").toUpperCase(),
       channel,
       webhookReceived: true,
-      customerEmail: verifyData.data.customer?.email || data.customer?.email,
+      customerEmail,
       gatewayData: {
-        flwTransactionId: verifyData.data.id,
-        flwRef: verifyData.data.flw_ref,
-        processorResponse: verifyData.data.processor_response,
-        paymentType: channel
+        paystackTransactionId: verifyData.data.id,
+        gatewayResponse: verifyData.data.gateway_response,
+        channel,
+        fees: verifyData.data.fees
       },
-      source: "flutterwave_webhook"
+      source: "paystack_webhook"
     });
-    if (!settlement.found) {
-      logWebhookLine(logEvent, logTxRef, "not-found");
-      res.setHeader("Content-Type", "application/json");
-      res.statusCode = 404;
-      return res.end(JSON.stringify({ status: false, message: "Order reference (tx_ref) not found." }));
-    }
     if (settlement.currencyMismatch || settlement.amountMismatch) {
-      logWebhookLine(logEvent, logTxRef, settlement.amountMismatch ? "amount-mismatch" : "currency-mismatch");
-      res.setHeader("Content-Type", "application/json");
-      res.statusCode = 400;
-      return res.end(JSON.stringify({ status: false, message: "Currency or paid amount mismatch." }));
+      logWebhookLine(logEvent, logReference, "currency-or-amount-mismatch");
+      return res.status(200).json({ status: false, message: "Currency or paid amount mismatch" });
     }
     if (settlement.expired) {
-      logWebhookLine(logEvent, logTxRef, "expired");
-      res.setHeader("Content-Type", "application/json");
-      res.statusCode = 409;
-      return res.end(
-        JSON.stringify({
-          status: false,
-          expired: true,
-          message: "Order had already expired/cancelled. Flagged for admin refund."
-        })
-      );
+      logWebhookLine(logEvent, logReference, "late-payment-expired");
+      return res.status(200).json({ status: true, received: true, note: "Payment received after order expiry" });
     }
     if (settlement.committed) {
-      await runKvCommand2("SETEX", `pay_evt:${verifiedRef}`, String(7 * 24 * 60 * 60), "1");
       await logAuditEvent({
-        action: "ORDER_PAID_WEBHOOK",
-        actor: {
-          id: settlement.order?.buyer_id || "buyer",
-          email: verifyData.data.customer?.email || settlement.order?.buyer_email || "buyer@shopit.ng",
-          role: "buyer"
-        },
-        target: { type: "order", id: settlement.order?.id || verifiedRef },
-        details: {
-          reference: verifiedRef,
-          amountNaira: koboToNaira(verifiedAmountKobo),
-          channel,
-          flwTransactionId: verifyData.data.id
-        },
-        ip: req.ip,
-        userAgent: req.headers?.["user-agent"]
+        action: "PAYSTACK_WEBHOOK_COMMITTED",
+        actor: { id: "paystack_webhook", email: "webhook@paystack", role: "system" },
+        target: { type: "order", id: settlement.order?.id || reference },
+        details: { reference, amountNaira: koboToNaira(confirmedAmountKobo), channel }
       });
     }
-    logWebhookLine(logEvent, verifiedRef, settlement.alreadyPaid ? "duplicate" : "accepted");
-    res.setHeader("Content-Type", "application/json");
-    res.statusCode = 200;
-    return res.end(
-      JSON.stringify({
-        status: true,
-        alreadyProcessed: settlement.alreadyPaid,
-        duplicate: Boolean(settlement.alreadyPaid),
-        reference: verifiedRef,
-        flwTransactionId: verifyData.data.id,
-        message: settlement.alreadyPaid ? "Payment already settled (idempotent)." : "Flutterwave payment verified and settled into escrow ledger."
-      })
-    );
+    logWebhookLine(logEvent, logReference, settlement.committed ? "committed-success" : "already-paid");
+    return res.status(200).json({ status: true, received: true });
   } catch (err) {
-    logWebhookLine(logEvent, logTxRef, "error");
-    console.error("[Flutterwave Webhook Error]:", err.message);
-    await sendAdminAlert(
-      `webhook_err_${Math.floor(Date.now() / 6e4)}`,
-      "Flutterwave Webhook Processing Error",
-      `An internal or upstream timeout occurred while processing a webhook event: <code>${String(err.message || "Unknown error").slice(0, 200)}</code>`
-    ).catch(() => {
-    });
-    res.setHeader("Content-Type", "application/json");
-    res.statusCode = 500;
-    return res.end(JSON.stringify({ status: false, message: "Internal error processing Flutterwave webhook" }));
+    console.error("[Paystack Webhook Error]:", err.message);
+    logWebhookLine(logEvent, logReference, "exception");
+    return res.status(500).json({ status: false, message: "Internal error processing Paystack webhook" });
   }
 }
 __name(handler, "handler");
@@ -4578,7 +4346,7 @@ function getKvToken2() {
   return (process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || "").trim();
 }
 __name(getKvToken2, "getKvToken");
-async function runKvCommand3(command, ...args) {
+async function runKvCommand2(command, ...args) {
   const kvUrl = getKvUrl2();
   const kvToken = getKvToken2();
   if (!kvUrl || !kvToken) return null;
@@ -4608,18 +4376,18 @@ async function runKvCommand3(command, ...args) {
     clearTimeout(timeout);
   }
 }
-__name(runKvCommand3, "runKvCommand");
+__name(runKvCommand2, "runKvCommand");
 async function checkAndRecordRateLimit(bucketKey, maxRequests, windowMs) {
   const now = Date.now();
   const cleanKey = `rl:${bucketKey}`;
   if (getKvUrl2() && getKvToken2()) {
     try {
       const windowSec = Math.max(1, Math.ceil(windowMs / 1e3));
-      const countRaw = await runKvCommand3("INCR", cleanKey);
+      const countRaw = await runKvCommand2("INCR", cleanKey);
       if (countRaw !== null && countRaw !== void 0) {
         const count = Number(countRaw);
         if (count === 1) {
-          await runKvCommand3("EXPIRE", cleanKey, windowSec);
+          await runKvCommand2("EXPIRE", cleanKey, windowSec);
         }
         if (count > maxRequests) {
           return { allowed: false, retryAfterSeconds: windowSec };
@@ -4659,9 +4427,9 @@ async function checkRateLimit(email, deviceId) {
   const devKey = `shopit_rl_dev_${cleanDevice}`;
   if (getKvUrl2() && getKvToken2()) {
     try {
-      const pingRes = await runKvCommand3("PING");
+      const pingRes = await runKvCommand2("PING");
       if (pingRes !== null) {
-        const emailRaw = await runKvCommand3("GET", emailKey);
+        const emailRaw = await runKvCommand2("GET", emailKey);
         const emailTimes2 = (emailRaw ? JSON.parse(emailRaw) : []).filter(
           (t) => now - t < RATE_LIMIT_WINDOW_MS
         );
@@ -4672,7 +4440,7 @@ async function checkRateLimit(email, deviceId) {
           };
         }
         if (cleanDevice !== "dev_unknown") {
-          const devRaw = await runKvCommand3("GET", devKey);
+          const devRaw = await runKvCommand2("GET", devKey);
           const devTimes = (devRaw ? JSON.parse(devRaw) : []).filter(
             (t) => now - t < RATE_LIMIT_WINDOW_MS
           );
@@ -4721,19 +4489,19 @@ async function recordRateLimit(email, deviceId) {
   const devKey = `shopit_rl_dev_${cleanDevice}`;
   if (getKvUrl2() && getKvToken2()) {
     try {
-      const emailRaw = await runKvCommand3("GET", emailKey);
+      const emailRaw = await runKvCommand2("GET", emailKey);
       const emailTimes = (emailRaw ? JSON.parse(emailRaw) : []).filter(
         (t) => now - t < RATE_LIMIT_WINDOW_MS
       );
       emailTimes.push(now);
-      const setOk = await runKvCommand3("SET", emailKey, JSON.stringify(emailTimes));
+      const setOk = await runKvCommand2("SET", emailKey, JSON.stringify(emailTimes));
       if (cleanDevice !== "dev_unknown") {
-        const devRaw = await runKvCommand3("GET", devKey);
+        const devRaw = await runKvCommand2("GET", devKey);
         const devTimes = (devRaw ? JSON.parse(devRaw) : []).filter(
           (t) => now - t < RATE_LIMIT_WINDOW_MS
         );
         devTimes.push(now);
-        await runKvCommand3("SET", devKey, JSON.stringify(devTimes));
+        await runKvCommand2("SET", devKey, JSON.stringify(devTimes));
       }
       if (setOk !== null) {
         return;
@@ -5138,7 +4906,7 @@ function requireOwnershipOrAdmin(getTargetUserId) {
 }
 __name(requireOwnershipOrAdmin, "requireOwnershipOrAdmin");
 function requirePaymentsEnabled(_req, res, next) {
-  if (process.env.PAYMENTS_ENABLED !== "true") {
+  if (!isPaymentsActive()) {
     return res.status(503).json({
       status: false,
       error: "PAYMENTS_DISABLED",
@@ -5149,7 +4917,7 @@ function requirePaymentsEnabled(_req, res, next) {
 }
 __name(requirePaymentsEnabled, "requirePaymentsEnabled");
 function requirePayoutsEnabled(_req, res, next) {
-  if (process.env.PAYOUTS_ENABLED !== "true") {
+  if (!isPayoutsActive()) {
     return res.status(503).json({
       status: false,
       error: "PAYOUTS_DISABLED",
@@ -7110,7 +6878,13 @@ async function processEscrowAutoRelease(batchLimit = 50) {
           [order.id]
         );
         if (disputeCheck.rows.length > 0) return false;
-        const items = Array.isArray(order.items) ? order.items : [];
+        const items = Array.isArray(order.items) ? order.items : typeof order.items === "string" ? (() => {
+          try {
+            return JSON.parse(order.items);
+          } catch {
+            return [];
+          }
+        })() : [];
         const sellerTotals = {};
         for (const item of items) {
           if (item.sellerId) {
@@ -11370,7 +11144,7 @@ app.use((_req, res, next) => {
   res.setHeader("Permissions-Policy", "camera=(self), microphone=(), geolocation=(self)");
   res.setHeader(
     "Content-Security-Policy",
-    "default-src 'self'; script-src 'self'; frame-src 'self' https://checkout.flutterwave.com https://checkout-v2.flutterwave.com https://*.flutterwave.com; connect-src 'self' https://api.flutterwave.com https://checkout.flutterwave.com https://api.brevo.com https://*.ingest.sentry.io https://*.upstash.io https://vitals.vercel-insights.com; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline' https:; font-src 'self' data: https:;"
+    "default-src 'self'; script-src 'self'; frame-src 'self' https://checkout.paystack.com https://*.paystack.co; connect-src 'self' https://api.paystack.co https://checkout.paystack.com https://api.brevo.com https://*.ingest.sentry.io https://*.upstash.io https://vitals.vercel-insights.com; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline' https:; font-src 'self' data: https:;"
   );
   next();
 });
@@ -11385,7 +11159,7 @@ app.use(
 app.use((req, res, next) => {
   const originHeader = req.headers.origin ? normalizeOriginUrl(String(req.headers.origin)) : "";
   const allowedOrigins = getAllowedOrigins(req);
-  const isWebhookPath = req.path === "/webhooks/flutterwave" || req.path === "/api/webhooks/flutterwave";
+  const isWebhookPath = req.path === "/webhooks/paystack" || req.path === "/api/webhooks/paystack";
   if (isWebhookPath) {
     return next();
   }
@@ -11430,18 +11204,14 @@ app.use((req, res, next) => {
   }
   next();
 });
-function getFlwSecretKey() {
-  return (process.env.FLW_SECRET_KEY || "").trim().replace(/^["']|["']$/g, "");
+function getPaystackSecretKey2() {
+  return (process.env.PAYSTACK_SECRET_KEY || "").trim().replace(/^["']|["']$/g, "");
 }
-__name(getFlwSecretKey, "getFlwSecretKey");
-function getFlwWebhookHash() {
-  return (process.env.FLW_WEBHOOK_SECRET_HASH || "").trim().replace(/^["']|["']$/g, "");
+__name(getPaystackSecretKey2, "getPaystackSecretKey");
+function getPaystackPublicKey() {
+  return (process.env.PAYSTACK_PUBLIC_KEY || process.env.VITE_PAYSTACK_PUBLIC_KEY || "").trim().replace(/^["']|["']$/g, "");
 }
-__name(getFlwWebhookHash, "getFlwWebhookHash");
-function getFlwPublicKey() {
-  return (process.env.FLW_PUBLIC_KEY || process.env.VITE_FLW_PUBLIC_KEY || "").trim().replace(/^["']|["']$/g, "");
-}
-__name(getFlwPublicKey, "getFlwPublicKey");
+__name(getPaystackPublicKey, "getPaystackPublicKey");
 function hashNin(nin) {
   const ninKey = deriveSubKey("nin-hash", 32);
   return crypto12.createHmac("sha256", ninKey).update(nin.trim()).digest("hex");
@@ -11483,13 +11253,13 @@ router4.get(["/health", "/api/health"], async (_req, res) => {
     getDatabaseHealthStats()
   ]);
   const isPgOk = pgPing.ok;
+  const isRedisOk = redisPing.ok;
   const hasRedisConfig = Boolean(process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL);
-  const isRedisOk = !hasRedisConfig || redisPing.ok;
-  const flutterwaveConfigured = Boolean(getFlwSecretKey() && getFlwPublicKey() && getFlwWebhookHash());
-  const paymentsEnabledFlag = String(process.env.PAYMENTS_ENABLED || "").toLowerCase() === "true";
-  const payoutsEnabledFlag = String(process.env.PAYOUTS_ENABLED || "").toLowerCase() === "true";
+  const paystackConfigured = Boolean(getPaystackSecretKey2() && getPaystackPublicKey());
+  const paymentsEnabledFlag = isPaymentsActive();
+  const payoutsEnabledFlag = isPayoutsActive();
   const migrationError = pgPing.migrationError ? String(pgPing.migrationError).replace(/postgres(ql)?:\/\/[^\s]+/gi, "[redacted-url]").slice(0, 240) : null;
-  if (isPgOk && isRedisOk) {
+  if (isPgOk) {
     return res.status(200).json({
       status: "OK",
       database: pgPing.provider,
@@ -11500,7 +11270,7 @@ router4.get(["/health", "/api/health"], async (_req, res) => {
       fileStorageBytes: dbStats.fileStorageBytes,
       fileStorageMb: dbStats.fileStorageMb,
       fileCount: dbStats.fileCount,
-      flutterwaveConfigured,
+      paystackConfigured,
       paymentsEnabled: paymentsEnabledFlag,
       payoutsEnabled: payoutsEnabledFlag,
       schemaOk: Boolean(pgPing.schemaOk),
@@ -11522,7 +11292,7 @@ router4.get(["/health", "/api/health"], async (_req, res) => {
     databaseHost: dbStats.databaseHost,
     tableCount: dbStats.tableCount,
     databaseSizeMb: dbStats.databaseSizeMb,
-    flutterwaveConfigured,
+    paystackConfigured,
     paymentsEnabled: paymentsEnabledFlag,
     payoutsEnabled: payoutsEnabledFlag,
     schemaOk: Boolean(pgPing.schemaOk),
@@ -11537,8 +11307,8 @@ router4.get(["/health", "/api/health"], async (_req, res) => {
 router4.get("/platform/config", async (_req, res) => {
   try {
     const config2 = await getAllPlatformConfig();
-    const paymentsEnabledFlag = String(process.env.PAYMENTS_ENABLED || "").toLowerCase() === "true";
-    const payoutsEnabledFlag = String(process.env.PAYOUTS_ENABLED || "").toLowerCase() === "true";
+    const paymentsEnabledFlag = isPaymentsActive();
+    const payoutsEnabledFlag = isPayoutsActive();
     return res.json({
       status: true,
       ...config2,
@@ -13602,33 +13372,32 @@ router4.get("/admin/export-data", requireAdmin, async (req, res) => {
 router4.get("/payments/config", (_req, res) => {
   res.json({
     status: true,
-    gateway: "flutterwave",
-    publicKey: getFlwPublicKey(),
-    isSecretConfigured: Boolean(getFlwSecretKey()),
-    isWebhookSecretConfigured: Boolean(getFlwWebhookHash()),
-    webhookPath: "/api/webhooks/flutterwave",
-    webhookUrl: `${APP_URL}/api/webhooks/flutterwave`,
+    gateway: "paystack",
+    publicKey: getPaystackPublicKey(),
+    isSecretConfigured: Boolean(getPaystackSecretKey2()),
+    webhookPath: "/api/webhooks/paystack",
+    webhookUrl: `${APP_URL}/api/webhooks/paystack`,
     minWithdrawal: 1e3,
     coolingPeriodHours: 24
   });
 });
 router4.get("/payments/webhook-info", (_req, res) => {
   res.json({
-    gateway: "flutterwave",
-    webhookPath: "/api/webhooks/flutterwave",
-    webhookUrl: `${APP_URL}/api/webhooks/flutterwave`,
+    gateway: "paystack",
+    webhookPath: "/api/webhooks/paystack",
+    webhookUrl: `${APP_URL}/api/webhooks/paystack`,
     method: "POST",
-    signatureHeader: "verif-hash",
-    isConfigured: Boolean(getFlwSecretKey() && getFlwWebhookHash())
+    signatureHeader: "x-paystack-signature",
+    isConfigured: Boolean(getPaystackSecretKey2())
   });
 });
 router4.get("/payments/banks", requireAuth, async (_req, res) => {
-  const flwSecret = getFlwSecretKey();
-  if (!flwSecret) {
+  const paystackSecret = getPaystackSecretKey2();
+  if (!paystackSecret) {
     return res.status(503).json({
       status: false,
       error: "PAYMENT_GATEWAY_NOT_CONFIGURED",
-      message: "Bank directory is unavailable because FLW_SECRET_KEY is not configured."
+      message: "Bank directory is unavailable because PAYSTACK_SECRET_KEY is not configured."
     });
   }
   try {
@@ -13637,10 +13406,10 @@ router4.get("/payments/banks", requireAuth, async (_req, res) => {
     let bankRes;
     let bankData;
     try {
-      bankRes = await fetch("https://api.flutterwave.com/v3/banks/NG", {
+      bankRes = await fetch("https://api.paystack.co/bank", {
         method: "GET",
         headers: {
-          Authorization: `Bearer ${flwSecret}`,
+          Authorization: `Bearer ${paystackSecret}`,
           "Content-Type": "application/json"
         },
         signal: controller.signal
@@ -13649,10 +13418,10 @@ router4.get("/payments/banks", requireAuth, async (_req, res) => {
     } finally {
       clearTimeout(timeout);
     }
-    if (!bankRes.ok || bankData?.status !== "success" || !Array.isArray(bankData?.data)) {
+    if (!bankRes.ok || !bankData?.status || !Array.isArray(bankData?.data)) {
       return res.status(502).json({
         status: false,
-        message: bankData?.message || "Unable to load supported Nigerian banks from Flutterwave."
+        message: bankData?.message || "Unable to load supported Nigerian banks from Paystack."
       });
     }
     const banks = bankData.data.filter((b) => b && b.code && b.name).map((b) => ({
@@ -13665,12 +13434,12 @@ router4.get("/payments/banks", requireAuth, async (_req, res) => {
   }
 });
 router4.post("/payments/resolve-account", requireAuth, async (req, res) => {
-  const flwSecret = getFlwSecretKey();
-  if (!flwSecret) {
+  const paystackSecret = getPaystackSecretKey2();
+  if (!paystackSecret) {
     return res.status(503).json({
       status: false,
       error: "PAYMENT_GATEWAY_NOT_CONFIGURED",
-      message: "Account resolution requires FLW_SECRET_KEY."
+      message: "Account resolution requires PAYSTACK_SECRET_KEY."
     });
   }
   const accountNumber = String(req.body?.accountNumber || "").trim();
@@ -13684,26 +13453,22 @@ router4.post("/payments/resolve-account", requireAuth, async (req, res) => {
     let resolveRes;
     let resolveData;
     try {
-      resolveRes = await fetch("https://api.flutterwave.com/v3/accounts/resolve", {
-        method: "POST",
+      resolveRes = await fetch(`https://api.paystack.co/bank/resolve?account_number=${encodeURIComponent(accountNumber)}&bank_code=${encodeURIComponent(bankCode)}`, {
+        method: "GET",
         headers: {
-          Authorization: `Bearer ${flwSecret}`,
+          Authorization: `Bearer ${paystackSecret}`,
           "Content-Type": "application/json"
         },
-        body: JSON.stringify({
-          account_number: accountNumber,
-          account_bank: bankCode
-        }),
         signal: controller.signal
       });
       resolveData = await resolveRes.json().catch(() => ({}));
     } finally {
       clearTimeout(timeout);
     }
-    if (!resolveRes.ok || resolveData?.status !== "success" || !resolveData?.data?.account_name) {
+    if (!resolveRes.ok || !resolveData?.status || !resolveData?.data?.account_name) {
       return res.status(400).json({
         status: false,
-        message: resolveData?.message || "Could not resolve Nigerian bank account with Flutterwave."
+        message: resolveData?.message || "Could not resolve Nigerian bank account with Paystack."
       });
     }
     return res.json({
@@ -13731,8 +13496,8 @@ router4.post("/payments/initialize", requirePaymentsEnabled, requireAuth, async 
     if (!rl.allowed) {
       return res.status(429).json({ status: false, message: "Too many checkout attempts. Please wait a minute." });
     }
-    const flwSecret = getFlwSecretKey();
-    if (!flwSecret) {
+    const paystackSecret = getPaystackSecretKey2();
+    if (!paystackSecret) {
       return res.status(503).json({
         status: false,
         error: "PAYMENT_GATEWAY_NOT_CONFIGURED",
@@ -13866,7 +13631,7 @@ router4.post("/payments/initialize", requirePaymentsEnabled, requireAuth, async 
           discountTotalKobo,
           appliedCouponCode,
           grandTotalKobo,
-          paymentMethod || "flutterwave_card",
+          paymentMethod || "paystack_card",
           reference,
           handshakeOtp,
           campus || "Lagos Mainland",
@@ -13896,30 +13661,23 @@ router4.post("/payments/initialize", requirePaymentsEnabled, requireAuth, async 
     });
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 12e3);
-    let flwRes = null;
-    let flwData = {};
+    let paystackRes = null;
+    let paystackData = {};
     try {
-      flwRes = await fetch("https://api.flutterwave.com/v3/payments", {
+      paystackRes = await fetch("https://api.paystack.co/transaction/initialize", {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${flwSecret}`,
+          Authorization: `Bearer ${paystackSecret}`,
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
-          tx_ref: initializedOrder.reference,
-          amount: initializedOrder.pricing.grandTotalNaira,
+          email: buyerEmail,
+          amount: initializedOrder.pricing.amountInKobo,
           currency: "NGN",
-          redirect_url: `${APP_URL}/?view=orders&payment_ref=${encodeURIComponent(initializedOrder.reference)}`,
-          payment_options: "card, banktransfer, ussd, opay",
-          customer: {
-            email: buyerEmail,
-            name: user.name || "Shop It Buyer"
-          },
-          customizations: {
-            title: "Shop It Checkout",
-            description: `Order #${initializedOrder.orderId} (${campus || "Nigeria"})`
-          },
-          meta: {
+          reference: initializedOrder.reference,
+          callback_url: `https://shop-itng-pied.vercel.app/?view=orders&payment_ref=${encodeURIComponent(initializedOrder.reference)}`,
+          channels: ["card", "bank", "ussd", "bank_transfer", "qr"],
+          metadata: {
             orderId: initializedOrder.orderId,
             buyerId: user.userId,
             campus: campus || "Nigeria"
@@ -13927,13 +13685,13 @@ router4.post("/payments/initialize", requirePaymentsEnabled, requireAuth, async 
         }),
         signal: controller.signal
       });
-      flwData = await flwRes.json().catch(() => ({}));
+      paystackData = await paystackRes.json().catch(() => ({}));
     } catch (gatewayErr) {
-      flwData = { message: gatewayErr?.message || "Flutterwave API timeout or connection error." };
+      paystackData = { message: gatewayErr?.message || "Paystack API timeout or connection error." };
     } finally {
       clearTimeout(timeout);
     }
-    if (!flwRes || !flwRes.ok || flwData?.status !== "success" || !flwData?.data?.link) {
+    if (!paystackRes || !paystackRes.ok || !paystackData?.status || !paystackData?.data?.authorization_url) {
       await withTransaction(async (client) => {
         await restoreOrderStockInTx(client, {
           id: initializedOrder.orderId,
@@ -13951,7 +13709,7 @@ router4.post("/payments/initialize", requirePaymentsEnabled, requireAuth, async 
       });
       return res.status(502).json({
         status: false,
-        message: flwData?.message || "Unable to initialize payment with Flutterwave. Please try again."
+        message: paystackData?.message || "Unable to initialize payment with Paystack. Please try again."
       });
     }
     await logAuditEvent({
@@ -13968,15 +13726,15 @@ router4.post("/payments/initialize", requirePaymentsEnabled, requireAuth, async 
       userAgent: req.get("user-agent")
     });
     const responseData = {
-      gateway: "flutterwave",
+      gateway: "paystack",
       reference: initializedOrder.reference,
       orderId: initializedOrder.orderId,
       amountInKobo: initializedOrder.pricing.amountInKobo,
       amountNaira: initializedOrder.pricing.grandTotalNaira,
       grandTotalNaira: initializedOrder.pricing.grandTotalNaira,
-      authorizationUrl: flwData.data.link,
-      authorization_url: flwData.data.link,
-      publicKey: getFlwPublicKey(),
+      authorizationUrl: paystackData.data.authorization_url,
+      authorization_url: paystackData.data.authorization_url,
+      publicKey: getPaystackPublicKey(),
       pricing: initializedOrder.pricing
     };
     return res.json({ status: true, ...responseData, data: responseData });
@@ -13986,10 +13744,10 @@ router4.post("/payments/initialize", requirePaymentsEnabled, requireAuth, async 
     return res.status(code).json({ status: false, message: err.message || "Internal server error initializing payment." });
   }
 });
-router4.get("/webhooks/flutterwave", (_req, res) => {
+router4.get("/webhooks/paystack", (_req, res) => {
   return res.status(200).json({ status: "ok", message: "POST only" });
 });
-router4.all("/webhooks/flutterwave", requirePaymentsEnabled, async (req, res) => {
+router4.all("/webhooks/paystack", requirePaymentsEnabled, async (req, res) => {
   return handler(req, res);
 });
 router4.get("/payments/verify/:reference", requirePaymentsEnabled, requireAuth, async (req, res) => {
@@ -14022,11 +13780,11 @@ router4.get("/payments/verify/:reference", requirePaymentsEnabled, requireAuth, 
         message: "Transaction already verified and paid."
       });
     }
-    const flwSecret = getFlwSecretKey();
-    if (!flwSecret) {
+    const paystackSecret = getPaystackSecretKey2();
+    if (!paystackSecret) {
       return res.status(503).json({ status: false, message: "Payment verification secret not configured." });
     }
-    const verifyUrl = transactionId ? `https://api.flutterwave.com/v3/transactions/${encodeURIComponent(transactionId)}/verify` : `https://api.flutterwave.com/v3/transactions/verify_by_reference?tx_ref=${encodeURIComponent(reference)}`;
+    const verifyUrl = `https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 1e4);
     let verifyRes;
@@ -14034,14 +13792,14 @@ router4.get("/payments/verify/:reference", requirePaymentsEnabled, requireAuth, 
     try {
       verifyRes = await fetch(verifyUrl, {
         method: "GET",
-        headers: { Authorization: `Bearer ${flwSecret}`, "Content-Type": "application/json" },
+        headers: { Authorization: `Bearer ${paystackSecret}`, "Content-Type": "application/json" },
         signal: controller.signal
       });
       verifyData = await verifyRes.json().catch(() => ({}));
     } finally {
       clearTimeout(timeout);
     }
-    if (!verifyRes.ok || verifyData?.status !== "success" || verifyData?.data?.status !== "successful") {
+    if (!verifyRes.ok || !verifyData?.status || verifyData?.data?.status !== "success") {
       if (order.status === "cancelled") {
         return res.status(409).json({
           status: false,
@@ -14056,26 +13814,26 @@ router4.get("/payments/verify/:reference", requirePaymentsEnabled, requireAuth, 
         isPaid: false,
         orderStatus: order.status,
         gatewayStatus: verifyData?.data?.status || "pending",
-        message: verifyData?.message || "Payment not yet confirmed with Flutterwave."
+        message: verifyData?.message || "Payment not yet confirmed with Paystack."
       });
     }
-    if (String(verifyData.data.tx_ref || "").trim() !== reference) {
-      return res.status(400).json({ status: false, isPaid: false, message: "Verified tx_ref mismatch." });
+    if (String(verifyData.data.reference || "").trim() !== reference) {
+      return res.status(400).json({ status: false, isPaid: false, message: "Verified reference mismatch." });
     }
-    const confirmedAmountKobo = Math.round(Number(verifyData.data.amount || 0) * 100);
-    const channel = String(verifyData.data.payment_type || "card");
+    const confirmedAmountKobo = Math.round(Number(verifyData.data.amount || 0));
+    const channel = String(verifyData.data.channel || "card");
     const settlement = await commitPaidOrderTransaction({
       reference,
       confirmedAmountKobo,
-      currency: String(verifyData.data.currency || "").toUpperCase(),
+      currency: String(verifyData.data.currency || "NGN").toUpperCase(),
       channel,
       webhookReceived: false,
       customerEmail: verifyData.data.customer?.email || user.email,
       gatewayData: {
-        flwTransactionId: verifyData.data.id,
-        flwRef: verifyData.data.flw_ref,
-        processorResponse: verifyData.data.processor_response,
-        paymentType: channel
+        paystackTransactionId: verifyData.data.id,
+        gatewayResponse: verifyData.data.gateway_response,
+        channel,
+        fees: verifyData.data.fees
       },
       source: "verify_endpoint"
     });
@@ -14111,11 +13869,11 @@ router4.get("/payments/verify/:reference", requirePaymentsEnabled, requireAuth, 
       amountNaira: koboToNaira(confirmedAmountKobo),
       currency: "NGN",
       channel,
-      message: "Payment verified with Flutterwave and held for order delivery."
+      message: "Payment verified with Paystack and held for order delivery."
     });
   } catch (err) {
     console.error("[Payment Verify Error]:", err.message);
-    return res.status(502).json({ status: false, message: "Could not verify payment with Flutterwave." });
+    return res.status(502).json({ status: false, message: "Could not verify payment with Paystack." });
   }
 });
 router4.post("/payments/refund", requirePaymentsEnabled, requireAdmin, async (req, res) => {
@@ -14125,8 +13883,8 @@ router4.post("/payments/refund", requirePaymentsEnabled, requireAdmin, async (re
     return res.status(400).json({ status: false, message: "Payment reference or orderId is required for refund." });
   }
   try {
-    const flwSecret = getFlwSecretKey();
-    if (!flwSecret) {
+    const paystackSecret = getPaystackSecretKey2();
+    if (!paystackSecret) {
       return res.status(503).json({ status: false, message: "Payment gateway secret is not configured." });
     }
     const orderLookup = await query("SELECT * FROM shopit_orders WHERE payment_reference = $1 OR id = $2", [
@@ -14147,45 +13905,17 @@ router4.post("/payments/refund", requirePaymentsEnabled, requireAdmin, async (re
         message: "Refund already processed for this order."
       });
     }
-    let flwTxId = paymentRow?.data?.flwTransactionId || paymentRow?.data?.gatewayId || "";
-    if (!flwTxId && effectiveRef) {
-      const lookController = new AbortController();
-      const lookTimeout = setTimeout(() => lookController.abort(), 8e3);
-      try {
-        const lookRes = await fetch(
-          `https://api.flutterwave.com/v3/transactions/verify_by_reference?tx_ref=${encodeURIComponent(effectiveRef)}`,
-          {
-            method: "GET",
-            headers: { Authorization: `Bearer ${flwSecret}`, "Content-Type": "application/json" },
-            signal: lookController.signal
-          }
-        );
-        const lookData = await lookRes.json().catch(() => ({}));
-        if (lookRes.ok && lookData?.status === "success" && lookData?.data?.id) {
-          flwTxId = String(lookData.data.id);
-        }
-      } catch {
-      } finally {
-        clearTimeout(lookTimeout);
-      }
-    }
-    if (!flwTxId) {
-      return res.status(400).json({
-        status: false,
-        message: "Cannot execute Flutterwave refund: missing verified Flutterwave transaction ID for this reference."
-      });
-    }
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 1e4);
     let refundRes;
     let refundData;
     try {
-      refundRes = await fetch(`https://api.flutterwave.com/v3/transactions/${encodeURIComponent(String(flwTxId))}/refund`, {
+      refundRes = await fetch("https://api.paystack.co/refund", {
         method: "POST",
-        headers: { Authorization: `Bearer ${flwSecret}`, "Content-Type": "application/json" },
+        headers: { Authorization: `Bearer ${paystackSecret}`, "Content-Type": "application/json" },
         body: JSON.stringify({
-          ...amountKobo ? { amount: koboToNaira(Number(amountKobo)) } : {},
-          comments: reason || "Customer refund approved by Shop It Admin"
+          transaction: effectiveRef,
+          ...amountKobo ? { amount: Number(amountKobo) } : {}
         }),
         signal: controller.signal
       });
@@ -14193,8 +13923,8 @@ router4.post("/payments/refund", requirePaymentsEnabled, requireAdmin, async (re
     } finally {
       clearTimeout(timeout);
     }
-    if (!refundRes.ok || refundData?.status !== "success") {
-      return res.status(502).json({ status: false, message: refundData?.message || "Flutterwave refund call failed." });
+    if (!refundRes.ok || !refundData?.status) {
+      return res.status(502).json({ status: false, message: refundData?.message || "Paystack refund call failed." });
     }
     await withTransaction(async (client) => {
       const orderRes = await client.query(
@@ -14221,7 +13951,7 @@ router4.post("/payments/refund", requirePaymentsEnabled, requireAdmin, async (re
               order.id,
               prevStatus,
               user.email,
-              `Refund processed via Flutterwave: ${reason || "Admin approval"}`
+              `Refund processed via Paystack: ${reason || "Admin approval"}`
             ]
           );
           const items = Array.isArray(order.items) ? order.items : [];
@@ -14284,7 +14014,7 @@ router4.post("/payments/refund", requirePaymentsEnabled, requireAdmin, async (re
         const mergedPayData = {
           ...existingPayData,
           refundId: refundData?.data?.id,
-          flwTransactionId: flwTxId
+          paystackRefundReference: refundData?.data?.reference
         };
         await client.query(
           `UPDATE shopit_payments
@@ -14300,7 +14030,7 @@ router4.post("/payments/refund", requirePaymentsEnabled, requireAdmin, async (re
       action: "PAYMENT_REFUND_EXECUTED",
       actor: { id: user.userId, email: user.email, role: user.role },
       target: { type: "payment", id: effectiveRef || orderId },
-      details: { amountKobo, reason, orderId: targetOrder?.id || orderId, flwTxId },
+      details: { amountKobo, reason, orderId: targetOrder?.id || orderId, paystackReference: refundData?.data?.reference },
       ip: req.ip,
       userAgent: req.get("user-agent")
     });
@@ -14359,8 +14089,8 @@ router4.post("/payments/transfer", requirePayoutsEnabled, requireAuth, async (re
   if (!ownsSeller && user.role !== "admin") {
     return res.status(403).json({ status: false, message: "Forbidden: you can only withdraw from your own wallet." });
   }
-  const flwSecret = getFlwSecretKey();
-  if (!flwSecret) {
+  const paystackSecret = getPaystackSecretKey2();
+  if (!paystackSecret) {
     return res.status(503).json({ status: false, message: "Payout gateway secret is not configured." });
   }
   const amountNum = Math.floor(Number(amount) || 0);
@@ -14519,35 +14249,59 @@ router4.post("/payments/transfer", requirePayoutsEnabled, requireAuth, async (re
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 12e3);
-      let transRes;
-      let transData;
+      let recipientRes;
+      let recipientData;
       try {
-        transRes = await fetch("https://api.flutterwave.com/v3/transfers", {
+        recipientRes = await fetch("https://api.paystack.co/transferrecipient", {
           method: "POST",
-          headers: { Authorization: `Bearer ${flwSecret}`, "Content-Type": "application/json" },
+          headers: { Authorization: `Bearer ${paystackSecret}`, "Content-Type": "application/json" },
           body: JSON.stringify({
-            account_bank: String(debitState.account.bankCode),
+            type: "nuban",
+            name: debitState.account.accountName || debitState.seller.shop_name,
             account_number: debitState.account.accountNumber,
-            amount: amountNum,
-            currency: "NGN",
-            narration: `Shop It Withdrawal - ${debitState.seller.shop_name}`,
-            reference: transferCode,
-            debit_currency: "NGN"
+            bank_code: debitState.account.bankCode,
+            currency: "NGN"
           }),
           signal: controller.signal
         });
-        transData = await transRes.json().catch(() => ({}));
+        recipientData = await recipientRes.json().catch(() => ({}));
       } finally {
         clearTimeout(timeout);
       }
-      if (!transRes.ok || transData?.status !== "success") {
-        throw new Error(transData?.message || "Flutterwave transfer rejected.");
+      const recipientCode = recipientData?.data?.recipient_code;
+      if (!recipientRes.ok || !recipientCode) {
+        throw new Error(recipientData?.message || "Failed to create Paystack transfer recipient.");
+      }
+      const transController = new AbortController();
+      const transTimeout = setTimeout(() => transController.abort(), 12e3);
+      let transRes;
+      let transData;
+      try {
+        transRes = await fetch("https://api.paystack.co/transfer", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${paystackSecret}`, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            source: "balance",
+            amount: amountKobo,
+            // Paystack transfer amount is in kobo
+            recipient: recipientCode,
+            reference: transferCode,
+            reason: `Shop It Withdrawal - ${debitState.seller.shop_name}`
+          }),
+          signal: transController.signal
+        });
+        transData = await transRes.json().catch(() => ({}));
+      } finally {
+        clearTimeout(transTimeout);
+      }
+      if (!transRes.ok || !transData?.status) {
+        throw new Error(transData?.message || "Paystack transfer rejected.");
       }
       await query(
-        "UPDATE shopit_payouts SET status = 'processing', transfer_code = $1, flw_transfer_id = $2, provider_response = $3, updated_at = NOW() WHERE id = $4",
+        "UPDATE shopit_payouts SET status = 'processing', transfer_code = $1, paystack_transfer_code = $2, provider_response = $3, updated_at = NOW() WHERE id = $4",
         [
           transData.data?.reference || transferCode,
-          transData.data?.id ? String(transData.data.id) : null,
+          transData.data?.transfer_code || null,
           JSON.stringify(transData.data || {}),
           transferCode
         ]

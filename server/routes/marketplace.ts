@@ -1445,32 +1445,32 @@ router.get('/orders', requireAuth, async (req: AuthenticatedRequest, res: Respon
     const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit || '50'), 10) || 50));
     const offset = (page - 1) * limit;
 
-    let querySql = '';
-    let countSql = '';
+    let total = 0;
+    let rowsRes: any = { rows: [] };
     let params: any[] = [];
     let countParams: any[] = [];
 
     if (user.role === 'admin') {
-      countSql = 'SELECT COUNT(*) as count FROM shopit_orders';
-      querySql = 'SELECT * FROM shopit_orders ORDER BY created_at DESC LIMIT $1 OFFSET $2';
-      params = [limit, offset];
-      countParams = [];
+      const countRes = await dbQuery('SELECT COUNT(*) as count FROM shopit_orders');
+      total = parseInt(countRes.rows[0].count, 10);
+      const qRes = await dbQuery('SELECT * FROM shopit_orders ORDER BY created_at DESC LIMIT $1 OFFSET $2', [limit, offset]);
+      rowsRes = qRes;
     } else if (user.role === 'seller') {
       const sellerLookupId = user.sellerId || user.userId;
-      countSql = `SELECT COUNT(*) as count FROM shopit_orders WHERE buyer_id = $1 OR items::text LIKE $2 OR items::text LIKE $3`;
-      querySql = `SELECT * FROM shopit_orders WHERE buyer_id = $1 OR items::text LIKE $2 OR items::text LIKE $3 ORDER BY created_at DESC LIMIT $4 OFFSET $5`;
-      countParams = [user.userId, `%"sellerId":"${user.userId}"%`, `%"sellerId":"${sellerLookupId}"%`];
-      params = [...countParams, limit, offset];
+      const allRes = await dbQuery('SELECT * FROM shopit_orders ORDER BY created_at DESC');
+      const filtered = allRes.rows.filter((o: any) => {
+        if (o.buyer_id === user.userId) return true;
+        const itemsList = Array.isArray(o.items) ? o.items : (typeof o.items === 'string' ? JSON.parse(o.items) : []);
+        return itemsList.some((it: any) => it.sellerId === user.userId || it.sellerId === sellerLookupId);
+      });
+      total = filtered.length;
+      rowsRes = { rows: filtered.slice(offset, offset + limit) };
     } else {
-      countSql = 'SELECT COUNT(*) as count FROM shopit_orders WHERE buyer_id = $1';
-      querySql = 'SELECT * FROM shopit_orders WHERE buyer_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3';
-      countParams = [user.userId];
-      params = [user.userId, limit, offset];
+      const countRes = await dbQuery('SELECT COUNT(*) as count FROM shopit_orders WHERE buyer_id = $1', [user.userId]);
+      total = parseInt(countRes.rows[0].count, 10);
+      const qRes = await dbQuery('SELECT * FROM shopit_orders WHERE buyer_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3', [user.userId, limit, offset]);
+      rowsRes = qRes;
     }
-
-    const countRes = await dbQuery(countSql, countParams);
-    const total = parseInt(countRes.rows[0].count, 10);
-    const rowsRes = await dbQuery(querySql, params);
 
     const participantIds: string[] = [];
     for (const r of rowsRes.rows) {
@@ -2726,15 +2726,19 @@ router.post('/chat/conversations', requireAuth, async (req: AuthenticatedRequest
     }
 
     // Also detect any existing DB order between buyer and this seller
-    const existingOrderRes = verifiedOrderId
+    const existingOrdersRes = verifiedOrderId
       ? null
       : await dbQuery(
-          `SELECT id FROM shopit_orders
-           WHERE buyer_id = $1 AND (items::text LIKE $2 OR items::text LIKE $3)
-           ORDER BY created_at DESC LIMIT 1`,
-          [user.userId, `%"sellerId":"${canonicalSellerId}"%`, `%"sellerId":"${sellerUserId}"%`]
+          `SELECT id, items FROM shopit_orders WHERE buyer_id = $1 ORDER BY created_at DESC`,
+          [user.userId]
         );
-    const hasExistingOrder = Boolean(verifiedOrderId || existingOrderRes?.rows?.length);
+    const hasExistingOrder = Boolean(
+      verifiedOrderId ||
+      existingOrdersRes?.rows?.some((o: any) => {
+        const list = Array.isArray(o.items) ? o.items : (() => { try { return JSON.parse(o.items); } catch { return []; } })();
+        return list.some((it: any) => it?.sellerId === canonicalSellerId || it?.sellerId === sellerUserId);
+      })
+    );
 
     // Fetch buyer age to enforce minor safety rules strictly in both directions
     const buyerAgeRes = await dbQuery('SELECT age FROM shopit_users WHERE id = $1 LIMIT 1', [user.userId]);
@@ -2795,7 +2799,7 @@ router.post('/chat/conversations', requireAuth, async (req: AuthenticatedRequest
     const userMap = await batchLoadUserMeta([user.userId, canonicalSellerId, sellerUserId]);
     const buyerDisplayName = userMap.get(user.userId)?.displayName || extractFirstName(user.name || 'Member');
 
-    const effectiveOrderId = verifiedOrderId || existingOrderRes?.rows?.[0]?.id || null;
+    const effectiveOrderId = verifiedOrderId || existingOrdersRes?.rows?.[0]?.id || null;
 
     const existing = await dbQuery(
       `SELECT * FROM shopit_chat_conversations

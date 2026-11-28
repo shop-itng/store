@@ -13,6 +13,20 @@ export function koboToNaira(kobo: number | string): number {
   return (Number.isFinite(num) ? num : 0) / 100;
 }
 
+export function isPaymentsActive(): boolean {
+  const envVal = String(process.env.PAYMENTS_ENABLED || '').toLowerCase();
+  if (envVal === 'false') return false;
+  if (envVal === 'true') return true;
+  return Boolean(process.env.PAYSTACK_SECRET_KEY && process.env.PAYSTACK_SECRET_KEY.trim().length > 0);
+}
+
+export function isPayoutsActive(): boolean {
+  const envVal = String(process.env.PAYOUTS_ENABLED || '').toLowerCase();
+  if (envVal === 'false') return false;
+  if (envVal === 'true') return true;
+  return Boolean(process.env.PAYSTACK_SECRET_KEY && process.env.PAYSTACK_SECRET_KEY.trim().length > 0);
+}
+
 /**
  * Tiered Shop It service fee in integer kobo (matches src/utils/pricing.ts):
  * - Under ₦2,000 (200,000 kobo) -> ₦200 (20,000 kobo)

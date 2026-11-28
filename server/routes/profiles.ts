@@ -173,12 +173,7 @@ async function computeComputedSellerStats(userRow: any, sellerRow: any, activePr
     dbQuery("SELECT COUNT(*) as total FROM shopit_follows WHERE following_id = $1 AND status = 'accepted'", [userRow.id]),
     dbQuery("SELECT COUNT(*) as total FROM shopit_follows WHERE follower_id = $1 AND status = 'accepted'", [userRow.id]),
     sellerRow
-      ? dbQuery(
-          `SELECT status, created_at, paid_at, shipped_at, items
-           FROM shopit_orders
-           WHERE items::text LIKE $1 OR items::text LIKE $2`,
-          [`%"sellerId":"${userRow.id}"%`, `%"sellerId":"${sellerRow.id}"%`]
-        )
+      ? dbQuery(`SELECT status, created_at, paid_at, shipped_at, items FROM shopit_orders`)
       : dbQuery(
           `SELECT status, created_at, paid_at, shipped_at, items
            FROM shopit_orders
@@ -187,14 +182,23 @@ async function computeComputedSellerStats(userRow: any, sellerRow: any, activePr
         ),
   ]);
 
+  const rawOrders = ordersRes.rows;
+  const filteredOrdersRows = sellerRow
+    ? rawOrders.filter((o: any) => {
+        const itemsList = parseJsonSafe<any[]>(o.items, []);
+        return itemsList.some((it: any) => it.sellerId === userRow.id || it.sellerId === sellerRow.id);
+      })
+    : rawOrders;
+  const ordersRowsToUse = { rows: filteredOrdersRows };
+
   const followersCount = parseInt(String(followersRes.rows[0]?.total || '0'), 10);
   const followingCount = parseInt(String(followingRes.rows[0]?.total || '0'), 10);
 
   const completedStatuses = new Set(['delivered', 'completed']);
-  const completedOrdersCount = ordersRes.rows.filter((o: any) => completedStatuses.has(String(o.status))).length;
+  const completedOrdersCount = ordersRowsToUse.rows.filter((o: any) => completedStatuses.has(String(o.status))).length;
 
   // Fast Shipper badge: >=1 shipped order with avg fulfillment <= 24h (calculated safely in JS without PG-specific EXTRACT syntax)
-  const shippedOrders = ordersRes.rows.filter((o: any) => Boolean(o.shipped_at));
+  const shippedOrders = ordersRowsToUse.rows.filter((o: any) => Boolean(o.shipped_at));
   let isFastShipper = false;
   if (shippedOrders.length >= 1) {
     const diffs = shippedOrders

@@ -79,6 +79,8 @@ import {
   processUnshippedOrders,
   runDailyReconciliationCheck,
   restoreOrderStockInTx,
+  isPaymentsActive,
+  isPayoutsActive,
 } from './lib/payments.js';
 import { validateAppSecret, deriveSubKey } from './lib/secrets.js';
 import { getKycProvider } from './lib/kycProvider.js';
@@ -370,8 +372,8 @@ router.get(['/health', '/api/health'], async (_req, res) => {
   const isRedisOk = redisPing.ok;
   const hasRedisConfig = Boolean(process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL);
   const paystackConfigured = Boolean(getPaystackSecretKey() && getPaystackPublicKey());
-  const paymentsEnabledFlag = String(process.env.PAYMENTS_ENABLED || '').toLowerCase() === 'true';
-  const payoutsEnabledFlag = String(process.env.PAYOUTS_ENABLED || '').toLowerCase() === 'true';
+  const paymentsEnabledFlag = isPaymentsActive();
+  const payoutsEnabledFlag = isPayoutsActive();
 
   const migrationError = pgPing.migrationError
     ? String(pgPing.migrationError).replace(/postgres(ql)?:\/\/[^\s]+/gi, '[redacted-url]').slice(0, 240)
@@ -430,8 +432,8 @@ router.get(['/health', '/api/health'], async (_req, res) => {
 router.get('/platform/config', async (_req, res) => {
   try {
     const config = await getAllPlatformConfig();
-    const paymentsEnabledFlag = String(process.env.PAYMENTS_ENABLED || '').toLowerCase() === 'true';
-    const payoutsEnabledFlag = String(process.env.PAYOUTS_ENABLED || '').toLowerCase() === 'true';
+    const paymentsEnabledFlag = isPaymentsActive();
+    const payoutsEnabledFlag = isPayoutsActive();
     return res.json({
       status: true,
       ...config,

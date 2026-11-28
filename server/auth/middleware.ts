@@ -1,5 +1,6 @@
 import type { Request, Response, NextFunction } from 'express';
 import { getSession, UserSession, SESSION_COOKIE_NAME, logAuditEvent } from './sessionStore.js';
+import { isPaymentsActive, isPayoutsActive } from '../lib/payments.js';
 
 export interface AuthenticatedRequest extends Request {
   user?: UserSession;
@@ -269,14 +270,14 @@ export function requireOwnershipOrAdmin(
 }
 
 /**
- * Safety switch middleware: returns HTTP 503 when PAYMENTS_ENABLED is not 'true'.
+ * Safety switch middleware: returns HTTP 503 when payments are not active.
  */
 export function requirePaymentsEnabled(
   _req: Request,
   res: Response,
   next: NextFunction
 ): any {
-  if (process.env.PAYMENTS_ENABLED !== 'true') {
+  if (!isPaymentsActive()) {
     return res.status(503).json({
       status: false,
       error: 'PAYMENTS_DISABLED',
@@ -287,14 +288,14 @@ export function requirePaymentsEnabled(
 }
 
 /**
- * Safety switch middleware: returns HTTP 503 when PAYOUTS_ENABLED is not 'true'.
+ * Safety switch middleware: returns HTTP 503 when payouts are not active.
  */
 export function requirePayoutsEnabled(
   _req: Request,
   res: Response,
   next: NextFunction
 ): any {
-  if (process.env.PAYOUTS_ENABLED !== 'true') {
+  if (!isPayoutsActive()) {
     return res.status(503).json({
       status: false,
       error: 'PAYOUTS_DISABLED',
